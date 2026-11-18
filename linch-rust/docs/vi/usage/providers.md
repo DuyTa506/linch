@@ -691,7 +691,11 @@ operator, 64 ký tự hex, giống nhau cho mọi run của tenant trên mọi s
 secret đó, và khác nhau giữa các tenant. Trong một tenant, cache vẫn như cũ; giữa các
 tenant, các tiền tố giống hệt nhau (ví dụ system prompt dùng chung) không còn trúng entry của
 nhau, nên một triển khai dựa vào việc chia sẻ chéo tenant đó sẽ mất nó. Vì vậy tính năng
-mặc định tắt. Agent trên provider không có trường như vậy bị từ chối (`NotAllowed`, `kind`
+mặc định tắt. Trường chỉ được gửi tới các adapter liệt kê ở trên, mỗi adapter được khai
+báo thủ công, không bao giờ thừa hưởng từ server tương thích OpenAI khác: `deepseek`,
+`sglang` và `llamacpp` không gửi gì. Một gateway sau `openai-chat` hoặc vLLM cũ hơn 0.9.0
+từ chối trường request lạ sẽ từ chối cả trường này: hãy để `allow.cache_isolation` tắt
+với tenant dùng chúng. Agent trên provider không có trường như vậy bị từ chối (`NotAllowed`, `kind`
 là `cache_isolation`) thay vì để dùng chung. Salt không nằm trong config, run contract,
 event hay log, và `request.extra_body` không thay được nó. Với run cục bộ
 (`AgentConfig.open`, stdio) không có tenant; hãy tự đặt `request.extra_body`

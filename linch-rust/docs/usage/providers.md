@@ -701,7 +701,12 @@ characters, the same for every run of the tenant on every server and worker
 that has the secret, and different for each tenant. Inside one tenant the
 cache is what it was; across tenants, identical prefixes (a shared system
 prompt, say) no longer hit each other's entries, so a deployment that relies on
-that cross-tenant sharing loses it. That is why it is off by default. An agent
+that cross-tenant sharing loses it. That is why it is off by default. The field
+goes only to the adapters listed above, each declared by hand, never inherited
+by another OpenAI-compatible server: `deepseek`, `sglang` and `llamacpp` send
+none. A gateway behind `openai-chat` or a vLLM older than 0.9.0 that rejects
+unknown request fields rejects this one: leave `allow.cache_isolation` off for
+a tenant that uses it. An agent
 on a provider with no field is refused (`NotAllowed`, `kind` `cache_isolation`)
 rather than left sharing. The salt is not part of the config, the run contract,
 an event or a log, and `request.extra_body` cannot replace it. On a local run
