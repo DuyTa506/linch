@@ -318,7 +318,7 @@ impl Server {
 
 /// What a run's stream yielded.
 pub(super) enum Next {
-    Item(Result<Envelope, RunError>),
+    Item(Result<Box<Envelope>, RunError>),
     End,
     /// The poll panicked.
     Panicked,
@@ -329,7 +329,7 @@ impl Next {
         match AssertUnwindSafe(stream.next()).catch_unwind().await {
             Err(_) => Self::Panicked,
             Ok(None) => Self::End,
-            Ok(Some(item)) => Self::Item(item),
+            Ok(Some(item)) => Self::Item(item.map(Box::new)),
         }
     }
 }
