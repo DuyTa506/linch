@@ -134,13 +134,16 @@ chậm gì cả.
 
 Khoảng trống đã biết: lời gọi tóm tắt ở đầu lượt gửi toàn bộ view, nên một ngưỡng vượt quá
 mức vừa cửa sổ (một `threshold_tokens` gần hoặc trên cửa sổ) khiến lời gọi đó bị từ chối.
-Lượt vẫn đi tiếp mà không compact, và chính lần từ chối của lời gọi chính sẽ ép bản tóm
-tắt theo dạng đã cắt (xem [Khôi phục theo độ dài ngữ cảnh](#context-length-recovery)),
-nên run không còn kết thúc `failed` vì chuyện này; nó vẫn tốn một request bị từ chối ở mỗi
-lượt đến hạn. Ngưỡng suy ra từ cửa sổ chừa một phần năm cửa sổ cho lời gọi đó. Một ngưỡng
-thấp hơn trọng lượng của các lượt được giữ và overhead của provider bị giữ sau hai bản tóm
-tắt, như ở trên. Trường hợp kích thước duy nhất còn kết thúc `failed` là prompt mà system
-prompt, tool và lượt cuối, sau khi cắt, vẫn vượt cửa sổ.
+Bản tóm tắt khi đó đi lại như một bản bắt buộc (chỉ phần đã gộp, đã cắt, mỗi lần từ chối
+giảm một nửa), không tiêu `max_forced`, nên lần từ chối đó không còn kết thúc run; nó vẫn
+tốn một request bị từ chối ở mỗi lượt đến hạn như vậy. Điều mà một ngưỡng bằng hoặc trên
+cửa sổ vẫn để mặc cho may rủi là một prompt chính bị từ chối (view lớn quá cửa sổ giữa hai
+lần đo), điều này ép một bản tóm tắt và tiêu `max_forced`: một run chỉ compact theo cách đó
+kết thúc `failed` ở lần thứ tư (`max_forced` mặc định 3), nên ngưỡng như vậy cần
+`max_forced` cao hơn. Ngưỡng suy ra từ cửa sổ chừa một phần năm cửa sổ cho lời gọi tóm tắt.
+Một ngưỡng thấp hơn trọng lượng của các lượt được giữ và overhead của provider bị giữ sau
+hai bản tóm tắt, như ở trên. Trường hợp kích thước tự nó kết thúc `failed` là prompt mà
+system prompt, tool và lượt cuối, sau khi cắt, vẫn vượt cửa sổ.
 
 `keep_from` là message assistant thứ `keep_recent_turns` tính từ cuối view. Phần được
 giữ bắt đầu từ message đó, nên một kết quả tool không bao giờ bị cắt rời khỏi lời gọi
@@ -377,6 +380,11 @@ một nửa, tối đa bốn delivery (`MAX_SUMMARY_TRIES`; mỗi cái được 
 mọi lời gọi provider, và chỉ tính một lần vào `max_forced`). Một request không thể cắt
 thêm thì không được gửi lại. Không có gì bị cắt cho bản tóm tắt ở đầu lượt: request của nó
 giữ nguyên các byte mà cache đang giữ (`tests/golden/compaction_proactive_request.json`).
+Khi provider từ chối request đầu đó vì quá dài, cùng chuỗi này áp dụng cho nó: một event
+`compaction` (không bắt buộc) ghi lại lần từ chối, và bản tóm tắt đi lại chỉ đọc phần đã
+gộp, đã cắt, với các ngân sách của một bản bắt buộc (nhiều hơn một request so với bản bắt
+buộc, vì request toàn view là lần từ chối đầu); nó không tiêu `max_forced`. Hết request thì
+lượt đi tiếp mà không compact.
 
 Một bản tóm tắt bắt buộc mà thất bại vì lý do khác, trả lời không có văn bản, bị từ chối,
 hoặc không tìm được chỗ để giữ sẽ kết thúc run qua `unshortened` (`runner/end.rs`): một
@@ -429,7 +437,8 @@ một câu trả lời vô dụng. Một lần cắt được đọc lại từ 
 | Checkpoint | Trạng thái tìm thấy | Run tiếp tục với |
 |---|---|---|
 | `CompactionPending` | Không có receipt cho delivery của bản tóm tắt | Một lời gọi tóm tắt khác, sau một receipt bị hủy cho lời gọi chưa kết thúc; một bản bắt buộc thì sau đó đi tiếp tới attempt chính của nó |
-| `CompactionPending` | Có một receipt, bản tóm tắt ở đầu lượt | Lời gọi chính ở attempt 1; lời gọi tóm tắt đã kết thúc mà không có bản tóm tắt |
+| `CompactionPending` | Có một receipt, bản tóm tắt ở đầu lượt bị từ chối vì quá dài (event `compaction` của nó đã bền), dưới 5 request | Một lời gọi tóm tắt khác trên phần đã gộp, đã cắt, rồi lượt đi tiếp như trước |
+| `CompactionPending` | Có một receipt, bất kỳ bản tóm tắt ở đầu lượt nào khác | Lời gọi chính ở attempt 1; lời gọi tóm tắt đã kết thúc mà không có bản tóm tắt |
 | `CompactionPending` | Có một receipt, bản tóm tắt bắt buộc bị từ chối vì quá dài (event `compaction` của nó đã bền), dưới 4 lần thử | Một lời gọi tóm tắt khác trên một nửa phần cũ, rồi attempt chính của nó |
 | `CompactionPending` | Có một receipt, bất kỳ bản tóm tắt bắt buộc nào khác, hoặc đã hết lần thử | Run kết thúc qua `unshortened` |
 | `Compacted` | Projection chưa có trong session | Nối nó, rồi lời gọi chính ở attempt kế tiếp của lượt |

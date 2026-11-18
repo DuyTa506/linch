@@ -250,6 +250,48 @@ fn a_forced_summary_refused_as_too_long_goes_again_until_its_tries_are_spent() {
     }
 }
 
+/// A summary at a turn's start that the provider refused as too long goes
+/// again on the folded part (one request more than a forced summary has,
+/// since its first request read the whole view), never to a primary call's
+/// next attempt; out of requests, the turn goes on as it does when a summary
+/// gives none.
+#[test]
+fn a_turn_start_summary_refused_as_too_long_goes_again() {
+    let log = session(LEN, None);
+    let mut events = vec![
+        summary_delivery(2, "c1"),
+        summary_receipt("c1", CallDisposition::Failed),
+    ];
+    let dispatch = Ok(Recovery::Redispatch {
+        attempt: 1,
+        abandoned: None,
+    });
+    let cp = checkpoint(Phase::CompactionPending { attempt: 1 });
+    assert_eq!(reconcile(&cp, &envelopes(events.clone()), &log), dispatch);
+    for n in 1..=5u32 {
+        let id = format!("c{n}");
+        if n > 1 {
+            events.push(summary_delivery(2, &id));
+            events.push(summary_receipt(&id, CallDisposition::Failed));
+        }
+        events.push(refusal());
+        let cp = checkpoint(Phase::CompactionPending { attempt: n });
+        let expected = match n {
+            5 => dispatch.clone(),
+            _ => Ok(Recovery::Recompact {
+                attempt: n + 1,
+                abandoned: None,
+                redispatch: None,
+            }),
+        };
+        assert_eq!(
+            reconcile(&cp, &envelopes(events.clone()), &log),
+            expected,
+            "{n}"
+        );
+    }
+}
+
 #[test]
 fn a_forced_summary_is_followed_by_the_next_primary_attempt() {
     let summary = Message::user_text("<summary>");

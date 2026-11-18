@@ -163,7 +163,7 @@ this order:
    themselves (a summary never folds that turn), it clips them in the view:
    head and tail stay around a marker `[... N bytes omitted ...]`, to half
    the window, then a quarter, an eighth and a sixteenth at each further
-   refusal of the turn. The session's log keeps the full result; only what
+   forced step of the turn. The session's log keeps the full result; only what
    the model sees is clipped (`strategy` `clip`).
 3. Else it makes a summary, keeping `keep_recent_turns` (or only the last
    turn, when that is what does not fit). Each one counts against
@@ -171,8 +171,10 @@ this order:
    way when it would not fit the window, and when the provider refuses that
    request as too long too, the run asks again on half as much, up to four
    requests (each a paid, logged call, with a `compaction` event whose
-   `rejected` starts `context_length`). A summary at a turn's start is never
-   clipped.
+   `rejected` starts `context_length`). The first request of a summary at a turn's
+   start is never clipped; when the provider refuses it as too long, the
+   summary goes again like a forced one (the older part only, clipped), without
+   spending `max_forced`.
 4. When none of these can shorten the view, the run ends.
 
 Each step is a `compaction` event with `forced` true. `clipped_bytes` says how

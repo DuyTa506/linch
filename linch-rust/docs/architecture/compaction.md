@@ -139,15 +139,19 @@ nothing.
 
 Known gap: a summary call at a turn's start sends the whole view, so a
 trigger above what fits the window (a `threshold_tokens` near or over it)
-meets a refusal of that call. The turn goes on uncompacted and the primary
-call's own refusal forces the summary in the clipped shape (see
-[Context-length recovery](#context-length-recovery)), so the run no longer ends
-`failed` for it; it does cost a refused request at each due turn. The
-window-derived trigger leaves a fifth of the window for that call. A trigger
-below what the kept turns and the provider's overhead weigh is held after two
-summaries, as above. The only size case that still ends `failed` is a
-prompt whose system prompt, tools and last turn, after clipping, exceed the
-window.
+meets a refusal of that call. The summary then goes again like a forced one
+(the folded part only, clipped, half as much at each refusal), without
+spending `max_forced`, so that refusal no longer ends a run; it does cost a
+refused request at each such due turn. What a trigger at or over the window
+still leaves to chance is a refused primary prompt (the view grew past the
+window between two measures), which forces a summary and spends
+`max_forced`: a run that compacts only that way ends `failed` at the fourth
+(default `max_forced` 3), so such a trigger wants a higher `max_forced`. The
+window-derived trigger leaves a fifth of the window for the summary call. A
+trigger below what the kept turns and the provider's overhead weigh is held
+after two summaries, as above. The only size case that ends `failed` by
+itself is a prompt whose system prompt, tools and last turn, after clipping,
+exceed the window.
 
 `keep_from` is the `keep_recent_turns`-th assistant message from the end of
 the view. The kept part starts at that message, so a tool result is never cut
@@ -400,8 +404,13 @@ durably with the receipt, and the next delivery reads half as much, up to
 four deliveries (`MAX_SUMMARY_TRIES`; each is paid and logged like any
 provider call, and counts once against `max_forced`). A request that cannot
 be cut further is not sent again. Nothing is clipped for a summary at a turn's
-start: its request stays the bytes the cache holds
-(`tests/golden/compaction_proactive_request.json`).
+start: its first request stays the bytes the cache holds
+(`tests/golden/compaction_proactive_request.json`). When the provider refuses
+that request as too long, the same chain applies to it: a `compaction` event
+(not forced) records the refusal, and the summary goes again reading only the
+folded part, clipped, with the budgets of a forced one (one more request than
+a forced summary has, since the whole-view request is the first refusal); it
+does not spend `max_forced`. Out of requests, the turn goes on uncompacted.
 
 A forced summary that fails for another reason, answers with no text, is
 rejected, or finds nothing to keep from ends the run through `unshortened`
@@ -462,7 +471,8 @@ again (the checkpoint's session length proves it unchanged).
 | Checkpoint | State found | The run continues with |
 |---|---|---|
 | `CompactionPending` | No receipt for the summary delivery | Another summary call, after a cancelled receipt for the unsettled one; a forced one then goes on to its primary attempt |
-| `CompactionPending` | A receipt, turn-start summary | The primary call at attempt 1; the summary call settled without a summary |
+| `CompactionPending` | A receipt, turn-start summary refused as too long (its `compaction` event is durable), fewer than 5 requests | Another summary call on the folded part, clipped, then the turn goes on as before |
+| `CompactionPending` | A receipt, any other turn-start summary | The primary call at attempt 1; the summary call settled without a summary |
 | `CompactionPending` | A receipt, forced summary refused as too long (its `compaction` event is durable), fewer than 4 tries | Another summary call on half as much of the older part, then its primary attempt |
 | `CompactionPending` | A receipt, any other forced summary, or the tries spent | The run ends through `unshortened` |
 | `Compacted` | Projection not in the session | Append it, then the primary call at the turn's next attempt |

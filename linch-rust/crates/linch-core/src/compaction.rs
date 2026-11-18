@@ -825,8 +825,8 @@ pub(crate) fn replacement(
 
 mod clip;
 pub(crate) use clip::{
-    CLIP_REASON, CLIP_STRATEGY, MAX_SUMMARY_TRIES, SIZE_REFUSED, Scope, clip, clip_from,
-    folded_budget, last_turn_budget,
+    CLIP_REASON, CLIP_STRATEGY, SIZE_REFUSED, Scope, clip, clip_from, folded_budget,
+    last_turn_budget, summary_requests,
 };
 
 #[cfg(test)]

@@ -22,12 +22,20 @@ use crate::message::{ContentBlock, Message, ToolResultPart};
 
 use super::estimate_tokens;
 
-/// Requests of one forced summary: it goes again after a refusal as too long,
-/// on half the folded part, until the fourth is refused.
-pub(crate) const MAX_SUMMARY_TRIES: u32 = 4;
+/// Refusals as too long a summary survives: its request goes again on half
+/// the folded part until the fourth refusal of one that reads it.
+const MAX_SUMMARY_TRIES: u32 = 4;
 
-/// Refusals of one turn's primary call that a clip of the last turn answers,
-/// each against half the budget the one before it used.
+/// How many of a summary's requests the provider may refuse as too long
+/// before it is out of requests: a forced summary reads the folded part from
+/// its first request, a turn-start one reads the whole view first, and that
+/// refusal does not count against the folded part's.
+pub(crate) fn summary_requests(forced: bool) -> u32 {
+    MAX_SUMMARY_TRIES + u32::from(!forced)
+}
+
+/// Forced steps of one turn that a clip of the last turn may follow, each
+/// against half the budget the one before it used.
 pub(crate) const MAX_CLIP_ROUNDS: u32 = 3;
 
 /// Strategy name of a clip in the `compaction` event.

@@ -159,14 +159,15 @@ Với `spec.compaction` được đặt, run rút ngắn view của nó và gọ
 2. Nếu không, khi lượt cuối có kết quả tool tự nó đã quá lớn so với cửa sổ (một bản tóm
    tắt không bao giờ gộp lượt đó), nó cắt chúng trong view: giữ đầu và đuôi quanh một
    dấu `[... N bytes omitted ...]`, xuống một nửa cửa sổ, rồi một phần tư, một phần tám và
-   một phần mười sáu ở mỗi lần từ chối tiếp theo của lượt. Log của session giữ nguyên kết
+   một phần mười sáu ở mỗi bước bắt buộc tiếp theo của lượt. Log của session giữ nguyên kết
    quả đầy đủ; chỉ những gì model thấy bị cắt (`strategy` là `clip`).
 3. Nếu không, nó tạo một bản tóm tắt, giữ `keep_recent_turns` (hoặc chỉ lượt cuối, khi
    đó chính là thứ không vừa). Mỗi bản tính vào `max_forced`. Request tóm tắt đọc phần cũ
    đã cắt theo cách tương tự khi nó không vừa cửa sổ, và khi provider cũng từ chối request
    đó vì quá dài, run hỏi lại với một nửa lượng đó, tối đa bốn request (mỗi cái là một lời
    gọi được trả tiền và ghi log, với một event `compaction` có `rejected` bắt đầu bằng
-   `context_length`). Bản tóm tắt ở đầu lượt không bao giờ bị cắt.
+   `context_length`). Request đầu của bản tóm tắt ở đầu lượt không bao giờ bị cắt; khi provider từ chối nó vì quá
+   dài, bản tóm tắt đi lại như một bản bắt buộc (chỉ phần cũ, đã cắt), không tiêu `max_forced`.
 4. Khi không bước nào rút ngắn được view, run kết thúc.
 
 Mỗi bước là một event `compaction` với `forced` là true. `clipped_bytes` cho biết một lần

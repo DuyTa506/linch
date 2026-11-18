@@ -97,7 +97,7 @@ pub enum Recovery {
     /// `CompactionPending` without a receipt: write `abandoned`, then
     /// dispatch summary `attempt`. Also a forced summary the provider refused
     /// as too long, with tries left (the `compaction` event that says so is
-    /// durable with its receipt): `abandoned` is `None` and the new delivery
+    /// durable with its receipt): `abandoned` is `None` and the next delivery
     /// reads less of the older part.
     Recompact {
         /// The new delivery attempt number.
@@ -283,14 +283,15 @@ pub fn reconcile(
             // the summary request that was refused as too long: that goes
             // again on less of the older part while it has tries left.
             if receipt {
+                let limit = crate::compaction::summary_requests(forced.latest_forced);
+                if forced.refused && forced.refusals < limit {
+                    return Ok(Recovery::Recompact {
+                        attempt: attempt + 1,
+                        abandoned: None,
+                        redispatch: forced.latest_forced.then_some(forced.primary_calls + 1),
+                    });
+                }
                 if forced.latest_forced {
-                    if forced.refused && forced.refusals < crate::compaction::MAX_SUMMARY_TRIES {
-                        return Ok(Recovery::Recompact {
-                            attempt: attempt + 1,
-                            abandoned: None,
-                            redispatch: Some(forced.primary_calls + 1),
-                        });
-                    }
                     return Ok(Recovery::Unshortened);
                 }
                 return Ok(Recovery::Redispatch {

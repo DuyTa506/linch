@@ -601,52 +601,87 @@ async fn a_giant_result_in_the_kept_turn_is_clipped_in_the_view() {
 /// as they would with none.
 #[tokio::test]
 async fn retries_before_a_refusal_do_not_shrink_the_clip() {
-    let world = World {
+    // The sizes of the clips of a run: half the window, then a quarter.
+    async fn clips(world: World) -> (RunStatus, Vec<(u64, u64)>, String) {
+        let stores = Arc::new(Stores::default());
+        let provider = provider(world);
+        let agent = agent_on(provider.clone(), window_trigger(), stores.clone());
+        let (_, status, events) = run(&agent, &stores).await;
+        let stats = stats_of(status, &provider.seen.lock().unwrap(), &events);
+        assert_eq!(provider.seen.lock().unwrap().busy_sent, world.busy);
+        let sizes = (events.iter())
+            .filter_map(|e| match &e.event {
+                Event::Compaction(c) if c.strategy == "clip" => {
+                    Some((c.tokens_before, c.tokens_after))
+                }
+                _ => None,
+            })
+            .collect();
+        (status, sizes, stats)
+    }
+    let (_, quiet, _) = clips(KEPT_GIANT).await;
+    let (status, busy, stats) = clips(World {
         busy: 4,
         ..KEPT_GIANT
-    };
-    let stores = Arc::new(Stores::default());
-    let provider = provider(world);
-    let agent = agent_on(provider.clone(), window_trigger(), stores.clone());
-    let (_, status, events) = run(&agent, &stores).await;
-    let stats = stats_of(status, &provider.seen.lock().unwrap(), &events);
+    })
+    .await;
     eprintln!("{stats}");
     assert_eq!(status, RunStatus::Completed, "{stats}");
-    assert_eq!(provider.seen.lock().unwrap().busy_sent, 4, "{stats}");
-    let sizes: Vec<(u64, u64)> = (events.iter())
-        .filter_map(|e| match &e.event {
-            Event::Compaction(c) if c.strategy == "clip" => Some((c.tokens_before, c.tokens_after)),
-            _ => None,
-        })
-        .collect();
-    // The first clip is to half the window, the second to a quarter: the
-    // same two the run makes with no retries.
-    assert_eq!(sizes.len(), 2, "{stats}");
-    assert_eq!(sizes[0], (5634, 4622), "{stats}");
-    assert_eq!(sizes[1].0, 4622, "{stats}");
+    assert_eq!(quiet.len(), 2, "{quiet:?}");
+    assert_eq!(busy, quiet, "{stats}");
 }
 
-/// A trigger at the window can never be reached by a view the provider
-/// accepts: the refused prompt forces the summary, which is clipped to fit
-/// like any forced one.
+/// A trigger at the window: a view due for a summary has a prompt over the
+/// window, so the turn-start summary of the whole view is refused. It goes
+/// again like a forced one, on the folded part clipped, without spending
+/// `max_forced`; the run ends `success` however long it is. (A refused
+/// primary prompt, which a trigger this high leaves to chance, does spend
+/// `max_forced`: it is raised here so that bound is not what this reads.)
+fn at_the_window() -> CompactionSpec {
+    CompactionSpec {
+        keep_recent_turns: 1,
+        max_forced: 100,
+        ..CompactionSpec::new(WINDOW)
+    }
+}
+
 #[tokio::test]
 async fn a_trigger_at_the_window_falls_through_to_the_forced_shape() {
     let world = World {
-        turns: 14,
+        turns: 60,
         ..UNDERCOUNTED
     };
     let stores = Arc::new(Stores::default());
     let provider = provider(world);
-    let compaction = CompactionSpec {
-        keep_recent_turns: 1,
-        ..CompactionSpec::new(WINDOW)
-    };
-    let agent = agent_on(provider.clone(), compaction, stores.clone());
+    let agent = agent_on(provider.clone(), at_the_window(), stores.clone());
     let (_, status, events) = run(&agent, &stores).await;
-    let seen = provider.seen.lock().unwrap();
-    let stats = stats_of(status, &seen, &events);
+    let stats = stats_of(status, &provider.seen.lock().unwrap(), &events);
     eprintln!("{stats}");
     assert_eq!(status, RunStatus::Completed, "{stats}");
+    // At a turn's start, not forced: the refusal of the whole view, then the
+    // clipped folded part.
+    let at_start = (events.iter())
+        .filter_map(|e| match &e.event {
+            Event::Compaction(c) if !c.forced => Some((c.rejected.is_some(), c.clipped_bytes)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(at_start.iter().any(|(rejected, _)| *rejected), "{stats}");
+    assert!(
+        at_start
+            .iter()
+            .any(|(rejected, bytes)| !rejected && bytes.is_some()),
+        "{stats}"
+    );
+}
+
+#[tokio::test]
+async fn a_crash_at_any_write_of_a_refused_turn_start_summary_recovers() {
+    let world = World {
+        turns: 30,
+        ..UNDERCOUNTED
+    };
+    crash_everywhere(world, at_the_window(), RunStatus::Completed).await;
 }
 
 /// What nothing shortens ends the run with one message that says what
@@ -759,15 +794,18 @@ async fn crash_everywhere(world: World, compaction: CompactionSpec, want: RunSta
                 let message = error["message"].as_str().unwrap();
                 assert!(message.contains("nothing is left to shorten"), "{context}");
             }
-            // A summary request refused at every size is made four times, and
-            // once more when a crash left a delivery unsettled.
+            // A summary request refused at every size (a run that ends so) is
+            // made four times, and once more when a crash left a delivery
+            // unsettled.
             let deliveries = (events.iter())
                 .filter(|e| match &e.event {
                     Event::ModelCallDelivery(d) => d.kind == ModelCallKind::Compaction,
                     _ => false,
                 })
                 .count();
-            assert!(deliveries <= 5, "{context}: {deliveries} summary requests");
+            if want == RunStatus::Failed {
+                assert!(deliveries <= 5, "{context}: {deliveries} summary requests");
+            }
             let mut ids = HashSet::new();
             let mut paid = HashMap::<String, u32>::new();
             for envelope in &events {
