@@ -69,11 +69,14 @@ message đã gấp lại, tối đa `keep_user_tokens`
 ([Kiến trúc](../architecture/compaction.md#lời-gọi-tóm-tắt)).
 
 Một bản tóm tắt mà model trả về dưới dạng một lời gọi tool, không có gì, hoặc một văn bản
-không nhỏ hơn phần nó thay thế (đo trên toàn bộ checkpoint, gồm cả các message nguyên văn và
+để lại một view không nhỏ hơn view hiện tại (ước lượng trước và sau mà event báo, với toàn bộ checkpoint, gồm cả các message nguyên văn và
 reminder) bị từ chối: view giữ nguyên và một event `compaction` có `rejected` nói lý do. Sau
 hai lần từ chối liên tiếp, run thôi hỏi ở mọi lượt đến hạn: nó hỏi lại khi view đã lớn thêm
 một phần mười context window, hoặc khi provider từ chối prompt (bản tóm tắt bắt buộc không
-bao giờ bị giữ); một bản tóm tắt được chấp nhận xóa bộ đếm
+bao giờ bị giữ); một bản tóm tắt để view dưới ngưỡng xóa bộ đếm. Một bản tóm tắt được áp dụng
+nhưng để view vẫn trên ngưỡng (một `threshold_tokens` thấp hơn trọng lượng của checkpoint cộng
+các lượt được giữ, nên lượt nào cũng đến hạn lại) được tính như một lần từ chối, nên một
+ngưỡng quá thấp không mua một bản tóm tắt ở mọi lượt
 ([Kiến trúc](../architecture/compaction.md#lời-gọi-tóm-tắt)).
 
 Spec compaction là một phần của [run contract](./agent.md#the-run-contract): một run bắt

@@ -321,11 +321,12 @@ View mà model nhìn thấy đã được rút ngắn
 phép chiếu), và `forced`, là true khi nguyên nhân là provider từ chối một prompt vì quá
 dài ([Memory](./memory.md#when-the-prompt-does-not-fit)). `rejected` được đặt khi bản
 tóm tắt không được áp dụng và view không đổi (các số đếm bằng nhau). Nó bắt đầu bằng một
-mã, `tool_call` (câu trả lời gọi một tool), `empty`, hoặc `not_smaller` (không nhỏ hơn phần
-nó sẽ thay thế), rồi nói điều xảy ra tiếp theo: ở đầu một lượt run tiếp tục và lượt đến hạn
+mã, `tool_call` (câu trả lời gọi một tool), `empty`, hoặc `not_smaller` (view nó để lại được ước lượng không nhỏ hơn
+view hiện tại), rồi nói điều xảy ra tiếp theo: ở đầu một lượt run tiếp tục và lượt đến hạn
 kế tiếp hỏi lại (từ lần từ chối thứ hai liên tiếp: khi view đã lớn thêm một phần mười
 context window hoặc provider từ chối prompt); một bản tóm tắt bắt buộc thì kết thúc run.
-`not_smaller` được xét trên toàn bộ checkpoint, không phải văn bản của model.
+Một bản tóm tắt được áp dụng không có `rejected`, kể cả khi `tokens_after` của nó vẫn bằng hoặc trên
+ngưỡng: hai bản như vậy liên tiếp giữ các lần hỏi sau như các lần từ chối ([Memory](./memory.md#compaction)). `not_smaller` được xét trên toàn bộ view có checkpoint trong đó (chính `tokens_before` và `tokens_after` mà event báo), không phải văn bản của model, nên một lần nén được chấp nhận luôn có `tokens_after < tokens_before`.
 
 ### `LoopGuardEvent` (`loop_guard`)
 

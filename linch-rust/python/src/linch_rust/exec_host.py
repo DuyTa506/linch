@@ -41,6 +41,11 @@ _DRAIN_TIMEOUT = 1.0
 # How long a live command may go without a read before the host kills it: the
 # server polls every second, so only a gone or stuck server stops reading.
 _IDLE_TIMEOUT = 120.0
+# What a command's watchdog runs (the same as the server's `Bash` and MCP
+# lifelines): `read` fails at end of file, when the write end of its stdin is
+# closed without a line, and the command's group `$1` is then killed. A line
+# means the command ended on its own, and the watchdog leaves the group alone.
+_LIFELINE = 'read -r _ || kill -s KILL -- "-$1"'
 # The host's own identity variables: the server's are not sent.
 _HOST_ENV = ("PATH", "HOME", "USER", "SHELL", "TMPDIR")
 
@@ -150,8 +155,10 @@ class SubprocessHost:
     command, or its shell exiting, kills the group. Closing an agent (or
     the connection ending) kills its commands, so nothing outlives the
     server that asked for it; so does a command nobody reads for
-    `idle_timeout` seconds. At most 4 MiB of each stream wait for a read: past
-    that the command blocks on its pipe until the server reads.
+    `idle_timeout` seconds. Each command also has a watchdog process that
+    kills its group when this process dies, even by `SIGKILL`, so no command
+    outlives the client either. At most 4 MiB of each stream wait for a read:
+    past that the command blocks on its pipe until the server reads.
 
     A command runs as this process's user, so it can read this process's
     environment through `/proc/<pid>/environ`: keep secrets out of it.
@@ -195,8 +202,15 @@ class SubprocessHost:
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
         )
+        try:
+            lifeline = await _start_lifeline(proc.pid)
+        except BaseException:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            await proc.wait()
+            raise
         key = (request.agent, request.exec_id)
-        command = _Command(proc)
+        command = _Command(proc, lifeline)
         self._commands[key] = command
         command.deadman = asyncio.create_task(self._deadman(key, command))
 
@@ -270,6 +284,7 @@ class _Command:
     """One running command: its pipes pumped into buffers, and how it ended."""
 
     proc: asyncio.subprocess.Process
+    lifeline: asyncio.subprocess.Process | None = None
     out: bytearray = field(default_factory=bytearray)
     err: bytearray = field(default_factory=bytearray)
     changed: asyncio.Event = field(default_factory=asyncio.Event)
@@ -323,6 +338,7 @@ class _Command:
         code = await self.proc.wait()
         # What the shell left running goes with it, which also closes the pipes.
         self.kill_now()
+        await self._release_lifeline()
         # A pump that waits for room has more to read: it is not slow, the
         # server is, so the exit waits for it.
         while True:
@@ -331,6 +347,21 @@ class _Command:
                 break
         self.exit = {"signal": -code} if code < 0 else {"code": code}
         self.changed.set()
+
+    async def _release_lifeline(self) -> None:
+        """Tell the watchdog the command ended, so it leaves the group alone."""
+        lifeline = self.lifeline
+        if lifeline is None or lifeline.stdin is None:
+            return
+        with contextlib.suppress(OSError):
+            lifeline.stdin.write(b"\n")
+            lifeline.stdin.close()
+        try:
+            await asyncio.wait_for(lifeline.wait(), _DRAIN_TIMEOUT)
+        except TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
+                lifeline.kill()
+            await lifeline.wait()
 
     def ready(self) -> bool:
         """Whether a read has something to take now."""
@@ -379,3 +410,25 @@ class _Command:
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(asyncio.shield(self.finished), _REAP_TIMEOUT)
         return self.take_tail(_KILL_LIMIT)
+
+
+async def _start_lifeline(group: int) -> asyncio.subprocess.Process:
+    """Start the watchdog that kills process group `group` when this process dies.
+
+    Its stdin is a pipe whose write end only this process holds, so the
+    kernel closing it on exit is the signal. It runs only shell builtins, so
+    it works whatever the `PATH`, and stands in a session of its own, outside
+    the group it watches.
+    """
+    return await asyncio.create_subprocess_exec(
+        "/bin/sh",
+        "-c",
+        _LIFELINE,
+        "linch-exec",
+        str(group),
+        env={},
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+        start_new_session=True,
+    )

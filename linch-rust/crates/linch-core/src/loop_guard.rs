@@ -12,7 +12,10 @@
 //!   result differs from every earlier identical call's made progress (a
 //!   file read again after an edit) and starts a count of its own; one
 //!   repeated only after many other calls (a `git status` now and then in a
-//!   long run) is not a loop, which is why the count has a window. An
+//!   long run) is not a loop, which is why the count has a window. A write
+//!   or exec call that succeeds with a new input (see the next check) also
+//!   clears the count of every other call's results: a test run that prints
+//!   the same failure after each of ten different patches is no repeat. An
 //!   error result is never a repeat: Linch itself asks the model to repeat
 //!   some refused calls (a deferred tool: "call tool_search ... first"), and
 //!   calls that keep failing are the failure streak's. The result is
@@ -27,7 +30,7 @@
 //!   input not seen among the latest [`INPUT_WINDOW`] write or exec calls
 //!   that succeeded (a new edit) changed the world, so the calls asked
 //!   before it are new questions now and it clears the count of every other
-//!   call: a test run between edits, or a file read again after an edit, is
+//!   call, identical inputs and same results alike: a test run between edits, or a file read again after an edit, is
 //!   never a repeat. A write or exec call that repeats an input of that
 //!   window clears nothing, so the same call (or a cycle of calls) run again
 //!   and again with no new edit between still counts, and so does a
@@ -111,8 +114,9 @@ fn is_default_max_identical_inputs(limit: &u32) -> bool {
 pub struct LoopGuard {
     /// Calls of one tool with the same input and the same result, not an
     /// error, among the last 20 tool results, that end the run (default 3);
-    /// the one that reaches it runs first. A running poll never counts. 0
-    /// never counts.
+    /// the one that reaches it runs first. A running poll never counts, and
+    /// a write or exec call that succeeds with a new input clears the count
+    /// of the other calls. 0 never counts.
     #[serde(default = "default_max_identical_tool_calls")]
     pub max_identical_tool_calls: u32,
     /// Calls of one tool with the same input, whatever the result, among the
@@ -205,14 +209,15 @@ impl Recent {
 }
 
 impl Recent {
-    /// Forget every slot that is not `key`, which keeps its count.
-    fn keep_only(&mut self, key: [u8; 32]) {
+    /// Forget every slot that is not `key`, which keeps its count; without a
+    /// `key`, every slot.
+    fn keep_only(&mut self, key: Option<[u8; 32]>) {
         for slot in &mut self.order {
-            if slot.is_some_and(|slot| slot != key) {
+            if slot.is_some() && *slot != key {
                 *slot = None;
             }
         }
-        self.counts.retain(|counted, _| *counted == key);
+        self.counts.retain(|counted, _| Some(*counted) == key);
     }
 }
 
@@ -389,11 +394,20 @@ impl Watch {
         let content = result_content(call, result);
         let tool = &call.tool;
 
+        // The same call and result: not an error's, nor a running poll's.
+        let repeatable = !result.is_error && (!polling || settled);
+        let key = content
+            .as_ref()
+            .filter(|_| repeatable)
+            .map(|content| digest(&[call.key.as_bytes(), content.as_bytes()]));
+
         // A write or exec call that succeeded with a new input changed
-        // state, so every other call asked before it is a new question now.
-        // One repeated is no change: run again and again it is the loop.
+        // state, so every other call asked before it, and what it answered,
+        // is a new question now. One repeated is no change: run again and
+        // again it is the loop.
         if !result.is_error && self.writes.contains(tool) && self.mutations.push(Some(input)) == 1 {
-            self.inputs.keep_only(input);
+            self.inputs.keep_only(Some(input));
+            self.results.keep_only(key);
         }
 
         // The same call, whatever the result: not a poll's.
@@ -406,12 +420,6 @@ impl Watch {
             });
         }
 
-        // The same call and result: not an error's, nor a running poll's.
-        let repeatable = !result.is_error && (!polling || settled);
-        let key = content
-            .as_ref()
-            .filter(|_| repeatable)
-            .map(|content| digest(&[call.key.as_bytes(), content.as_bytes()]));
         let seen = self.results.push(key);
         let limit = self.guard.max_identical_tool_calls;
         if limit != 0 && seen >= limit && self.repeated.is_none() {

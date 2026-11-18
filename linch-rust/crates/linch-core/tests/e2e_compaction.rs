@@ -786,6 +786,94 @@ async fn a_crash_does_not_lift_the_hold_on_a_rejected_summary() {
     }
 }
 
+/// An agent whose trigger is a tenth of what one turn weighs, so the view
+/// after a compaction (the checkpoint and the kept turn) is still due.
+fn tiny_trigger_agent<S: RunStore + SessionStore + 'static>(
+    provider: Arc<Keyed>,
+    runs: &Runs,
+    stores: Arc<S>,
+) -> Agent {
+    let mut spec = spec();
+    spec.compaction = Some(CompactionSpec {
+        keep_recent_turns: 1,
+        ..CompactionSpec::new(100)
+    });
+    let tools = registry(vec![Echo::new("Read", ToolScope::Read, runs)]);
+    agent_with(
+        spec,
+        provider,
+        tools,
+        policy(PermissionMode::SkipDangerous),
+        stores,
+    )
+}
+
+fn summary_calls(provider: &Keyed) -> u32 {
+    (provider.calls.lock().unwrap().iter())
+        .filter(|(key, _)| key.starts_with("summary"))
+        .map(|(_, n)| n)
+        .sum()
+}
+
+/// A summary that is accepted yet leaves the view above the trigger is as
+/// useless as a rejected one: the next turn is due again and pays for the
+/// same summary. Twelve turns must not buy twelve of them.
+#[tokio::test]
+async fn a_compaction_that_leaves_the_view_over_the_trigger_is_not_bought_every_turn() {
+    let stores = Arc::new(Stores::default());
+    let provider = Arc::new(Keyed {
+        turns: big_script(12),
+        ..Keyed::answering()
+    });
+    let agent = tiny_trigger_agent(provider.clone(), &Runs::default(), stores.clone());
+    let stream = agent.run("go", RunOptions::new("s1"));
+    let run_id = stream.run_id().clone();
+    let envelopes = finish(stream).await;
+    assert_eq!(status(&stores, &run_id).await, RunStatus::Completed);
+    let accepted = (envelopes.iter())
+        .filter(|e| matches!(&e.event, Event::Compaction(c) if c.rejected.is_none()))
+        .count();
+    let calls = summary_calls(&provider);
+    assert!(calls <= 3, "{calls} summary calls in 12 turns");
+    assert!(accepted <= 3, "{accepted} accepted compactions in 12 turns");
+}
+
+/// The hold on ineffective summaries is read back from the durable events,
+/// as the rejections' is: a crash at any write, then a resume, does not go
+/// back to a summary at every due turn.
+#[tokio::test]
+async fn a_crash_does_not_lift_the_hold_on_ineffective_summaries() {
+    let script = || {
+        Arc::new(Keyed {
+            turns: big_script(10),
+            ..Keyed::answering()
+        })
+    };
+    let clean = Arc::new(Stores::default());
+    let agent = tiny_trigger_agent(script(), &Runs::default(), clean.clone());
+    finish(agent.run("go", RunOptions::new("s1"))).await;
+    let writes = clean.log.lock().unwrap().len() as u64;
+    for n in 1..=writes {
+        for timing in [FaultTiming::Before, FaultTiming::After] {
+            let context = format!("write {n} failing {timing:?}");
+            let stores = Arc::new(Stores::default());
+            let provider = script();
+            let runs = Runs::default();
+            let faulty = Arc::new(Faulty::new(stores.clone(), n, timing));
+            let stream = tiny_trigger_agent(provider.clone(), &runs, faulty)
+                .run("go", RunOptions::new("s1"));
+            let run_id = stream.run_id().clone();
+            assert!(drain(stream).await.1.is_some(), "{context}");
+            let resumed = tiny_trigger_agent(provider.clone(), &runs, stores.clone());
+            let run_id = recover(&resumed, &stores, run_id).await;
+            assert_eq!(status(&stores, &run_id).await, RunStatus::Completed);
+            // Two summaries, and one more when the crash lost an answer.
+            let calls = summary_calls(&provider);
+            assert!(calls <= 3, "{context}: {calls} summary calls");
+        }
+    }
+}
+
 async fn status(stores: &Stores, run_id: &RunId) -> RunStatus {
     stores.runs.load(NS, run_id).await.unwrap().status
 }

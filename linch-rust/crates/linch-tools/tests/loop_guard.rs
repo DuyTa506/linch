@@ -253,6 +253,43 @@ async fn a_read_after_an_edit_is_progress_and_an_unchanged_read_is_not() {
     assert_eq!(guards, ["repeated_tool_call"]);
 }
 
+/// A fix-and-test loop whose test prints the same failure after every patch:
+/// each patch is a different edit, so the identical results are no repeat;
+/// the same runs with no patch between are, at the third.
+#[tokio::test]
+async fn identical_test_results_between_patches_are_not_a_loop() {
+    let workspace = Workspace::new();
+    workspace.put("a.txt", "v0\n");
+    let path = workspace.root().join("a.txt").display().to_string();
+    let tools = || -> Vec<Arc<dyn Tool>> {
+        let (fs, reads) = (workspace.fs.clone(), workspace.reads.clone());
+        vec![
+            Arc::new(Read::new(fs.clone(), reads.clone())),
+            Arc::new(Edit::new(fs, reads)),
+            Arc::new(Bash::new(workspace.root())),
+        ]
+    };
+    let test = json!({"command": "echo '3 tests failing'"});
+
+    let mut turns = vec![call(0, "Read", json!({"file_path": path}))];
+    for n in 0..10 {
+        let (old, new) = (format!("v{n}"), format!("v{}", n + 1));
+        let patch = json!({"file_path": path, "old_string": old, "new_string": new});
+        turns.push(call(2 * n + 1, "Edit", patch));
+        turns.push(call(2 * n + 2, "Bash", test.clone()));
+    }
+    let (status, ends, guards) = run(agent(script(turns), tools())).await;
+    assert_eq!(status, "success", "{guards:?}");
+    assert_eq!(ends.iter().filter(|name| *name == "Bash").count(), 10);
+    assert!(guards.is_empty(), "{guards:?}");
+
+    let turns = (0..10).map(|n| call(n, "Bash", test.clone())).collect();
+    let (status, ends, guards) = run(agent(script(turns), tools())).await;
+    assert_eq!(status, "error");
+    assert_eq!(ends, ["Bash"; 3]);
+    assert_eq!(guards, ["repeated_tool_call"]);
+}
+
 /// Schedules that never change.
 struct Fixed;
 

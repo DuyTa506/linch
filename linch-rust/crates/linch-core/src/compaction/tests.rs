@@ -220,6 +220,27 @@ fn the_summary_instruction_guards_against_the_conversation_and_updates_an_earlie
     assert!(!is_summary(&quoted));
 }
 
+/// [`rejection`] for a `made` checkpoint of `folded`, in a view whose other
+/// messages are empty: the whole-view measure then equals the part's.
+fn rejected(
+    called: bool,
+    text: &str,
+    made: &Message,
+    folded: &[Arc<Message>],
+) -> Option<&'static str> {
+    let first = Arc::new(Message::user_text(""));
+    let view: Vec<_> = std::iter::once(first)
+        .chain(folded.iter().cloned())
+        .collect();
+    let compacted = replacement(&view, made.clone(), view.len());
+    rejection(
+        called,
+        text,
+        estimate_tokens(&view),
+        estimate_tokens(&compacted),
+    )
+}
+
 #[test]
 fn a_reply_is_rejected_for_a_tool_call_no_text_or_no_saving() {
     let folded = view(2);
@@ -229,7 +250,7 @@ fn a_reply_is_rejected_for_a_tool_call_no_text_or_no_saving() {
     let sized = |chars: usize| "x".repeat(chars);
     let check = |called, text: &str| {
         let made = checkpoint(text, folded, 0, Vec::new());
-        rejection(called, text, &made, folded)
+        rejected(called, text, &made, folded)
     };
     // The whole checkpoint is measured, header included.
     let header = SUMMARY_HEADER.len();
@@ -417,13 +438,13 @@ fn an_accepted_checkpoint_is_smaller_than_the_part_it_replaces() {
     // header is counted: the whole checkpoint is what is measured.
     let long = "s".repeat(before as usize * 4 - 8);
     let made = checkpoint(&long, &folded, 15_000, Vec::new());
-    assert_eq!(rejection(false, &long, &made, &folded), Some("not_smaller"));
+    assert_eq!(rejected(false, &long, &made, &folded), Some("not_smaller"));
     // Whatever the summary, an accepted checkpoint is smaller.
     for chars in [100, 1000, 2000, 3000, 4000, 4300] {
         let text = "s".repeat(chars);
         let made = checkpoint(&text, &folded, 15_000, Vec::new());
         let after = size_of(made.clone());
-        match rejection(false, &text, &made, &folded) {
+        match rejected(false, &text, &made, &folded) {
             None => assert!(after < before, "{chars}: {after} tokens for {before}"),
             Some(why) => assert_eq!(why, "not_smaller", "{chars}"),
         }
@@ -431,6 +452,59 @@ fn an_accepted_checkpoint_is_smaller_than_the_part_it_replaces() {
     // A summary that leaves room still carries the user messages.
     let roomy = checkpoint(&"s".repeat(1000), &folded, 15_000, Vec::new());
     assert!(roomy.content.len() > 1);
+}
+
+/// The `compaction` event reports the estimate of the whole view before and
+/// after, and the check uses those two numbers. A checkpoint one character
+/// under the part it replaces is a whole token smaller on its own, yet the
+/// view around it (the first message and the kept turns) can round to the
+/// same estimate: that is no saving, and the event must not say
+/// `tokens_after == tokens_before` for an accepted compaction.
+#[test]
+fn an_accepted_checkpoint_shrinks_the_view_by_the_measure_the_event_reports() {
+    let text = |chars: usize| Message::user_text("x".repeat(chars));
+    let first = Arc::new(Message::user_text("a"));
+    let view = vec![first, Arc::new(text(40)), Arc::new(text(2))];
+    let before = estimate_tokens(&view);
+    assert_eq!(before, 10);
+    for chars in 30..=39 {
+        let compacted = replacement(&view, text(chars), 2);
+        let after = estimate_tokens(&compacted);
+        // 37 chars and up leave the view at 10 tokens, though the
+        // checkpoint alone is a token smaller than the 40 it replaces.
+        let expected = (chars >= 37).then_some("not_smaller");
+        assert_eq!(
+            rejection(false, "summary", before, after),
+            expected,
+            "{chars}"
+        );
+    }
+}
+
+/// The builder fills the room a summary leaves with the user's words, so the
+/// checkpoint can be as big as the fit allows. Whatever the messages around
+/// it add, the view it leaves must then still be smaller by the estimate:
+/// the harness's own padding must not make [`rejection`] discard a paid summary.
+#[test]
+fn a_checkpoint_filled_to_the_fit_still_shrinks_the_view() {
+    for around in 0..8 {
+        for chars in 400..420 {
+            let folded = vec![Arc::new(Message::user_text("u".repeat(chars)))];
+            let replaced = estimate_tokens(&folded) as usize;
+            // A summary that takes half the part: the verbatim blocks fill the rest.
+            let text = "s".repeat(replaced * 2);
+            let made = checkpoint(&text, &folded, 15_000, Vec::new());
+            let first = Arc::new(Message::user_text("a".repeat(around)));
+            let view = vec![first, folded[0].clone(), Arc::new(Message::user_text("k"))];
+            let compacted = replacement(&view, made, 2);
+            let (before, after) = (estimate_tokens(&view), estimate_tokens(&compacted));
+            let verdict = rejection(false, &text, before, after);
+            assert_eq!(
+                verdict, None,
+                "{around}+{chars}: {after} tokens for {before}"
+            );
+        }
+    }
 }
 
 /// The reminders and the restated catalog are part of the checkpoint: they
@@ -453,7 +527,7 @@ fn the_tail_is_counted_in_the_fit() {
     let over = checkpoint("short", &folded, 15_000, tail(before as usize * 4));
     assert_eq!(verbatim(&over), 0);
     assert_eq!(
-        rejection(false, "short", &over, &folded),
+        rejected(false, "short", &over, &folded),
         Some("not_smaller")
     );
 }
@@ -479,7 +553,7 @@ fn a_tiny_window_never_gets_a_checkpoint_over_it() {
                 .collect();
             let made = checkpoint(&text, &folded, spec.keep_user_tokens, blocks);
             let after = size_of(made.clone());
-            if rejection(false, &text, &made, &folded).is_none() {
+            if rejected(false, &text, &made, &folded).is_none() {
                 assert!(
                     after < before && after < window,
                     "{summary}/{tail}: {after}"
@@ -511,10 +585,31 @@ fn rejected_summaries_hold_until_the_view_has_grown_or_one_is_accepted() {
     rejections.rejected(1000);
     assert!(rejections.holds(1000 + margin - 1, window));
     assert!(!rejections.holds(1000 + margin, window));
-    rejections.accepted();
+    rejections.applied(500, false);
     assert_eq!(rejections, Rejections::default());
     assert!(!rejections.holds(0, window));
     assert_eq!(Rejections::margin(0), 1, "never a zero margin");
+}
+
+/// An applied summary that leaves the view still due counts as a rejection
+/// toward the hold; one that brings the view under the trigger clears it.
+#[test]
+fn applied_summaries_that_leave_the_view_due_hold_like_rejections() {
+    let window = 1000;
+    let mut rejections = Rejections::default();
+    rejections.applied(900, true);
+    assert!(!rejections.holds(900, window), "one is not the evidence");
+    rejections.rejected(900);
+    assert!(
+        rejections.holds(900, window),
+        "a rejection and an ineffective one"
+    );
+    rejections.applied(300, false);
+    assert_eq!(rejections, Rejections::default());
+    rejections.applied(900, true);
+    rejections.applied(950, true);
+    assert!(rejections.holds(950 + Rejections::margin(window) - 1, window));
+    assert!(!rejections.holds(950 + Rejections::margin(window), window));
 }
 
 #[test]
