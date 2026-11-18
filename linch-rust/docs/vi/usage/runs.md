@@ -97,6 +97,18 @@ busy with True
   về (timeout, process của bạn bị crash). Server tự chọn một UUID khi bạn không
   chọn. Một id đã được lưu sẽ kết thúc run bằng `RunExists` (code -32023) và không
   ghi gì.
+- **Một run id đã được xác nhận là bền vững.** `run()` chỉ trả về khi run đã được
+  lưu (với Postgres: khi lệnh create của nó đã commit), nên id nó đưa cho bạn vẫn
+  tồn tại sau mọi crash xảy ra tiếp theo: `resume` tìm thấy nó và `agent.events`
+  không bao giờ báo `RunNotFound` cho nó. Cho đến khi `run()` trả về, run có thể
+  tồn tại hoặc không (create có thể commit trong lúc câu trả lời đang trên đường,
+  hoặc sau khi process của bạn đã ngừng chờ): hãy `resume` id bạn đã chọn, thử lại
+  `RunNotFound` trong giây lát, và chỉ khởi động lại với cùng id nếu nó vẫn thiếu
+  (`RunExists` khi đó nghĩa là nó đã được ghi trong lúc ấy). `run_or_resume`
+  ([Workflows](./workflows.md#run_or_resume)) làm nửa sau cho một job được thử lại:
+  nó start với id rồi resume khi gặp `RunExists`. Một lần start bị từ chối
+  (session bận, prompt bị chặn) vẫn trả về, và sự từ chối đến ở cuối stream.
+  `resume`, `approve` và `answer` trả về ngay.
 - Nhiều run của một server stream cùng lúc; mỗi `Run` chỉ nhận envelope của chính
   nó.
 
@@ -112,8 +124,8 @@ prompt. Với Postgres, quy tắc này đúng trên mọi server dùng chung dat
 
 ## Lỗi đến ở cuối stream
 
-`run()`, `resume()`, `approve()` và `answer()` trả về trước khi server làm gì ngoài việc chấp
-nhận lời gọi. Một sự từ chối (session đang bận, run không xác định, contract khác
+`run()` trả về khi run đã được lưu hoặc bị từ chối; `resume()`, `approve()` và `answer()` trả về trước khi
+server làm gì ngoài việc chấp nhận lời gọi. Một sự từ chối (session đang bận, run không xác định, contract khác
 nhau) và một lỗi khi tiếp tục bền vững sẽ đến dưới dạng phần cuối của stream: lặp
 hoặc gọi `result()` sẽ raise một subclass của `RunError`.
 
@@ -132,7 +144,7 @@ hoặc gọi `result()` sẽ raise một subclass của `RunError`.
 | `InvalidAnswer` | -32032 | Các câu trả lời không khớp với các câu hỏi `AskUser` đang chờ; `.reason` nêu lý do. Không có gì được ghi: run vẫn chờ ([bên dưới](#answer)) |
 | `InvalidSteer` | -32038 | Văn bản của steer để trống hoặc dài hơn 16 KiB, hoặc id của nó không dùng được; `.reason` nêu lý do. Không có gì được ghi |
 | `RunLeased` | -32033 | Một server khác đang điều khiển run (Postgres); `.owner` và `.expires_in` (giây) cho biết lease của ai và còn bao lâu. Không có gì được ghi ([Kho lưu trữ](./stores.md#run-leases)) |
-| `LeaseLost` | -32022 | Một server khác đã tiếp quản run, hoặc đã fail nó, trong khi server này điều khiển; run dừng ở đây mà không ghi gì |
+| `LeaseLost` | -32022 | Một server khác đã tiếp quản run, hoặc đã fail nó, trong khi server này điều khiển; run dừng ở đây mà không ghi gì. Một lần ghi thấy session dài hơn lúc run này để lại (các entry của bên điều khiển mới) sau một lần tiếp quản cũng báo mã này, không phải `RunExists` |
 | `RunError` | -32020 đến -32028 | Việc ghi vào kho hoặc journal thất bại, hoặc trạng thái đã lưu không khớp với nhau; run giữ nguyên ở trạng thái bền vững cuối cùng của nó |
 | `ConnectionClosed` | không có | Server biến mất giữa chừng stream |
 
@@ -398,7 +410,7 @@ asyncio.run(main())
 ```text
 lost the server: the server closed its output
 success Recovered.
-Tool execution was interrupted before a result was recorded; not re-running automatically on resume.
+Tool execution was interrupted before a result was recorded; its effect is unknown, and it is not re-run automatically on resume.
 ```
 
 Một lời gọi tool đã được ghi điểm bắt đầu nhưng chưa ghi điểm kết thúc sẽ không bao
@@ -406,6 +418,70 @@ giờ được chạy lại: model nhận một kết quả lỗi nói rằng n�
 quyết định phải làm gì. Dù vậy, hãy làm cho các host tool có thay đổi trạng thái an
 toàn khi gọi hai lần, hoặc kiểm tra trước khi hành động, vì crash có thể xảy ra
 sau tác động và trước khi ghi bản ghi.
+
+<a id="tools-run-at-most-once-never-exactly-once"></a>
+
+### Tool chạy tối đa một lần, không bao giờ đúng một lần
+
+Một run được resume cho mỗi lời gọi tool một trong ba kết cục, tùy điều gì đã bền
+vững khi process chết:
+
+| Bền vững lúc crash | Một lần resume làm gì | Tác động của tool |
+|---|---|---|
+| Không có start lẫn end | Lập kế hoạch lại lời gọi và chạy nó (quyền được hỏi lại trừ khi một quyết định đã ghi bao phủ nó) | Xảy ra một lần, bây giờ |
+| Có start, chưa có end | Không bao giờ chạy nó. Nó ghi `tool_call_end` của lời gọi như một lỗi với `error_code` là `tool_interrupted`, và model đọc kết quả lỗi `Tool execution was interrupted before a result was recorded; its effect is unknown, and it is not re-run automatically on resume.` cho `tool_use_id` đó, nên transcript vẫn khớp cặp với các provider đòi một kết quả cho mỗi tool use | Đã xảy ra (crash đến sau nó, trước khi end được ghi) hoặc chưa (crash đến trước nó): không biết |
+| Cả hai | Dùng lại kết quả đã ghi | Đã xảy ra một lần |
+
+Vì vậy một tool chạy tối đa một lần cho mỗi lời gọi, và linch không bao giờ tuyên
+bố đúng một lần: khoảng giữa tác động và lần ghi end của nó không thể đóng lại từ
+bên ngoài tool. Host đóng nó trong các tool của chính mình:
+
+- Dùng `ctx.idempotency_key` (`run_id:tool_use_id`, trường của `ToolContext` trong
+  [Tools](./tools.md#tool-đang-phục-vụ-lời-gọi-nào)) làm khóa idempotency của tác
+  động. `tool_use_id` là của provider và giữ nguyên sau resume, nên một side effect
+  được khóa bằng nó chỉ xảy ra một lần dù lời gọi được thử bao nhiêu lần. Điều này
+  đúng với các host tool bạn viết. `Bash` tích hợp sẵn và execution host từ xa hiện
+  không mang khóa như vậy (id của một lệnh từ xa là bộ đếm của shell của nó, và
+  `exec.start` không có run hay tool id), nên một lệnh có side effect chỉ chạy tối
+  đa một lần mà không có khử trùng lặp: hãy làm cho chính lệnh đó idempotent, hoặc
+  kiểm tra tác động của nó trước khi chạy lại.
+- Tìm các lời gọi cần đối soát bằng các event `tool_call_end` có `error_code` là
+  `tool_interrupted`, và hỏi hệ thống mà tool nói chuyện cùng xem khóa đã được áp
+  dụng chưa.
+- Yêu cầu model kiểm tra trước khi hành động lại: kết quả lỗi của nó đã nói tác
+  động là không rõ.
+- Sau khi mất kết nối, hãy `resume` run trước (thử lại `RunLeased` như trên); chỉ
+  gửi lại `run` với cùng `run_id` khi run không tồn tại (`RunNotFound` vẫn còn),
+  không bao giờ để lặp lại một run đã tồn tại.
+
+```python
+import asyncio
+
+from linch_rust import Agent, ToolCallEndEvent, ToolContext, tool
+
+charged: dict[str, str] = {}  # your payment system's idempotency records
+
+
+@tool(scope="write")
+async def charge(order: str, ctx: ToolContext) -> str:
+    """Charge an order once, however often the call is attempted."""
+    key = ctx.idempotency_key
+    if key not in charged:  # the real check is the payment API's own key
+        charged[key] = f"receipt-{order}"
+    return charged[key]
+
+
+async def interrupted_calls(agent: Agent, run_id: str) -> list[str]:
+    """The tool_use_ids whose effect a crash left unknown, to reconcile."""
+    ends = [e.event for e in await agent.events(run_id)]
+    return [
+        end.tool_use_id
+        for end in ends
+        if isinstance(end, ToolCallEndEvent) and end.error_code == "tool_interrupted"
+    ]
+```
+
+`charged.get(f"{run_id}:{tool_use_id}")` khi đó cho biết tác động đã xảy ra chưa.
 
 ## Approve
 
@@ -646,6 +722,7 @@ ngoài run xảy ra trước khi trạng thái dẫn tới nó được ghi:
 | Trước mỗi lời gọi model | Run cho đến lúc này và một bản ghi rằng lời gọi đã được gửi |
 | Sau mỗi phản hồi của model | Message của assistant, usage và chi phí của nó |
 | Sau mỗi phản hồi của model, trước các callback của nó (chỉ khi có một callback `after_provider_call` được gắn) | Usage và chi phí của phản hồi, không kèm message |
+| Khi `run()` trả về | Chính run (lệnh create của nó), nên run id bạn đang giữ tồn tại sau mọi crash |
 | Trước khi mỗi tool chạy | `tool_call_start` của nó, để một lần resume không bao giờ chạy nó lần thứ hai |
 | Sau khi mỗi tool trả về | `tool_call_end` của nó |
 | Trước khi cuộc hội thoại được nối thêm | Checkpoint khớp với nó |
@@ -666,8 +743,9 @@ ngoài run xảy ra trước khi trạng thái dẫn tới nó được ghi:
   `usage`, và gọi lại model (một `model_call_receipt` mới của cùng turn, không phải một
   lần thử lại). Bản thân message chỉ được ghi sau các callback, nên một callback redact
   nó không bao giờ bị bỏ qua.
-- Một tool đã được ghi điểm bắt đầu thì không bao giờ được chạy lại khi resume
-  ([ở trên](#resume)).
+- Một tool đã được ghi điểm bắt đầu thì không bao giờ được chạy lại khi resume:
+  tối đa một lần, không bao giờ đúng một lần
+  ([ở trên](#tools-run-at-most-once-never-exactly-once)).
 - Một steer được ghi ở ranh giới bước, trước khi lời gọi của nó trả lời; một run được resume đọc lại những steer còn đang chờ ([Steer](#steer)).
 - Đóng khối `Server`, hoặc server chết, để mỗi run ở trạng thái bền vững cuối cùng
   của nó; run trên Postgres resume được, run trên memory thì mất.

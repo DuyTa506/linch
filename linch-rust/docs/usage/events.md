@@ -266,7 +266,7 @@ A tool call finished.
 | `duration_ms` | How long the call took |
 | `canonical_output` | The structured value, for tools that declare an output schema; `None` otherwise |
 | `metadata` | Details for the host only, never shown to the model: what a host tool returned in [`ToolOutput.metadata`](./tools.md#metadata-for-the-host), or where an offloaded result went; for a failed call, the error's `details` object (a `Bash` command's `status` and `exit_code`, see [Workspace tools](./tools.md#workspace-tools)); `None` for a tool that set none |
-| `error_code` | A failed call's machine-readable code (`invalid_input`, `not_found`, ...), when its tool gave one; `None` otherwise |
+| `error_code` | A failed call's machine-readable code (`invalid_input`, `not_found`, ...), when its tool gave one; `None` otherwise. `tool_interrupted` marks the stand-in end of a call whose start was durable when a crash came: its effect is unknown and it is never run again ([Runs: Tools run at most once](./runs.md#tools-run-at-most-once-never-exactly-once)) |
 | `cache_hit` | Whether [`spec.tool_cache`](./tools.md#tool_cache) served the result: the tool did not run, and the call's `tool_call_start` is written with this event, not before it. `False` otherwise |
 | `tool_use_id` | Property: `result["tool_use_id"]` |
 | `is_error` | Property: whether the result is a tool error |
@@ -356,6 +356,17 @@ retries, and the call runs again after a wait: `tool_use_id`, `tool_name`,
 error's `code`, or `timeout`), `error` (the failed attempt's message, run
 through `spec.redaction` when it covers tool results and then cut to 512
 bytes) and `delay_ms`. It is durable before the wait.
+
+### `ToolInterruptedEvent` (`tool_interrupted`)
+
+A call that started and whose end a crash lost: `tool_use_id` and
+`tool_name`. A resume writes it with the `tool_call_end` that stands in for
+the lost one (an error whose `error_code` is `tool_interrupted`, and whose
+text tells the model the effect is unknown), then does not run the call
+again. Its `tool_use_id` is the same after the resume: the key to ask the
+system the tool talks to whether the effect landed ([Runs: Tools run at most
+once](./runs.md#tools-run-at-most-once-never-exactly-once)). An older client
+reads it as an unknown event.
 ### `PolicyEvent` (`policy`)
 
 The [reliability policy](./agent.md#policy) decided. `rule` is

@@ -14,7 +14,8 @@ pub const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Every connection of the pool was busy for the whole [`ACQUIRE_TIMEOUT`].
 #[derive(Debug, Error)]
 #[error(
-    "pool timed out after {}s: raise max_pool_connections or lower concurrent runs",
+    "pool timed out after {}s: raise max_pool_connections or lower concurrent runs; \
+     a run already created stays at its last durable state: resume it",
     ACQUIRE_TIMEOUT.as_secs()
 )]
 pub struct PoolExhausted;

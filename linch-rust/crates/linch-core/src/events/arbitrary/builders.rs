@@ -108,6 +108,13 @@ pub(super) fn tool_retry_event() -> impl Strategy<Value = ToolRetryEvent> {
         )
 }
 
+pub(super) fn tool_interrupted_event() -> impl Strategy<Value = ToolInterruptedEvent> {
+    (short_string(), short_string()).prop_map(|(tool_use_id, tool_name)| ToolInterruptedEvent {
+        tool_use_id,
+        tool_name,
+    })
+}
+
 pub(super) fn tool_progress_event() -> impl Strategy<Value = ToolProgressEvent> {
     (
         short_string(),

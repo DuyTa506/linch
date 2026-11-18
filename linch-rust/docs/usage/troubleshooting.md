@@ -126,7 +126,7 @@ on a DSN. The message never holds the DSN.
 | Message (fragment) | Code | Cause | Fix |
 |---|---|---|---|
 | `the database schema is newer than this binary: linch_migrations holds migration <n>, the newest this binary knows is <m>` | -32016 (`SchemaNewer`; `.table`, `.applied`, `.latest`) | A newer release migrated this database; nothing was read or written | Upgrade this server to the release that migrated it, or restore the database from before the migration ([Stores: Migrations as a deploy step](./stores.md#migrations-as-a-deploy-step)) |
-| `pool timed out after 30s: raise max_pool_connections or lower concurrent runs` | -32020 (in a run's end) | Every connection of the pool was busy for 30 seconds; the server also logs the tenant and the pool's use | Raise `stores.max_connections` within the database's limit, or lower concurrent runs ([Stores: Connection budget](./stores.md#connection-budget)); resume the run |
+| `pool timed out after 30s: raise max_pool_connections or lower concurrent runs; a run already created stays at its last durable state: resume it` | -32020 or -32024 (in a run's end) | Every connection of the pool was busy for 30 seconds; the server also logs the tenant and the pool's use | Raise `stores.max_connections` within the database's limit, or lower concurrent runs ([Stores: Connection budget](./stores.md#connection-budget)); resume the run |
 
 A dropped connection in the middle of a run ends that run's stream with a
 `RunError` (code -32020); the run stays at its last durable state and can be
@@ -229,7 +229,7 @@ the run goes on.
 | `Tool call denied: <tool> denied by <kind> rule in layer "<layer>"` | A permission rule denied the call | Change the rule if the call should run ([Tools](./tools.md#permission-rules)) |
 | `Read <path> before changing it.` | `Write` over an existing file or `Edit` without a `Read` in this session, or after `close_session` or a restart | Expected; the model reads, then writes |
 | `Read this file again before editing it.` / `... before writing it.` | The file changed on disk after the model read it | Expected; the model reads again, then retries |
-| `Tool execution was interrupted before a result was recorded; not re-running automatically on resume.` | The process died while the call ran | Check whether the effect happened before acting again |
+| `Tool execution was interrupted before a result was recorded; its effect is unknown, and it is not re-run automatically on resume.` | The process died while the call ran | Check whether the effect happened before acting again |
 | `Background process <id> no longer exists in this session: ...` (code `no_such_process`) | `BashOutput` or `BashKill` named an id this agent handle does not know: the session was closed, the server restarted, or another handle started it | Expected after a restart; the model starts the command again ([Tools](./tools.md#background-commands)) |
 | `4 background processes already run in this session; ...` (code `too_many_processes`) | A fifth background `Bash` in one session | The model reads or kills one first |
 | `AskUser is not available here: this run cannot wait for the user...` | A subagent called `AskUser` | Expected; only the top-level run can ask |

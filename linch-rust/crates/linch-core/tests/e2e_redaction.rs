@@ -29,8 +29,7 @@ use serde_json::json;
 
 const SECRET: &str = "sk-live0123456789";
 const MASK: &str = "[KEY]";
-const INTERRUPTED: &str = "Tool execution was interrupted before a result was recorded; not \
-                           re-running automatically on resume.";
+const INTERRUPTED: &str = linch_core::journal::INTERRUPTED_TOOL_TEXT;
 
 fn redaction() -> RedactionSpec {
     RedactionSpec {

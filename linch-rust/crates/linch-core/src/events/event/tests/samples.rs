@@ -82,6 +82,10 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
             error: "busy".into(),
             delay_ms: 200,
         }),
+        Event::ToolInterrupted(ToolInterruptedEvent {
+            tool_use_id: "c1".into(),
+            tool_name: "Write".into(),
+        }),
         Event::ToolProgress(ToolProgressEvent {
             tool_use_id: "c1".into(),
             tool_name: "Read".into(),

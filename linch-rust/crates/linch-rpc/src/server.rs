@@ -11,7 +11,7 @@
 //! and the runs pause, since a run only advances while its stream is
 //! polled.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::AtomicU64;
@@ -143,6 +143,9 @@ struct Driven {
 /// `{run_id}` is sent.
 enum Reply {
     Value(JsonValue),
+    /// A new run: answered once it is stored.
+    Started(RunStream),
+    /// A continued run: answered at once.
     Run(RunStream),
 }
 
@@ -302,19 +305,36 @@ impl Server {
                 self.0.outbox.send(&Response::ok(id, result)).await;
             }
             Ok(Reply::Run(stream)) => {
-                let accepted = RunAccepted {
-                    run_id: stream.run_id().clone(),
-                };
-                // The result goes out before the run's first notification.
-                let result = serde_json::to_value(&accepted).expect("a run id encodes");
-                self.0.outbox.send(&Response::ok(id, result)).await;
+                self.ack(id, stream.run_id().clone()).await;
                 let server = self.clone();
-                self.spawn_run(async move { server.drive(stream).await });
+                self.spawn_run(async move { server.drive(stream, VecDeque::new()).await });
+            }
+            // The answer carries the id of a run that exists: the host that
+            // holds it finds the run after any crash, so it waits for the
+            // create commit. The wait is a task of the run, not of the call:
+            // the call's place frees at once, and the read loop that waits
+            // for a place stays free to read the answers of the callbacks
+            // (`user_prompt_submit`) that the create waits for.
+            Ok(Reply::Started(mut stream)) => {
+                let server = self.clone();
+                self.spawn_run(async move {
+                    let held = server.until_stored(&mut stream).await;
+                    server.ack(id, stream.run_id().clone()).await;
+                    server.drive(stream, held).await;
+                });
             }
             Err(error) => {
                 self.0.outbox.send(&Response::err(id, error)).await;
             }
         }
+    }
+
+    /// Answer a call that started or continued a run with its id.
+    async fn ack(&self, id: Id, run_id: RunId) {
+        let accepted = RunAccepted { run_id };
+        // The result goes out before the run's first notification.
+        let result = serde_json::to_value(&accepted).expect("a run id encodes");
+        self.0.outbox.send(&Response::ok(id, result)).await;
     }
 
     async fn dispatch(&self, name: &str, params: JsonObject) -> Result<Reply, ErrorObject> {

@@ -64,6 +64,8 @@ pub enum Event {
     ToolCallEnd(ToolCallEndEvent),
     /// A tool attempt failed and the call is about to run again.
     ToolRetry(ToolRetryEvent),
+    /// A call a crash interrupted: it started, has no real end, and does not run again.
+    ToolInterrupted(ToolInterruptedEvent),
     /// Transient progress from an in-flight tool invocation.
     ToolProgress(ToolProgressEvent),
     /// A batch of tool calls awaiting permission.
@@ -208,6 +210,7 @@ impl Event {
             "tool_call_start" => Ok(Event::ToolCallStart(payload("tool_call_start", obj)?)),
             "tool_call_end" => Ok(Event::ToolCallEnd(payload("tool_call_end", obj)?)),
             "tool_retry" => Ok(Event::ToolRetry(payload("tool_retry", obj)?)),
+            "tool_interrupted" => Ok(Event::ToolInterrupted(payload("tool_interrupted", obj)?)),
             "tool_progress" => Ok(Event::ToolProgress(payload("tool_progress", obj)?)),
             "permission_request" => Ok(Event::PermissionRequest(payload(
                 "permission_request",
@@ -320,6 +323,7 @@ impl Event {
             Event::ToolCallStart(_) => Both,
             Event::ToolCallEnd(_) => Both,
             Event::ToolRetry(_) => Both,
+            Event::ToolInterrupted(_) => Both,
             Event::PermissionRequest(_) => Both,
             Event::InputRequest(_) => Both,
             Event::Suspended(_) => Both,
@@ -384,6 +388,7 @@ impl Serialize for Event {
             Event::ToolCallStart(e) => tagged("tool_call_start", e).serialize(serializer),
             Event::ToolCallEnd(e) => tagged("tool_call_end", e).serialize(serializer),
             Event::ToolRetry(e) => tagged("tool_retry", e).serialize(serializer),
+            Event::ToolInterrupted(e) => tagged("tool_interrupted", e).serialize(serializer),
             Event::ToolProgress(e) => tagged("tool_progress", e).serialize(serializer),
             Event::PermissionRequest(e) => tagged("permission_request", e).serialize(serializer),
             Event::InputRequest(e) => tagged("input_request", e).serialize(serializer),

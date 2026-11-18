@@ -29,7 +29,7 @@ async fn a_call_that_waits_out_the_acquire_timeout_names_the_remedy() {
     let text = error.to_string();
     assert!(
         std::error::Error::source(&error).is_some_and(|source| source.to_string()
-            == "pool timed out after 30s: raise max_pool_connections or lower concurrent runs"),
+            == "pool timed out after 30s: raise max_pool_connections or lower concurrent runs; a run already created stays at its last durable state: resume it"),
         "{text} / {:?}",
         std::error::Error::source(&error)
     );

@@ -9,11 +9,12 @@ use crate::agent::RunError;
 use crate::ask_user::{self, CANNOT_WAIT};
 use crate::events::kinds::{
     InputRequestEvent, InputRequestKind, PermissionRequestEvent, PermissionRequestItem,
-    SuspendStatus, SuspendedEvent, ToolCallEndEvent, UserEvent, UserEventSubtype,
+    SuspendStatus, SuspendedEvent, ToolCallEndEvent, ToolInterruptedEvent, UserEvent,
+    UserEventSubtype,
 };
 use crate::events::{Envelope, Event};
 use crate::hooks::ApprovalResponse;
-use crate::journal::ToolRecovery;
+use crate::journal::{INTERRUPTED_TOOL_CODE, ToolRecovery};
 use crate::json::JsonObject;
 use crate::message::{ContentBlock, Message, Role, ToolUseBlock};
 use crate::policy::PermissionDecision;
@@ -47,13 +48,18 @@ impl Runner {
         // the next barrier.
         for call in &calls {
             if let ToolRecovery::Interrupted { tool_name, result } = call {
+                self.journal
+                    .stage(Event::ToolInterrupted(ToolInterruptedEvent {
+                        tool_use_id: result.tool_use_id.clone(),
+                        tool_name: tool_name.clone(),
+                    }));
                 self.journal.stage(Event::ToolCallEnd(ToolCallEndEvent {
                     tool_name: tool_name.clone(),
                     result: result.clone(),
                     duration_ms: 0,
                     canonical_output: None,
                     metadata: None,
-                    error_code: None,
+                    error_code: Some(INTERRUPTED_TOOL_CODE.to_owned()),
                     cache_hit: false,
                 }));
             }
