@@ -3,14 +3,16 @@
 //! pool and its own `PgRunStore`, so each is its own lease holder.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use futures::StreamExt;
 use linch_core::provider::scripted::TurnBuilder;
 use linch_core::{
-    Agent, AgentBuilder, AgentSpec, Envelope, Event, JournalError, PermissionEngine,
-    PermissionMode, PermissionPolicy, Provider, RunError, RunId, RunOptions, RunStatus, RunStore,
-    RunStream, ScriptedProvider, StoreError,
+    Agent, AgentBuilder, AgentSpec, Commit, Envelope, Event, JournalError, Lease, NewRun,
+    PermissionEngine, PermissionMode, PermissionPolicy, Provider, RunError, RunId, RunOptions,
+    RunRecord, RunStatus, RunStore, RunStream, ScriptedProvider, StoreError,
 };
 use linch_postgres::{PgRunStore, PgSessionStore};
 use sqlx::postgres::PgPoolOptions;
@@ -24,11 +26,66 @@ const MODEL: &str = "scripted-model";
 /// A short lease, so the tests that wait one out stay quick.
 const TTL: Duration = Duration::from_millis(600);
 
+/// A run store whose renewals stop landing once frozen: the process behind
+/// it stands for one that crashed or froze, which no longer beats.
+struct Freezable {
+    inner: PgRunStore,
+    frozen: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl RunStore for Freezable {
+    async fn create(&self, run: NewRun) -> Result<RunRecord, StoreError> {
+        self.inner.create(run).await
+    }
+
+    async fn claim(&self, ns: &str, run_id: &RunId, owner: &str) -> Result<Lease, StoreError> {
+        self.inner.claim(ns, run_id, owner).await
+    }
+
+    async fn seize(&self, ns: &str, run_id: &RunId, owner: &str) -> Result<Lease, StoreError> {
+        self.inner.seize(ns, run_id, owner).await
+    }
+
+    fn lease_ttl(&self) -> Option<Duration> {
+        self.inner.lease_ttl()
+    }
+
+    async fn renew(&self, lease: &Lease) -> Result<(), StoreError> {
+        if self.frozen.load(Ordering::SeqCst) {
+            return Err(StoreError::Backend("the process is frozen".into()));
+        }
+        self.inner.renew(lease).await
+    }
+
+    async fn release(&self, lease: &Lease) -> Result<(), StoreError> {
+        self.inner.release(lease).await
+    }
+
+    async fn load(&self, ns: &str, run_id: &RunId) -> Result<RunRecord, StoreError> {
+        self.inner.load(ns, run_id).await
+    }
+
+    async fn commit(&self, lease: &Lease, commit: Commit) -> Result<(), StoreError> {
+        self.inner.commit(lease, commit).await
+    }
+
+    async fn events(
+        &self,
+        ns: &str,
+        run_id: &RunId,
+        after_seq: u64,
+    ) -> Result<Vec<Envelope>, StoreError> {
+        self.inner.events(ns, run_id, after_seq).await
+    }
+}
+
 /// One process: its provider (held at a gate) and its agent, on a pool of
 /// its own.
 struct Process {
     provider: Arc<Gated>,
     agent: Agent,
+    frozen: Arc<AtomicBool>,
 }
 
 impl Process {
@@ -47,6 +104,7 @@ impl Process {
             entered: Notify::new(),
             open: Semaphore::new(0),
         });
+        let frozen = Arc::new(AtomicBool::new(false));
         let runs = PgRunStore::new(pool.clone());
         let runs = match ttl {
             Some(ttl) => runs.with_lease_ttl(ttl),
@@ -56,12 +114,24 @@ impl Process {
         let agent = AgentBuilder::new(AgentSpec::new(MODEL))
             .provider(Arc::clone(&provider) as Arc<dyn Provider>)
             .permissions(PermissionEngine::new(policy).unwrap())
-            .run_store(Arc::new(runs))
+            .run_store(Arc::new(Freezable {
+                inner: runs,
+                frozen: Arc::clone(&frozen),
+            }))
             .session_store(Arc::new(PgSessionStore::new(pool)))
             .namespace("ns")
             .build()
             .unwrap();
-        Self { provider, agent }
+        Self {
+            provider,
+            agent,
+            frozen,
+        }
+    }
+
+    /// The process stops beating, as if it froze.
+    fn freeze(&self) {
+        self.frozen.store(true, Ordering::SeqCst);
     }
 
     /// Let every model call through.
@@ -192,9 +262,9 @@ async fn a_live_holder_keeps_its_run() {
     db.finish().await;
 }
 
-/// A's process is gone (its stream is leaked: never polled or dropped, so
-/// nothing renews or releases its lease). B is refused until the lease
-/// runs out, then takes the run over.
+/// A's process is gone (it no longer beats, and its stream is leaked, so
+/// nothing releases its lease). B is refused until the lease runs out,
+/// then takes the run over.
 #[tokio::test]
 async fn a_dead_holders_run_is_taken_over_after_its_lease_runs_out() {
     let Some(db) = TestDb::migrated("lease_dead").await else {
@@ -206,6 +276,7 @@ async fn a_dead_holders_run_is_taken_over_after_its_lease_runs_out() {
     let stream_a = at_the_gate(&a).await;
     let run_id = stream_a.run_id().clone();
     let stopped = Instant::now();
+    a.freeze();
     std::mem::forget(stream_a);
     leased(&b.resume(&run_id).await, &run_id);
     let items = loop {
@@ -244,8 +315,8 @@ async fn a_long_model_call_keeps_its_lease() {
     db.finish().await;
 }
 
-/// A stalls past its lease (a long pause: its stream is not polled), and B
-/// takes the run over and finishes it. When A wakes, its receipt write is
+/// A stalls past its lease (a long pause: it stops beating), and B takes
+/// the run over and finishes it. When A wakes, its receipt write is
 /// fenced: the run stops in A and B's state stands.
 #[tokio::test]
 async fn a_holder_that_lost_its_lease_cannot_write() {
@@ -257,6 +328,7 @@ async fn a_holder_that_lost_its_lease_cannot_write() {
     b.open();
     let stream_a = at_the_gate(&a).await;
     let run_id = stream_a.run_id().clone();
+    a.freeze();
     tokio::time::sleep(TTL + Duration::from_millis(200)).await;
     assert_eq!(outcome(&b.resume(&run_id).await), "result Success");
     a.open();

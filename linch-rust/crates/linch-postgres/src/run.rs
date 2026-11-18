@@ -31,7 +31,7 @@ use crate::lease_line::LeaseLine;
 
 /// How long a run claim holds without a renewal, unless set with
 /// [`PgRunStore::with_lease_ttl`]. A run's driver renews it every third
-/// (10 s); a holder that stops (a crash, a stream nobody polls) keeps other
+/// (10 s); a holder that stops (a crash, a frozen process) keeps other
 /// processes from its run for at most this long. It matches the worker's
 /// default visibility timeout, so a job taken over after its worker went
 /// quiet finds the run free at about the same time.
