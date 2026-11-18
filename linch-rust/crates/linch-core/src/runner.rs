@@ -34,7 +34,9 @@
 //! create is read again before the new run's prompt goes in.
 //!
 //! A tool turn with `k` started tools costs `3 + 2k` run writes and 2 session
-//! writes. [`RunStream`] holds the run future and polls it only while the
+//! writes; one more run write when an `after_provider_call` hook is
+//! attached, which writes the paid receipt before the hooks run.
+//! [`RunStream`] holds the run future and polls it only while the
 //! caller polls the stream. The one task the core spawns drives the
 //! background subagents of a run suspended for approval (see `family`).
 

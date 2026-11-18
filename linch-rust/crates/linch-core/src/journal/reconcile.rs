@@ -37,19 +37,22 @@ pub enum Recovery {
         /// Whether the prompt is already in the session.
         appended: bool,
     },
-    /// `ProviderPending` without an accepted receipt: write `abandoned`, if
-    /// any, then dispatch `attempt`. Also `CompactionPending` whose summary
-    /// call settled without a summary (it failed, or gave no text): the turn
-    /// goes on uncompacted with its primary call, attempt 1.
+    /// `ProviderPending`: write `abandoned`, if any, then dispatch
+    /// `attempt`. The delivery may have a receipt already: a failed or
+    /// cancelled one, or an accepted one whose response was never written
+    /// (an orphan: the run crashed in a hook that follows the stream). Also
+    /// `CompactionPending` whose summary call settled without a summary (it
+    /// failed, or gave no text): the turn goes on uncompacted with its
+    /// primary call, attempt 1.
     Redispatch {
         /// The new delivery attempt number.
         attempt: u32,
         /// A cancelled receipt for the unsettled delivery; `None` when the
-        /// delivery already has a failed or cancelled receipt.
+        /// delivery already has a receipt.
         abandoned: Option<ModelCallReceiptEvent>,
     },
-    /// A response is durable (`AssistantReceived`, or `ProviderPending` with
-    /// an accepted receipt): append it unless `appended`, then go on.
+    /// A response is durable (`AssistantReceived`): append it unless
+    /// `appended`, then go on.
     Received {
         /// The assistant message.
         message: Message,
@@ -146,12 +149,6 @@ pub enum ReconcileError {
         /// Turn of the checkpoint.
         turn: u32,
     },
-    /// An accepted receipt with no `assistant` event after it.
-    #[error("accepted receipt {delivery_attempt_id} has no assistant event")]
-    MissingAssistant {
-        /// Delivery attempt of the receipt.
-        delivery_attempt_id: String,
-    },
     /// A tool phase whose session does not end with an assistant tool call.
     #[error("the session does not end with the batch's assistant tool calls")]
     MissingToolCalls,
@@ -228,11 +225,11 @@ pub fn reconcile(
             message: message.clone(),
         }),
         Phase::CompactionPending { attempt } => {
-            let (delivery, _, receipt) = delivery(checkpoint, ModelCallKind::Compaction, events)?;
+            let (delivery, receipt) = delivery(checkpoint, ModelCallKind::Compaction, events)?;
             unchanged(checkpoint, session)?;
             // A summary lands with its `Compacted` checkpoint, so a receipt
             // here settled a call that gave none: it is not bought again.
-            if receipt.is_some() {
+            if receipt {
                 return Ok(Recovery::Redispatch {
                     attempt: 1,
                     abandoned: None,
@@ -257,45 +254,26 @@ fn provider_pending(
     events: &[Envelope],
     session: &[LogEntry],
 ) -> Result<Recovery, ReconcileError> {
-    let (delivery, later, receipt) = delivery(checkpoint, ModelCallKind::Primary, events)?;
-    let accepted = receipt.filter(|&i| {
-        matches!(&later[i].event, Event::ModelCallReceipt(r)
-            if r.disposition == CallDisposition::Accepted)
-    });
-    let Some(accepted) = accepted else {
-        unchanged(checkpoint, session)?;
-        return Ok(Recovery::Redispatch {
-            attempt: attempt + 1,
-            abandoned: receipt.is_none().then(|| abandoned(delivery)),
-        });
-    };
-    let response = later[accepted + 1..]
-        .iter()
-        .find_map(|envelope| match &envelope.event {
-            Event::Assistant(response) => Some(response),
-            _ => None,
-        });
-    let response = response.ok_or_else(|| ReconcileError::MissingAssistant {
-        delivery_attempt_id: delivery.delivery_attempt_id.clone(),
-    })?;
-    Ok(Recovery::Received {
-        appended: appended(checkpoint, session, &response.message)?,
-        message: response.message.clone(),
-        stop_reason: response.stop_reason,
-        // The run stages an `assistant` event only in the write that saves
-        // `AssistantReceived`, where a retry is recorded; there is none to
-        // carry here.
-        retry_feedback: None,
+    let (delivery, receipt) = delivery(checkpoint, ModelCallKind::Primary, events)?;
+    unchanged(checkpoint, session)?;
+    // A response lands with its `AssistantReceived` checkpoint, so a receipt
+    // here settled the call without one: it failed, was cancelled, or was
+    // accepted and written before the hooks that follow the stream, which
+    // never finished (an orphan). Each is paid and already counted in the
+    // checkpoint's totals; the call goes again, and is not a retry.
+    Ok(Recovery::Redispatch {
+        attempt: attempt + 1,
+        abandoned: (!receipt).then(|| abandoned(delivery)),
     })
 }
 
-/// The latest delivery of `kind` for the checkpoint's turn, the events
-/// after it, and the position of its receipt among them.
+/// The latest delivery of `kind` for the checkpoint's turn, and whether
+/// a receipt settled it.
 fn delivery<'a>(
     checkpoint: &Checkpoint,
     kind: ModelCallKind,
     events: &'a [Envelope],
-) -> Result<(&'a ModelCallDeliveryEvent, &'a [Envelope], Option<usize>), ReconcileError> {
+) -> Result<(&'a ModelCallDeliveryEvent, bool), ReconcileError> {
     let turn = checkpoint.turn;
     let (at, delivery) = (events.iter().enumerate().rev())
         .find_map(|(at, envelope)| match &envelope.event {
@@ -307,12 +285,11 @@ fn delivery<'a>(
             _ => None,
         })
         .ok_or(ReconcileError::MissingDelivery { turn })?;
-    let later = &events[at + 1..];
-    let receipt = later.iter().position(|envelope| {
+    let receipt = events[at + 1..].iter().any(|envelope| {
         matches!(&envelope.event, Event::ModelCallReceipt(r)
             if r.delivery_attempt_id == delivery.delivery_attempt_id)
     });
-    Ok((delivery, later, receipt))
+    Ok((delivery, receipt))
 }
 
 /// A cancelled receipt that settles a delivery with no outcome.

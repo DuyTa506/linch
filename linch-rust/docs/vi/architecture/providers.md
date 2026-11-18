@@ -122,10 +122,10 @@ giờ được chứa thông tin xác thực hay header của request.
 
 Các adapter không bao giờ retry (`crates/linch-providers/src/lib.rs:4`); `retryable()`
 và `retry_after` là lời khuyên cho bên gọi (`client.rs:1-5`). Runner chính là bên gọi
-đó. `dispatch` của nó (`crates/linch-core/src/runner/turn.rs:276`) kết thúc run với
+đó. `dispatch` của nó (`crates/linch-core/src/runner/turn.rs:289`) kết thúc run với
 trạng thái `failed` cùng một event `Error` ở mọi lỗi mà nó không retry hay failover
 (bên dưới), và abort run ở `Cancelled`. Event lỗi mang `kind`, `retryable` và `status`
-(`crates/linch-core/src/provider/call.rs:320`).
+(`crates/linch-core/src/provider/call.rs:325`).
 
 ### Retry và fallback model
 
@@ -173,24 +173,35 @@ mỗi lần retry hoặc failover, như khi một run được resume gửi lạ
 giờ kết thúc (`Recovery::Redispatch`, `runner/start.rs:227`). Mỗi lần thử kết thúc bằng
 một receipt.
 
+Khi có một hook `after_provider_call` được gắn, một receipt được chấp nhận bền vững
+trước khi bất kỳ hook nào chạy trên lời gọi của nó. Một lần resume sau khi crash trong
+một hook tìm thấy receipt được chấp nhận mà không có response của nó (một
+orphan), giữ usage và chi phí của nó trong các tổng và trong budget, rồi dispatch lại
+lời gọi dưới attempt kế tiếp; đó không phải một lần retry, nên không có event
+`provider_retry` nào được ghi và các lần retry của lượt không bị đụng tới
+([vòng đời của lượt](./turn-lifecycle.md#một-lần-crash-giữa-receipt-và-response-của-nó)).
+
 Usage của một receipt thất bại là số không đã biết khi lời gọi không tốn gì, và không
-rõ (`None`) khi nó có thể đã bị tính tiền (`costs_nothing`, `provider/call.rs:254`, áp
+rõ (`None`) khi nó có thể đã bị tính tiền (`costs_nothing`, `provider/call.rs:257`, áp
 dụng ở `call.rs:169`):
 
 | Lỗi | Usage của receipt | `CallFailure::free` |
 |---|---|---|
 | `Connect`: request chưa bao giờ được gửi đi | `Some(zero)` | true |
-| `Status` trước bất kỳ event stream nào: provider từ chối nó | `Some(zero)` | true |
+| `Status` 4xx (kể cả 408 và 429), 503 hoặc 529 trước bất kỳ event stream nào: provider từ chối nó | `Some(zero)` | true |
+| `Status` 500, 502 hoặc 504 trước bất kỳ event stream nào: một gateway có thể gửi nó sau khi model upstream đã chạy và tính tiền | `None` | false |
+| Mọi `Status` khác trước bất kỳ event stream nào (501, 505, 520-524, ...) | `None` | false |
 | `Transport`: đã gửi, không có gì trả về | `None`, trừ khi một `message_end` báo usage | false |
 | Bất cứ gì sau event stream đầu tiên, kể cả `Status` | `None`, trừ khi một `message_end` báo usage | false |
 
 `Option<Usage>` đã phân biệt số không với không rõ, nên định dạng receipt không đổi, và
 một binary trước thay đổi này đọc `Some(zero)` như một lời gọi không tốn gì. Một lỗi
-free không gửi event `usage` (`runner/turn.rs:375`, và tương tự trong
+free không gửi event `usage` (`runner/turn.rs:399`, và tương tự trong
 `runner/compact.rs`), như Python không gửi cho một lời gọi thất bại, và để
 `usage_complete` là true. Một `budget` có giới hạn chỉ từ chối lời gọi kế tiếp sau một
 usage không rõ (`budget.rs:110`), nên một lỗi free được retry dưới giới hạn; một lỗi có
-thể đã bị tính tiền vẫn kết thúc run với lỗi của provider. Python đánh dấu usage của
+thể đã bị tính tiền vẫn kết thúc run với lỗi của provider. Vì vậy một 500, 502 hoặc 504 không được retry dưới
+giới hạn, dù nó có thể retry và được retry khi không có giới hạn. Python đánh dấu usage của
 mọi lời gọi thất bại là `unknown` (`src/linch/loop/streaming.py:412-415`) rồi từ chối
 mọi lời gọi dưới giới hạn (`src/linch/model_calls.py:643-650`, kiểm tra trước mỗi delivery, kể cả một lần retry, tại `src/linch/loop/streaming.py:467`), nên dưới giới hạn nó
 không bao giờ retry.

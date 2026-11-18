@@ -119,11 +119,11 @@ the adapter and must never hold credentials or request headers.
 
 Adapters never retry (`crates/linch-providers/src/lib.rs:4`); `retryable()`
 and `retry_after` are advice for the caller (`client.rs:1-5`). The runner is
-that caller. Its `dispatch` (`crates/linch-core/src/runner/turn.rs:276`)
+that caller. Its `dispatch` (`crates/linch-core/src/runner/turn.rs:289`)
 ends the run `failed` with an `Error` event on any failure that it does not
 retry or fail over (below), and aborts the run on `Cancelled`. The error
 event carries `kind`, `retryable` and `status`
-(`crates/linch-core/src/provider/call.rs:320`).
+(`crates/linch-core/src/provider/call.rs:325`).
 
 ### Retries and fallback models
 
@@ -175,25 +175,35 @@ retry or failover, as it does when a resumed run redispatches a call that
 never settled (`Recovery::Redispatch`, `runner/start.rs:227`). Each attempt
 settles one receipt.
 
+With an `after_provider_call` hook attached, an accepted receipt is durable
+before any hook runs on its call. A resume after a crash in a hook finds the accepted receipt without its response (an orphan), keeps
+its usage and cost in the totals and the budget, and dispatches the call
+again under the next attempt; that is not a retry, so no `provider_retry`
+event is written and the turn's retries are untouched
+([turn lifecycle](./turn-lifecycle.md#a-crash-between-a-receipt-and-its-response)).
+
 A failed receipt's usage is a known zero when the call cost nothing, and
 unknown (`None`) when it may have been billed (`costs_nothing`,
-`provider/call.rs:254`, applied at `call.rs:169`):
+`provider/call.rs:257`, applied at `call.rs:169`):
 
 | Failure | Receipt usage | `CallFailure::free` |
 |---|---|---|
 | `Connect`: the request never went out | `Some(zero)` | true |
-| `Status` before any stream event: the provider refused it | `Some(zero)` | true |
+| `Status` 4xx (408 and 429 included), 503 or 529 before any stream event: the provider refused it | `Some(zero)` | true |
+| `Status` 500, 502 or 504 before any stream event: a gateway may send it after the upstream model ran and billed | `None` | false |
+| Any other `Status` before any stream event (501, 505, 520-524, ...) | `None` | false |
 | `Transport`: sent, nothing back | `None`, unless a `message_end` reported usage | false |
 | Anything after the first stream event, a `Status` included | `None`, unless a `message_end` reported usage | false |
 
 `Option<Usage>` already tells a zero from unknown, so the receipt format does
 not change, and a binary from before this reads `Some(zero)` as a call that
-cost nothing. A free failure sends no `usage` event (`runner/turn.rs:375`,
+cost nothing. A free failure sends no `usage` event (`runner/turn.rs:399`,
 and the same in `runner/compact.rs`), as Python sends none for a failed call,
 and leaves `usage_complete` true. A capped `budget` only refuses the next
 call after an unknown usage (`budget.rs:110`), so a free failure is retried
 under a cap; one that may have been billed still ends the run with the
-provider's error. Python marks every failed call's usage `unknown`
+provider's error. A 500, 502 or 504 is therefore not retried under a cap,
+though it is retryable and is retried without one. Python marks every failed call's usage `unknown`
 (`src/linch/loop/streaming.py:412-415`) and then refuses any call under a cap
 (`src/linch/model_calls.py:643-650`, checked before every delivery, a retry included, at `src/linch/loop/streaming.py:467`), so under a cap it never retries.
 

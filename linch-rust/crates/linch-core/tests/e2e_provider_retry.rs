@@ -447,17 +447,23 @@ async fn under_a_capped_budget_a_call_known_to_cost_nothing_is_retried() {
 }
 
 /// A request that went out with nothing back (a reset or a read timeout),
-/// or a failure after output began, may have been paid: its usage stays
+/// a 500, 502 or 504 (a gateway may send it after the upstream ran), or a
+/// failure after output began, may have been paid: its usage stays
 /// unknown, and a capped budget ends the run with the provider's error.
 #[tokio::test]
 async fn under_a_capped_budget_a_call_that_may_have_been_paid_ends_the_run() {
     let reset = ScriptedTurn::failing(ScriptedError::Transport {
         message: "connection reset".into(),
     });
+    let upstream = ScriptedTurn::failing(ScriptedError::Status {
+        status: 502,
+        retry_after_ms: None,
+        message: "bad gateway".into(),
+    });
     let mut cut = TurnBuilder::new(MODEL).text("partial").build();
     cut.events.pop();
     cut.error = Some(busy());
-    for (failure, kind) in [(reset, "transport"), (cut, "status")] {
+    for (failure, kind) in [(reset, "transport"), (upstream, "status"), (cut, "status")] {
         let provider = Arc::new(Flaky::new(vec![text_turn("done")]).fail(0, MODEL, failure));
         let stores = Arc::new(Stores::default());
         let agent = flaky_agent(capped(), provider.clone(), stores.clone());

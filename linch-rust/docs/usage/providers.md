@@ -453,12 +453,20 @@ Each attempt is its own durable call, so a crash never buys an answer twice:
 - A run resumed after a crash during a wait calls again at once, without
   waiting the rest, and keeps counting the turn's retries.
 - A run that failed over resumes on its fallback.
-- A failed attempt that cost nothing, a connection never made or an error
-  status before any output, counts as zero usage: it sends no `usage` event
-  and leaves `usage_complete` true.
-- A request that went out with nothing back (a reset, a read timeout), or a
-  failure after output began, may have been billed, so its usage is unknown
-  and the run's `result` has `usage_complete` false.
+- With an `after_provider_call` callback attached, a paid answer's usage is
+  written before the callbacks run (`provider_call_stop` included). If the server
+  crashes while one runs, the resumed run keeps that usage and cost in its
+  totals and calls the model again; that call spends none of the turn's
+  retries.
+- A failed attempt that cost nothing, a connection never made or a refusal
+  before any output (a 4xx status, 408 and 429 included, or 503 or 529),
+  counts as zero usage: it sends no `usage` event and leaves
+  `usage_complete` true.
+- A request that went out with nothing back (a reset, a read timeout), a
+  500, 502 or 504 (a gateway can send one after the model already ran and
+  billed), any other error status, or a failure after output began, may
+  have been billed, so its usage is unknown and the run's `result` has
+  `usage_complete` false.
 - Under a capped [`budget`](./agent.md#budget), a call of unknown usage means
   the cap can no longer be kept, so the run is not retried after one: it ends
   with the provider's error. A call that cost nothing is retried as usual.

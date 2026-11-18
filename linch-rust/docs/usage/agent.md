@@ -266,8 +266,9 @@ is unknown (it got no answer, or was cut off after output began, before the
 provider reported any) means the cap can no longer be kept: the next call,
 a [retry](./providers.md#failures-and-retries) included, is refused with an
 error named `BudgetAccountingError`. A call that failed before costing
-anything (no connection, or an error status before any output) counts as
-zero and is retried as usual. A run that crashed during a call resumes into
+anything (no connection, or a 4xx, 503 or 529 status before any output)
+counts as zero and is retried as usual; a 500, 502 or 504 may have been
+billed upstream, so it counts as unknown. A run that crashed during a call resumes into
 that error.
 
 Each run of the agent starts with nothing spent. A resumed run starts from

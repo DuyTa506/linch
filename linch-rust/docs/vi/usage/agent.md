@@ -269,8 +269,9 @@ usage không xác định (nó không nhận được câu trả lời, hoặc b
 bắt đầu, trước khi provider báo cáo gì) nghĩa là không còn giữ được giới hạn nữa:
 lời gọi kế tiếp, kể cả một lần [thử lại](./providers.md#lỗi-và-thử-lại), bị từ chối
 với một lỗi tên `BudgetAccountingError`. Một lời gọi thất bại trước khi tốn bất cứ
-thứ gì (không kết nối được, hoặc lỗi status trước khi có output) được tính bằng
-không và vẫn được thử lại như thường. Một run bị crash giữa chừng một lời gọi sẽ
+thứ gì (không kết nối được, hoặc status 4xx, 503 hay 529 trước khi có output) được tính bằng
+không và vẫn được thử lại như thường; một 500, 502 hay 504 có thể đã bị tính tiền ở
+upstream, nên nó được tính là không rõ. Một run bị crash giữa chừng một lời gọi sẽ
 resume vào đúng lỗi đó.
 
 Mỗi run của agent bắt đầu với mức chi tiêu bằng không. Một run được resume bắt đầu

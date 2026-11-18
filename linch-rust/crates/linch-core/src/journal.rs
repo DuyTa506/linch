@@ -15,7 +15,8 @@
 //!   are held. A held checkpoint is a snapshot: it covers only the events
 //!   pending when it was saved.
 //! - The caller places the barriers: [`Journal::flush`] before a provider
-//!   dispatch, after a summary call that gave no summary, and around every
+//!   dispatch, after a summary call that gave no summary, after an accepted
+//!   call whose response `after_provider_call` hooks check first, and around every
 //!   tool that really runs (its start and its end), and
 //!   [`Journal::flush_checkpoint`] before every session write.
 //!   Whether a tool runs is the scheduler's knowledge, not the journal's.

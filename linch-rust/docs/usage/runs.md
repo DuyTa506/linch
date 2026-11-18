@@ -464,6 +464,7 @@ effect outside the run happens before the state that led to it is written:
 |---|---|
 | Before each model call | The run so far and a record that the call was sent |
 | After each model response | The assistant message, its usage and cost |
+| After each model response, before its callbacks (only when an `after_provider_call` callback is attached) | The response's usage and cost, without the message |
 | Before each tool runs | Its `tool_call_start`, so a resume never runs it a second time |
 | After each tool returns | Its `tool_call_end` |
 | Before the conversation is appended | The checkpoint that matches it |
@@ -478,6 +479,12 @@ What that means for you:
   once and are never stored or replayed.
 - A model call that was sent but whose response was not recorded is sent again
   on resume, so a crash at that moment can cost one call twice.
+- With an `after_provider_call` callback attached, a crash while a callback
+  on the response runs (`provider_call_stop` included) keeps the paid call's usage and cost: the resumed run
+  counts them in its `result` totals and its budget, shows them in a `usage`
+  event, and calls the model again (a new `model_call_receipt` of the same
+  turn, not a retry). The message itself is written only after the
+  callbacks, so a callback that redacts it is never bypassed.
 - A tool whose start was recorded is never run again on resume ([above](#resume)).
 - Closing the `Server` block, or the server dying, leaves each run at its last
   durable state; a Postgres run is resumable, a memory run is gone.

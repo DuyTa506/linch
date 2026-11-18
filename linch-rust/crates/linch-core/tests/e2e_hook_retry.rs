@@ -218,18 +218,39 @@ async fn an_after_provider_call_retry_is_bounded_only_by_max_turns() {
     assert_eq!(record.status, RunStatus::Failed);
 }
 
-fn accepted_receipts(envelopes: &[Envelope]) -> usize {
-    (envelopes.iter())
-        .filter(|e| {
-            matches!(&e.event, Event::ModelCallReceipt(receipt)
-                if receipt.disposition == CallDisposition::Accepted)
-        })
-        .count()
+/// The accepted receipts an `assistant` event answered, and the orphans:
+/// accepted receipts written before the `after_provider_call` hooks, with
+/// no `assistant` event before the next delivery, because the run crashed
+/// in between. An orphan keeps the `accepted` label it was written with
+/// (the log is append-only); it is paid, counted, and its call went again.
+fn accepted_receipts(envelopes: &[Envelope]) -> (usize, usize) {
+    let (mut answered, mut orphans, mut open) = (0, 0, false);
+    for envelope in envelopes {
+        match &envelope.event {
+            Event::ModelCallReceipt(receipt)
+                if receipt.disposition == CallDisposition::Accepted =>
+            {
+                orphans += usize::from(open);
+                open = true;
+            }
+            Event::Assistant(_) if open => {
+                answered += 1;
+                open = false;
+            }
+            Event::ModelCallDelivery(_) if open => {
+                orphans += 1;
+                open = false;
+            }
+            _ => {}
+        }
+    }
+    (answered, orphans + usize::from(open))
 }
 
 /// The retry decision is durable with the paid response: a crash at any
-/// write replays it exactly once, never runs the rejected tool call, and
-/// never pays again for a response that was already received.
+/// write replays it exactly once and never runs the rejected tool call. A
+/// response is bought again only after a crash between its receipt and
+/// its write (an orphan), and never twice.
 #[tokio::test]
 async fn a_crash_at_any_write_of_a_retried_turn_replays_the_decision_once() {
     let turns = || {
@@ -272,7 +293,9 @@ async fn a_crash_at_any_write_of_a_retried_turn_replays_the_decision_once() {
             assert_eq!(messages(&*stores, "s1").await, want, "{context}");
             assert!(runs.lock().unwrap().is_empty(), "{context}: a tool ran");
             let events = stores.runs.events(NS, &run_id, 0).await.unwrap();
-            assert_eq!(accepted_receipts(&events), 2, "{context}: one per turn");
+            let (answered, orphans) = accepted_receipts(&events);
+            assert_eq!(answered, 2, "{context}: one per turn");
+            assert!(orphans <= 1, "{context}: {orphans} orphans");
             let calls = provider.calls();
             assert!(calls.values().all(|&n| n <= 2), "{context}: {calls:?}");
         }

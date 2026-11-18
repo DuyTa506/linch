@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use super::*;
 use crate::events::WIRE_VERSION;
-use crate::events::kinds::{AssistantEvent, ToolCallEndEvent, ToolCallStartEvent};
+use crate::events::kinds::{ToolCallEndEvent, ToolCallStartEvent};
 use crate::ids::RunId;
 use crate::json::JsonObject;
 use crate::message::ContentBlock;
@@ -117,13 +117,6 @@ fn receipt(attempt: &str, disposition: CallDisposition) -> Event {
     })
 }
 
-fn response(message: &Message) -> Event {
-    Event::Assistant(AssistantEvent {
-        message: message.clone(),
-        stop_reason: StopReason::EndTurn,
-    })
-}
-
 fn conflict(found: u64) -> Outcome {
     Err(ReconcileError::SessionConflict {
         expected: LEN,
@@ -203,7 +196,7 @@ fn a_started_prompt_goes_after_runs_that_ended_before_it() {
 }
 
 #[test]
-fn provider_pending_retries_or_reuses_the_receipt() {
+fn provider_pending_calls_again_after_any_receipt() {
     let cp = checkpoint(Phase::ProviderPending { attempt: 2 });
     let assistant = Message::assistant_text("answer");
     let log = session(LEN, None);
@@ -215,14 +208,6 @@ fn provider_pending_retries_or_reuses_the_receipt() {
         Ok(Recovery::Redispatch {
             attempt: 3,
             abandoned,
-        })
-    };
-    let received = |appended| {
-        Ok(Recovery::Received {
-            message: Message::assistant_text("answer"),
-            stop_reason: StopReason::EndTurn,
-            appended,
-            retry_feedback: None,
         })
     };
     let missing = Err(ReconcileError::MissingDelivery { turn: 2 });
@@ -258,39 +243,18 @@ fn provider_pending_retries_or_reuses_the_receipt() {
             log.clone(),
             redispatch(None),
         ),
-        (
-            vec![
-                delivery(2, "a2"),
-                receipt("a2", CallDisposition::Accepted),
-                response(&assistant),
-            ],
-            log.clone(),
-            received(false),
-        ),
-        (
-            vec![
-                delivery(2, "a2"),
-                receipt("a2", CallDisposition::Accepted),
-                response(&assistant),
-            ],
-            session(LEN + 1, Some(&assistant)),
-            received(true),
-        ),
-        (
-            vec![
-                delivery(2, "a2"),
-                receipt("a2", CallDisposition::Accepted),
-                response(&assistant),
-            ],
-            session(LEN + 1, None),
-            conflict(LEN + 1),
-        ),
+        // An orphan: the accepted receipt was written before the hooks
+        // that follow the stream, and the run crashed in them. It is paid
+        // and counted; the call goes again, and is not a retry.
         (
             vec![delivery(2, "a2"), receipt("a2", CallDisposition::Accepted)],
             log.clone(),
-            Err(ReconcileError::MissingAssistant {
-                delivery_attempt_id: "a2".into(),
-            }),
+            redispatch(None),
+        ),
+        (
+            vec![delivery(2, "a2"), receipt("a2", CallDisposition::Accepted)],
+            session(LEN + 1, Some(&assistant)),
+            conflict(LEN + 1),
         ),
     ];
     for (events, log, expected) in cases {
