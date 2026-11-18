@@ -8,7 +8,8 @@
 //! [`PgFileBackend`] implements linch-core's
 //! [`FileBackend`](linch_core::vfs::FileBackend) and passes its suite;
 //! [`PgMailbox`] implements linch-core's [`Mailbox`](linch_core::Mailbox)
-//! and passes its suite. All take a [`PgPool`]; tables are created by [`migrate`], which the host runs
+//! and passes its suite; [`PgMemoryStore`] implements
+//! [`MemoryStore`](linch_core::MemoryStore) and passes its suite. All take a [`PgPool`]; tables are created by [`migrate`], which the host runs
 //! once at startup:
 //!
 //! ```no_run
@@ -41,6 +42,7 @@ use sqlx::{Connection, Postgres, SqlSafeStr, Transaction};
 mod codec;
 mod files;
 mod mailbox;
+mod memory;
 mod pool_size;
 mod run;
 mod session;
@@ -50,6 +52,7 @@ mod tool_cache;
 pub use codec::CodecError;
 pub use files::PgFileBackend;
 pub use mailbox::{DEFAULT_LEASE, PgMailbox};
+pub use memory::{DEFAULT_STATEMENT_TIMEOUT, PgMemoryStore};
 pub use pool_size::{MAX_DEFAULT_CONNECTIONS, MIN_DEFAULT_CONNECTIONS, default_max_connections};
 pub use run::{DEFAULT_RUN_LEASE_TTL, PgRunStore};
 pub use session::PgSessionStore;
@@ -224,6 +227,13 @@ fn migrator() -> Migrator {
             Cow::Borrowed("tool cache"),
             MigrationType::Simple,
             include_str!("../migrations/0008_tool_cache.sql").into_sql_str(),
+            false,
+        ),
+        Migration::new(
+            9,
+            Cow::Borrowed("memories"),
+            MigrationType::Simple,
+            include_str!("../migrations/0009_memories.sql").into_sql_str(),
             false,
         ),
     ];

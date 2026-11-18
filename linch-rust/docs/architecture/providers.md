@@ -101,6 +101,7 @@ required fields and optional controls an adapter may ignore or refuse:
 | `cache_control` | Set (no TTL) on every primary call of a run, as Python's `cache_prompt=True`; a compaction summary call has none (`crates/linch-core/src/agent.rs`). |
 | `output_schema`, `tool_choice` | Optional. |
 | `appended_tools` | The names of the `tools` a session added after its frozen prefix; empty outside a session's catalog. Only the native catalog changes of the Anthropic and Responses adapters read it. |
+| `context_tail` | How many trailing blocks of the last message are request-only context (recalled memory, retrieval, `context_build` blocks), never logged; 0 and off the wire when none. Anthropic puts its conversation breakpoint on the last block before them; adapters with automatic prefix caching ignore it, so the context stays at the tail. |
 
 There is no cancel signal, retry budget or native-catalog switch in the
 request; the cancel token is the second argument of `stream`.
@@ -438,8 +439,10 @@ parameter. An `output_schema` is sent as `text.format: {"type":
 `temperature`, which `ProviderRequest` still carries. `max_tokens` is
 required and defaults to 8192 (`anthropic.rs:47`). Thinking blocks are sent
 back with their signatures unchanged. A request's `cache_control` marks
-the last cacheable system block and the last block of the last user message
-(`anthropic/payload.rs:39`).
+the last cacheable system block and the last logged block of the last user
+message: request-only context (`context_tail`) stays after it, so the
+breakpoint is where the next turn's cached message also ends
+(`anthropic/payload.rs`).
 An `output_schema` is sent as `output_config.format: {"type": "json_schema",
 "schema": ...}`, beside `output_config.effort` (`anthropic/payload.rs`). It
 needs no beta header and works with tools, thinking and streaming; it shapes

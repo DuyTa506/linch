@@ -65,7 +65,8 @@ What differs in Rust:
    budget end it as failed before the call is made (`turn.rs:271-284`).
 3. **Build the request** from the session's provider view. The
    `context_build` hooks add blocks to the tail of the request only
-   (`turn.rs:285-295`, `runner/hooks.rs:117-129`). They are never logged.
+   (`turn.rs:285-295`, `runner/hooks.rs:117-129`). They are never logged, and the request carries their count as
+   `context_tail`, so a provider's cache breakpoint stays on the last logged block before them.
    With `spec.context_budget` set, `ContextBudget::apply` (`context_budget.rs`)
    then drops whole blocks by the declared order until they fit: it counts
    only these blocks at four characters per token, never the system, the tools

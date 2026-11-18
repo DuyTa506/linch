@@ -31,6 +31,7 @@ fn request(thinking: bool, messages: Vec<Message>, tools: Vec<ToolDefinition>) -
         system: vec![],
         tools,
         appended_tools: vec![],
+        context_tail: 0,
         messages,
         max_output_tokens: Some(1024),
         temperature: None,

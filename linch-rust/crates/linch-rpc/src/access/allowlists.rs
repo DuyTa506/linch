@@ -63,6 +63,8 @@ pub struct Allowlists {
     pub(crate) max_schedules: Option<u64>,
     pub(crate) min_schedule_interval: Duration,
     pub(crate) max_queued_jobs: Option<u64>,
+    pub(super) memory: bool,
+    pub(super) max_memories: Option<u64>,
     pub(super) provider_origins: Vec<Origin>,
     pub(super) permission_modes: Vec<PermissionMode>,
     pub(super) workspace_roots: Vec<PathBuf>,
@@ -242,6 +244,8 @@ impl Allowlists {
             max_schedules: None,
             min_schedule_interval: DEFAULT_MIN_SCHEDULE_INTERVAL,
             max_queued_jobs: None,
+            memory: false,
+            max_memories: None,
             provider_origins: Vec::new(),
             permission_modes: vec![PermissionMode::Default, PermissionMode::AcceptEdits],
             workspace_roots: Vec::new(),
@@ -364,6 +368,28 @@ impl Allowlists {
     /// [`DEFAULT_MIN_SCHEDULE_INTERVAL`] unless set.
     pub fn min_schedule_interval(mut self, min: Duration) -> Self {
         self.min_schedule_interval = min;
+        self
+    }
+
+    /// Whether a config may turn on long-term `memory`, which stores what
+    /// the model saves in the tenant's database, namespaces and scope
+    /// included; off (the default) refuses it (`kind: memory`). It also
+    /// needs [`Self::max_memories`]: a config that turns memory on for a
+    /// tenant with no cap is refused too.
+    pub fn memory(mut self, allowed: bool) -> Self {
+        self.memory = allowed;
+        self
+    }
+
+    /// How many memories the tenant may keep, in all its namespaces of a
+    /// database. A config's `memory.max_memories` is bounded by it (the
+    /// smaller holds, and a config that names none gets it), so a save past
+    /// it fails for the model with `limit_reached`. A config's
+    /// `max_memories_per_scope` is bounded by the cap the same way, and a
+    /// config that names none gives each scope a quarter of it. `None` (the
+    /// default) is no cap, which refuses every config with `memory`.
+    pub fn max_memories(mut self, max: Option<u64>) -> Self {
+        self.max_memories = max;
         self
     }
 

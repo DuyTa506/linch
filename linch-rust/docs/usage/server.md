@@ -128,6 +128,8 @@ token twice is refused. A tenant only a worker serves needs no token.
 | `max_tool_cache_bytes` | 67108864 (64 MiB) | Bytes of cached results all of the tenant's namespaces may hold together; at least 1 |
 | `max_queued_jobs` | none: no background runs | Unfinished background jobs it may have when it queues one |
 | `system_sections` | none | System prompt sections `{"name", "text", "order"?, "cacheable"?}` added to every agent of the tenant; the tenant cannot remove or rename them, and `replace_defaults` leaves them in. Changing them refuses the resume of the tenant's in-flight runs ([Agent config](./agent.md#system-sections)) |
+| `memory` | `false`: no long-term memory | Whether a config may turn on [`memory`](./memory.md#built-in-long-term-memory) |
+| `max_memories` | none, which refuses `memory` (the server will not load a config with `memory` and no cap) | Memories it may keep in all its namespaces of a database; an agent's own `max_memories` and `max_memories_per_scope` are held to it |
 | `execution` | `[{"backend": "local"}]` | The execution backends a config may choose, each with its whole policy; a config's `execution` must equal one, and a config naming none gets the first, so `[{"backend": "sandbox"}]` holds the tenant to the sandbox ([Sandbox](./sandbox.md)) |
 
 The live providers at their public endpoints and the memory stores need no

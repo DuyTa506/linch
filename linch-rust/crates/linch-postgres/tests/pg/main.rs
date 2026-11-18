@@ -11,6 +11,7 @@ mod idle;
 mod isolation;
 mod lease;
 mod mailbox;
+mod memory;
 mod migrations;
 mod pool;
 mod refusals;

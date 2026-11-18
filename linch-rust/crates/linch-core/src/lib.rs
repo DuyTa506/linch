@@ -30,6 +30,7 @@ pub mod ids;
 pub mod journal;
 pub mod json;
 pub mod loop_guard;
+pub mod memory;
 pub mod message;
 pub mod permissions;
 pub mod policy;
@@ -76,6 +77,10 @@ pub use ids::{RunId, SessionId};
 pub use journal::{Journal, JournalError, ReconcileError, Recovery, ToolRecovery, reconcile};
 pub use json::{JsonObject, JsonValue};
 pub use loop_guard::LoopGuard;
+pub use memory::{
+    InMemoryMemoryStore, InvalidMemory, Memory, MemoryError, MemoryStore, NewMemory,
+    default_scope_cap, principal_scope, recall_terms, search_terms,
+};
 pub use message::{
     CatalogChangeBlock, ContentBlock, ImageBlock, ImageSource, Message, RedactedThinkingBlock,
     Role, SkillStamp, SystemBlock, TextBlock, ThinkingBlock, ToolResultBlock, ToolResultPart,

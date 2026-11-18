@@ -15,6 +15,8 @@ async-trait = "0.1.92"
 linch-core = { path = "../linch-core" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+# `PgMemoryStore`: the index bucket of a namespace and scope.
+sha2 = "0.11.1"
 sqlx = { version = "0.9.0", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "migrate"] }
 thiserror = "2.0.21"
 # `PgMailbox`: the token of the leases one mailbox holds.
@@ -26,5 +28,7 @@ tokio = { version = "1.54.1", features = ["time"] }
 # The idle-connection test drives an agent run: its stream, and a provider
 # held at a gate.
 futures = { version = "0.3.34", default-features = false, features = ["std"] }
+# The memory tests spell Vietnamese text decomposed.
+unicode-normalization = "0.1.26"
 tokio = { version = "1.54.1", features = ["rt", "macros", "time", "sync"] }
 tokio-util = "0.7.20"

@@ -55,6 +55,9 @@ pub enum OpenError {
     /// did not bind the schedule tools before the open.
     #[error("schedule_tools unusable: {0}")]
     ScheduleTools(&'static str),
+    /// The `memory` config is invalid.
+    #[error("memory unusable: {0}")]
+    Memory(&'static str),
     /// The agent itself could not be built.
     #[error(transparent)]
     Build(#[from] BuildError),

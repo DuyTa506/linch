@@ -31,6 +31,16 @@ pub struct ProviderRequest {
     pub appended_tools: Vec<String>,
     /// Conversation messages included in the request.
     pub messages: Vec<Message>,
+    /// How many of the last message's trailing content blocks are context
+    /// the runtime added to this request only (recalled memory, file
+    /// memory, retrieval): they are never logged, so the next request does
+    /// not have them. An adapter that marks a cache breakpoint on the
+    /// conversation puts it on the last block before them, so the cached
+    /// prefix is the same bytes on the next turn; an adapter with automatic
+    /// prefix caching ignores this, and they stay at the tail. 0 when no
+    /// context was added.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub context_tail: usize,
     /// Maximum tokens the provider may generate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
@@ -88,6 +98,10 @@ pub struct OutputSchema {
     /// Human-readable description of the schema.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+}
+
+fn is_zero(count: &usize) -> bool {
+    *count == 0
 }
 
 fn default_strict() -> bool {
@@ -244,6 +258,7 @@ mod tests {
             system: vec![],
             tools: vec![],
             appended_tools: vec![],
+            context_tail: 0,
             messages: vec![],
             max_output_tokens: None,
             temperature: None,

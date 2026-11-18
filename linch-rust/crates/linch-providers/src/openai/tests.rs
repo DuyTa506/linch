@@ -360,3 +360,20 @@ async fn a_port_nothing_listens_on_is_a_connect_error() {
         .expect("nothing listens");
     assert_never_connected(&err);
 }
+
+/// Request-only context stays at the tail of the last message, where
+/// automatic prefix caching leaves it out of the next turn's prefix: the
+/// body is the same with or without the count.
+#[test]
+fn request_only_context_does_not_change_the_body() {
+    let mut messages = vec![linch_core::Message::user_text("question")];
+    messages[0]
+        .content
+        .push(linch_core::ContentBlock::text("recalled memory"));
+    let with = |context_tail| ProviderRequest {
+        messages: messages.clone(),
+        context_tail,
+        ..request("m")
+    };
+    assert_eq!(body(&with(1)), body(&with(0)));
+}

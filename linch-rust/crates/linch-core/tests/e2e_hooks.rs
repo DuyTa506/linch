@@ -194,6 +194,10 @@ async fn context_blocks_reach_the_request_and_not_the_log() {
     assert_eq!(last.role, Role::User);
     assert!(matches!(last.content[0], ContentBlock::ToolResult(_)));
     assert_eq!(tail_texts(last), ["CTX-3"]);
+    // The request says how many trailing blocks are context, so a provider
+    // that takes a cache breakpoint keeps it on the last logged block.
+    assert_eq!(requests[0].context_tail, 1);
+    assert_eq!(requests[1].context_tail, 1);
     assert_eq!(
         requests[1].system, requests[0].system,
         "the system prompt is untouched"

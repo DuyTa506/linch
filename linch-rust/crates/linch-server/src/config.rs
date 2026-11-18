@@ -171,6 +171,13 @@ pub struct AllowConfig {
     /// Background runs (`job.enqueue`) it may have unfinished at once in
     /// each database, at least 1; absent, it may queue none.
     pub max_queued_jobs: Option<u64>,
+    /// Whether a config may turn on long-term `memory`; off when absent.
+    /// It needs `max_memories`: the server refuses to load a config that
+    /// allows memory without a cap.
+    pub memory: bool,
+    /// Memories the tenant may keep in each database, in all its
+    /// namespaces, at least 1; required with `memory`.
+    pub max_memories: Option<u64>,
     /// Endpoints a provider `base_url` may name.
     pub provider_base_urls: Vec<String>,
     /// Permission modes a config may choose; `default` and `accept_edits`
@@ -228,6 +235,16 @@ pub enum ConfigError {
         /// `max_pool_connections`.
         field: &'static str,
     },
+    /// A tenant allows `memory` without a `max_memories` cap, which would
+    /// let a model fill its tables.
+    #[error(
+        "tenant {tenant:?}: allow.memory needs allow.max_memories, \
+         a cap on the memories it may keep"
+    )]
+    MemoryNeedsCap {
+        /// The tenant.
+        tenant: String,
+    },
     /// A token's environment variable is unset or not UTF-8.
     #[error("tenant {tenant:?}: environment variable {var} is unset")]
     TokenEnv {
@@ -251,8 +268,9 @@ impl ServerConfig {
     /// Read a config from its JSON text.
     ///
     /// Raises:
-    ///     ConfigError: If the JSON is invalid, sets no listener, or gives
-    ///         a tenant a cap of 0.
+    ///     ConfigError: If the JSON is invalid, sets no listener, gives
+    ///         a tenant a cap of 0, or allows `memory` without
+    ///         `max_memories`.
     pub fn from_json(text: &str) -> Result<Self, ConfigError> {
         let config: Self = serde_json::from_str(text).map_err(ConfigError::Json)?;
         if config.socket.is_none() && config.http.is_none() && config.worker.is_none() {
@@ -279,10 +297,15 @@ impl ServerConfig {
                     "max_tool_cache_bytes",
                     allow.max_tool_cache_bytes.map(|max| max as usize),
                 ),
+                ("max_memories", allow.max_memories.map(|max| max as usize)),
             ];
             if let Some((field, _)) = caps.into_iter().find(|(_, cap)| *cap == Some(0)) {
                 let tenant = name.clone();
                 return Err(ConfigError::ZeroCap { tenant, field });
+            }
+            if allow.memory && allow.max_memories.is_none() {
+                let tenant = name.clone();
+                return Err(ConfigError::MemoryNeedsCap { tenant });
             }
         }
         Ok(config)
@@ -382,7 +405,9 @@ impl AllowConfig {
             .mcp_urls(&self.mcp_urls)?
             .max_schedules(self.max_schedules)
             .max_queued_jobs(self.max_queued_jobs)
-            .system_sections(&self.system_sections)?;
+            .system_sections(&self.system_sections)?
+            .memory(self.memory)
+            .max_memories(self.max_memories);
         if let Some(ms) = self.min_schedule_interval_ms {
             allow = allow.min_schedule_interval(Duration::from_millis(ms));
         }

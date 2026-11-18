@@ -33,6 +33,8 @@ pub mod fs;
 mod glob;
 mod grep;
 mod input;
+mod memory;
+mod memory_recall;
 mod read;
 mod schedules;
 mod tasks;
@@ -51,6 +53,11 @@ pub use fs::{ExecutionFs, FsError, LocalFs};
 pub use glob::Glob;
 pub use grep::Grep;
 pub use input::READ_FIRST_CODE;
+pub use memory::{
+    MEMORY_TOOL_NAMES, MemoryDelete, MemorySave, MemoryScope, MemorySearch, NoPrincipal,
+    memory_tools,
+};
+pub use memory_recall::{MAX_RECALL, MAX_RECALL_BYTES, MemoryRecall, RECALL_TIMEOUT};
 pub use read::Read;
 pub use schedules::{
     CancelSchedule, CreateSchedule, ListSchedules, NewSchedule, SCHEDULE_TOOL_NAMES,

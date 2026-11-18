@@ -46,6 +46,7 @@
 
 #![forbid(unsafe_code)]
 
+mod agent_memory;
 mod config;
 mod deep;
 mod error;
@@ -57,9 +58,9 @@ pub mod project;
 
 pub use config::{
     AgentConfig, DeepAgentConfig, DeepAgentProfileChoice, DockerPolicy, ExecutionConfig,
-    FilesystemConfig, MIN_LEASE_TTL_MS, McpConfig, McpTransportConfig, ModelRates,
-    PricingOverrides, ProviderConfig, ReasoningSummaryConfig, ReconnectConfig, SandboxPolicy,
-    StoreConfig,
+    FilesystemConfig, MIN_LEASE_TTL_MS, McpConfig, McpTransportConfig, MemoryConfig, ModelRates,
+    PricingOverrides, ProviderConfig, ReasoningSummaryConfig, RecallConfig, ReconnectConfig,
+    SandboxPolicy, StoreConfig,
 };
 pub use error::OpenError;
 pub use linch_core::*;

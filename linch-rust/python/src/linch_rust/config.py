@@ -95,6 +95,62 @@ class Filesystem(TypedDict, total=False):
     memory_scope: Literal["namespace", "principal"]
 
 
+class Recall(TypedDict, total=False):
+    """Automatic recall, as `LongTermMemory.recall`.
+
+    Attributes:
+        k: Most memories one request carries, 1 to 20; 5 when absent.
+    """
+
+    k: int
+
+
+class LongTermMemory(TypedDict, total=False):
+    """Long-term memory kept by the server, as `AgentConfig.memory`.
+
+    `{}` gives the model `MemorySave`, `MemorySearch` and `MemoryDelete`
+    over a store the server picks from `stores`: Postgres rows found by
+    the words they hold (any language, any word of the query matches, more
+    matches rank first) with Postgres stores, in-process memory otherwise.
+    No callback is involved, so scheduled and background agents have it
+    too. The model never names the namespace or the scope. `MemorySave`
+    and `MemoryDelete` are write tools: a background run, which cannot
+    answer an approval, needs a permission mode that allows them, such as
+    `accept_edits`. A remote tenant needs `memory` and `max_memories` in
+    its server allowlists.
+
+    What a memory says is untrusted data: the model reads it escaped and,
+    in recall, inside a delimiter that says so.
+
+    Attributes:
+        scope: `principal` (the default): one memory per tenant and user of
+            the run's principal; a run with none has no memory, never the
+            shared one. `agent`: every session of the namespace shares one
+            memory, so what one user saves reaches every other user; say
+            it only for an agent with a single user, such as a local one.
+        recall: Search memory with the user's latest message before each
+            request and show the model the best matches, at the tail of
+            the request. They are never written to the session, so the
+            cached prefix does not move. Words too common to select (a few
+            English function words, short English words) are not searched
+            for, and with two or more searched words a memory needs two of
+            them. Off when absent; on, it is part of the run contract.
+        max_memories: The most memories the tenant may keep in all its
+            namespaces; a save past it fails for the model with
+            `limit_reached`. The tenant's `max_memories` allowlist bounds
+            it. No cap when absent (a remote tenant always has one).
+        max_memories_per_scope: The most one scope (one principal, or the
+            shared memory) may keep, so a single user cannot fill
+            `max_memories`. A quarter of `max_memories`, at least 1, when
+            absent. Needs `max_memories`, and may not pass it.
+    """
+
+    scope: str
+    recall: Recall
+    max_memories: int
+    max_memories_per_scope: int
+
+
 class LocalExecution(TypedDict):
     """The default execution backend: `Bash` runs as the server's user.
 
@@ -876,6 +932,8 @@ class AgentConfig(TypedDict, total=False):
             Needs Postgres stores, no host tools or callbacks, and a tenant
             whose allowlists give it schedules (a worker runs them); a
             local connection is refused. Off when absent.
+        memory: Long-term memory for the model, in a store that outlives
+            sessions; see `LongTermMemory`. Off when absent.
         deep_agent: The deep agent preset; see `DeepAgent`.
         profile: The domain profile its runs take; see `Profile`.
         pricing: Rates by exact model id (see `ModelRates`) that this agent
@@ -913,6 +971,7 @@ class AgentConfig(TypedDict, total=False):
     tasks: bool
     ask_user: bool
     schedule_tools: bool
+    memory: LongTermMemory
     deep_agent: DeepAgent
     profile: Profile
     pricing: Mapping[str, ModelRates]
