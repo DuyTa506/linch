@@ -322,6 +322,7 @@ async fn listen(mut listener: PgListener, wake: Arc<Notify>) {
 async fn retention_pass_of(pool: PgPool, retention: Retention) {
     match prune_retained(&pool, &retention).await {
         Ok(done) => tracing::info!(
+            stamped = done.stamped,
             runs = done.runs,
             events = done.events,
             sessions = done.sessions,

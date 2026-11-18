@@ -13,6 +13,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use linch_postgres::PgPool;
 use sqlx::{Postgres, Transaction};
+use tokio::time::Instant;
 
 use crate::error::WorkerError;
 
@@ -332,10 +333,19 @@ async fn tombstones(
     Ok(Some(deleted))
 }
 
+/// Pause as long as the batch took, so a pass keeps the database at most
+/// half busy: the batches are plain deletes, and what they write (WAL, dirty
+/// pages, index changes) is shared with every run that is committing.
+async fn rest(started: Instant) {
+    tokio::time::sleep(started.elapsed()).await;
+}
+
 /// Run one retention pass: delete what `retention` says in batches, each its
 /// own transaction (a crash leaves every run and session either whole or
 /// gone, with its tombstone), until nothing older than the windows is left.
 ///
+/// Each batch is followed by a pause as long as the batch took, so a pass
+/// leaves the database at least half free for the runs that are committing.
 /// A pass walks each table once in key order, so a row it could not delete
 /// (a child of a live run, say) is not read again until the next pass. A
 /// pass stops early, with `contended` set, when another pruner (another
@@ -357,6 +367,7 @@ pub async fn prune_retained(pool: &PgPool, retention: &Retention) -> Result<Prun
     let mut done = Pruned::default();
     if let Some(window) = retention.terminal_runs {
         loop {
+            let started = Instant::now();
             match stamp(pool, retention.batch_size).await? {
                 None => {
                     done.contended = true;
@@ -365,9 +376,11 @@ pub async fn prune_retained(pool: &PgPool, retention: &Retention) -> Result<Prun
                 Some(0) => break,
                 Some(n) => done.stamped += n,
             }
+            rest(started).await;
         }
         let mut cursor = (DateTime::<Utc>::UNIX_EPOCH, String::new(), String::new());
         loop {
+            let started = Instant::now();
             match runs_batch(pool, window, retention.batch_size, &cursor).await? {
                 Batch::Contended => {
                     done.contended = true;
@@ -380,11 +393,13 @@ pub async fn prune_retained(pool: &PgPool, retention: &Retention) -> Result<Prun
                     cursor = last;
                 }
             }
+            rest(started).await;
         }
     }
     if let Some(window) = retention.idle_sessions {
         let mut cursor = (String::new(), String::new());
         loop {
+            let started = Instant::now();
             match sessions_batch(pool, window, retention.batch_size, &cursor).await? {
                 Batch::Contended => {
                     done.contended = true;
@@ -397,9 +412,11 @@ pub async fn prune_retained(pool: &PgPool, retention: &Retention) -> Result<Prun
                     cursor = last;
                 }
             }
+            rest(started).await;
         }
     }
     loop {
+        let started = Instant::now();
         match tombstones(pool, retention.tombstones, retention.batch_size).await? {
             None => {
                 done.contended = true;
@@ -408,6 +425,7 @@ pub async fn prune_retained(pool: &PgPool, retention: &Retention) -> Result<Prun
             Some(0) => break,
             Some(n) => done.tombstones += n,
         }
+        rest(started).await;
     }
     Ok(done)
 }
