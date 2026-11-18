@@ -265,7 +265,9 @@ fn metadata(id: Option<String>, output: Option<Vec<JsonValue>>) -> Option<linch_
 
 /// A failed response or an error event. Its code or type gives the HTTP
 /// status the same error has outside a stream, so it retries alike; an
-/// unknown error is a retryable transport error.
+/// unknown error is a retryable transport error. A prompt longer than the
+/// model's context window (`code: context_length_exceeded`) is a
+/// [`ProviderError::ContextLength`], as over HTTP.
 fn failure(what: &str, error: Option<WireError>) -> ProviderError {
     let WireError {
         kind,
@@ -273,12 +275,21 @@ fn failure(what: &str, error: Option<WireError>) -> ProviderError {
         message,
     } = error.unwrap_or_default();
     let status = http::stream_status(code.as_ref(), kind.as_deref());
+    let labels: Vec<&str> = [code.as_ref().and_then(JsonValue::as_str), kind.as_deref()]
+        .into_iter()
+        .flatten()
+        .collect();
+    let detail = message.as_deref().unwrap_or_default();
+    let refused = crate::overflow::RESPONSES.matches(status, &labels, detail);
     let code = match code {
         Some(JsonValue::String(code)) => code,
         Some(JsonValue::Null) | None => "unknown".into(),
         Some(other) => other.to_string(),
     };
     let message = format!("{what}: {code}: {}", message.unwrap_or_default().trim());
+    if refused {
+        return ProviderError::ContextLength { status, message };
+    }
     match status {
         Some(status) => ProviderError::Status {
             status,

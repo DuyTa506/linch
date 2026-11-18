@@ -7,6 +7,7 @@ use reqwest::header::{ACCEPT, RETRY_AFTER};
 use tokio_util::sync::CancellationToken;
 
 use crate::ApiKey;
+use crate::overflow;
 
 /// Longest error summary kept in a [`ProviderError`].
 const MAX_ERROR_CHARS: usize = 500;
@@ -67,7 +68,9 @@ pub(crate) fn transport(key: &ApiKey, err: &reqwest::Error) -> ProviderError {
     }
 }
 
-/// Map a non-2xx response to [`ProviderError::Status`].
+/// Map a non-2xx response to [`ProviderError::Status`], or to
+/// [`ProviderError::ContextLength`] for a prompt too long for the model
+/// (see [`overflow::GEMINI`]).
 ///
 /// The body is `{"error": {"code", "message", "status", "details"}}`; the
 /// summary is `status: message`. The delay comes from `Retry-After`
@@ -88,11 +91,12 @@ pub(crate) fn status_error(
     let header = retry_after
         .and_then(|value| value.trim().parse::<u64>().ok())
         .map(Duration::from_secs);
-    ProviderError::Status {
+    let mapped = ProviderError::Status {
         status,
         retry_after: header.or_else(|| error.as_ref().and_then(retry_delay)),
         message: clean(&summary, key),
-    }
+    };
+    overflow::GEMINI.classify(mapped, &[])
 }
 
 /// An `error` object received inside a 200 stream, mapped by its `code`
@@ -104,11 +108,14 @@ pub(crate) fn stream_error(error: &JsonValue, key: &ApiKey) -> ProviderError {
         .and_then(JsonValue::as_u64)
         .and_then(|code| u16::try_from(code).ok())
     {
-        Some(status) => ProviderError::Status {
-            status,
-            retry_after: retry_delay(error),
-            message,
-        },
+        Some(status) => overflow::GEMINI.classify(
+            ProviderError::Status {
+                status,
+                retry_after: retry_delay(error),
+                message,
+            },
+            &[],
+        ),
         None => ProviderError::Transport { message },
     }
 }
@@ -150,6 +157,31 @@ mod tests {
 
     fn key() -> ApiKey {
         ApiKey::new(SECRET).unwrap()
+    }
+
+    /// Gemini's 400 for an input over the model's token limit is a
+    /// context-length error, in a response or inside a stream; another
+    /// invalid argument is not.
+    #[test]
+    fn an_input_over_the_token_limit_is_a_context_length_error() {
+        let refusal = json!({"code": 400, "status": "INVALID_ARGUMENT", "message":
+            "The input token count (35868) exceeds the maximum number of tokens allowed (32768)."});
+        let body = json!({"error": refusal}).to_string();
+        let err = status_error(400, None, &body, &key());
+        assert!(
+            matches!(&err, ProviderError::ContextLength { status: Some(400), message }
+                if message.starts_with("INVALID_ARGUMENT: The input token count")),
+            "{err:?}"
+        );
+        assert!(matches!(
+            stream_error(&refusal, &key()),
+            ProviderError::ContextLength { .. }
+        ));
+        let other = r#"{"error":{"code":400,"message":"Invalid JSON payload","status":"INVALID_ARGUMENT"}}"#;
+        assert!(matches!(
+            status_error(400, None, other, &key()),
+            ProviderError::Status { .. }
+        ));
     }
 
     #[test]

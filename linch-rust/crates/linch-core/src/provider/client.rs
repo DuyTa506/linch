@@ -82,6 +82,18 @@ pub enum ProviderError {
         /// Redacted summary of the error body.
         message: String,
     },
+    /// The prompt does not fit the model's context window: the provider
+    /// refused it as too long. Retrying the same request cannot succeed;
+    /// a run with compaction shortens its view and calls again. Each
+    /// adapter maps its own provider's error to it.
+    #[error("prompt exceeds the model's context window: {message}")]
+    ContextLength {
+        /// HTTP status the provider answered with; `None` for an error
+        /// that arrived inside a stream with no status of its own.
+        status: Option<u16>,
+        /// Redacted summary of the error.
+        message: String,
+    },
     /// The request cannot be sent as built (an adapter-side check failed).
     #[error("invalid provider request: {message}")]
     InvalidRequest {
@@ -104,7 +116,10 @@ impl ProviderError {
         match self {
             Self::Connect { .. } | Self::Transport { .. } => true,
             Self::Status { status, .. } => matches!(*status, 408 | 429) || *status >= 500,
-            Self::InvalidRequest { .. } | Self::Stream(_) | Self::Cancelled => false,
+            Self::ContextLength { .. }
+            | Self::InvalidRequest { .. }
+            | Self::Stream(_)
+            | Self::Cancelled => false,
         }
     }
 }
@@ -142,5 +157,10 @@ mod tests {
             .retryable()
         );
         assert!(!ProviderError::Cancelled.retryable());
+        let overflow = ProviderError::ContextLength {
+            status: Some(400),
+            message: "prompt is too long".into(),
+        };
+        assert!(!overflow.retryable(), "the same prompt is too long again");
     }
 }

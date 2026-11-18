@@ -97,6 +97,7 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
             tokens_after: 10,
             strategy: "summarize".into(),
             duration_ms: 7,
+            forced: false,
         }),
         Event::LoopGuard(LoopGuardEvent {
             reason: LoopGuardReason::MaxTurns,

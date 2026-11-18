@@ -108,7 +108,7 @@ Request không có tín hiệu hủy, ngân sách retry hay công tắc catalog 
 
 ## Lỗi và retry
 
-`ProviderError` (`client.rs:58`) có sáu variant. Thông báo do adapter viết và không bao
+`ProviderError` (`client.rs:58`) có bảy variant. Thông báo do adapter viết và không bao
 giờ được chứa thông tin xác thực hay header của request.
 
 | Variant | Ý nghĩa | `retryable()` |
@@ -116,6 +116,7 @@ giờ được chứa thông tin xác thực hay header của request.
 | `Connect { message }` | Kết nối chưa bao giờ được tạo (bị từ chối, DNS, TLS handshake, connect timeout), nên request chưa bao giờ được gửi đi. Mỗi adapter ánh xạ `is_connect()` của reqwest sang nó trong `transport` (`anthropic/http.rs:66`, `openai_compat/http.rs:66`, `gemini/http.rs:63`) | có |
 | `Transport { message }` | Request đã gửi đi nhưng không có response nào về (reset, read timeout), hoặc stream bị đứt sau khi đã bắt đầu | có |
 | `Status { status, retry_after, message }` | Mã trạng thái HTTP không thành công | chỉ 408, 429 và >= 500 |
+| `ContextLength { status, message }` | Provider từ chối prompt vì dài hơn cửa sổ ngữ cảnh của model. `status` là `None` với lỗi bên trong một stream. Mỗi adapter ánh xạ lần từ chối của provider của nó ([bên dưới](#context-length-refusals)) | không |
 | `InvalidRequest { message }` | Adapter từ chối request như đã được dựng | không |
 | `Stream(StreamError)` | Event stream vi phạm hợp đồng stream | không |
 | `Cancelled` | Cancel token đã kích hoạt | không |
@@ -232,9 +233,40 @@ checkpoint, và gửi cùng các request, như một run tắt retry và không 
 `reliability_costs_nothing_when_no_call_fails`,
 `crates/linch-core/tests/e2e_provider_retry.rs`).
 
-Phần phục hồi độ dài ngữ cảnh của Python (compaction
-bắt buộc và một lần retry khi provider báo prompt quá dài) không được port: các adapter
-Rust báo đó là một 400 không thể retry.
+Một lỗi `ContextLength` không thể retry, và trước bất kỳ event nào với status 4xx, 503
+hoặc 529 thì nó không tốn gì, như một lần từ chối `Status`. Khi `spec.compaction` được
+đặt, run rút ngắn view của nó và gọi lại thay vì thất bại
+([khôi phục theo độ dài ngữ cảnh](./compaction.md#context-length-recovery)); lời gọi đó là
+lần thử kế tiếp của lượt, không phải một retry.
+
+<a id="context-length-refusals"></a>
+
+### Các lần từ chối vì độ dài ngữ cảnh
+
+`crates/linch-providers/src/overflow.rs` giữ một `Overflow` cho mỗi họ provider: các
+status mà nó có thể đi kèm, các code hoặc type lỗi gọi tên nó, và các cụm từ trong
+thông báo, được so khớp ở dạng chữ thường. `Overflow::classify` biến một lỗi khớp thành
+`ProviderError::ContextLength` và để nguyên mọi lỗi khác. Mỗi adapter áp dụng của riêng
+nó lên body lỗi HTTP và lên một lỗi đến ngay trong stream:
+
+| Adapter | Status | Code hoặc type | Cụm từ trong thông báo |
+|---|---|---|---|
+| Anthropic (`anthropic/http.rs`) | 400 | không có | `prompt is too long`, `exceed context limit` |
+| OpenAI Chat (`openai_compat/http.rs`, `openai/profile.rs`) | 400 | `context_length_exceeded` | `maximum context length` |
+| OpenAI Responses (`responses/stream.rs`) | 400, hoặc `response.failed` | `context_length_exceeded` | `exceeds the context window`, `maximum context length` |
+| Gemini (`gemini/http.rs`) | 400 | không có | `exceeds the maximum number of tokens allowed` |
+| DeepSeek (`deepseek.rs`) | 400 | không có | `maximum context length` |
+| vLLM (server profile) | 400 | không có | `maximum context length` |
+| SGLang (server profile) | 400 | không có | `maximum context length`, `exceeds the maximum allowed length` |
+| llama.cpp (server profile) | 400 | `exceed_context_size_error` | `exceeds the available context size`, `larger than the max context size` |
+
+Status 413 của Anthropic nghĩa là body quá lớn tính theo byte, điều mà compaction có thể
+không sửa được, nên nó vẫn là một `Status`. Nguồn: code của OpenAI nằm trong các SDK của
+nó và code `response.failed` của Responses nằm trong fixture của Codex; văn bản của vLLM,
+SGLang và llama.cpp nằm trong mã nguồn của chúng; các cụm từ của Anthropic, Gemini và
+DeepSeek không được vendor ghi tài liệu và lấy từ các lỗi mà những API đó trả về. Một
+server đổi lời trong thông báo sẽ rơi về một `Status` thuần, tức hành vi trước khi có ánh
+xạ này. Vòng lặp SSE che thông báo `ContextLength` như mọi thông báo lỗi.
 
 Không có deadline cho cả một lời gọi provider. HTTP client của mỗi adapter có
 connect timeout 30 s và một read timeout giữa các lần đọc (bên dưới); hãy hủy

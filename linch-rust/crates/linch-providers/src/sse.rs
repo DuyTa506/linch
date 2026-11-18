@@ -148,6 +148,10 @@ fn scrubbed(key: Option<&ApiKey>, err: ProviderError) -> ProviderError {
             retry_after,
             message: scrub(key, &message),
         },
+        ProviderError::ContextLength { status, message } => ProviderError::ContextLength {
+            status,
+            message: scrub(key, &message),
+        },
         other => other,
     }
 }

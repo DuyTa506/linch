@@ -14,6 +14,7 @@ pub mod gemini;
 mod native;
 pub mod openai;
 mod openai_compat;
+mod overflow;
 mod pricing;
 pub mod responses;
 pub mod servers;

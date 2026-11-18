@@ -151,7 +151,8 @@ impl Provider for OpenAiResponses {
         let body = payload::build_payload(&request, &self.options)?;
         let url = format!("{}/responses", self.options.base_url.trim_end_matches('/'));
         let key = &self.options.api_key;
-        let response = http::post(&self.client, &url, Some(key), &body, &cancel).await?;
+        let overflow = &crate::overflow::RESPONSES;
+        let response = http::post(&self.client, &url, Some(key), &body, overflow, &cancel).await?;
         Ok(stream::events(
             response.bytes_stream(),
             stream::Translator::new(request.model),

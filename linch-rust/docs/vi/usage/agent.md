@@ -207,6 +207,7 @@ có, trừ `bash`.
 | `structured_output_retries` | `0` | Bao nhiêu câu trả lời không thỏa `output_schema` được gửi lại cho model trước khi run thất bại; cũng giới hạn schema riêng của một run, nên có thể đặt mà không cần `output_schema` |
 | `redaction` | không có | Các regex rule che response, kết quả tool và tùy chọn cả prompt trước khi bất cứ thứ gì ghi log, stream hay nhìn thấy chúng, `{"rules": [{"pattern", "replacement"?}], "response"?, "tool_results"?, "prompt"?}` ([Bảo mật](./security.md#redaction)) |
 | `verification` | không có | Các kiểm tra mà câu trả lời cuối cùng phải qua, và ngân sách retry mà chúng dùng chung với các callback `stop`, `{"max_retries"?, "verifiers"?}` ([Bảo mật](./security.md#verifiers)) |
+| `truncation_recovery` | không có: câu trả lời bị cắt là câu cuối | Tiếp tục một câu trả lời văn bản bị giới hạn đầu ra cắt, `{"max_attempts"?, "feedback"?}` ([Memory](./memory.md#cut-off-answers)) |
 
 ### System block
 
@@ -241,6 +242,8 @@ spec = {
 | `keep_recent_turns` | `10` | Số lượt assistant được giữ nguyên văn sau bản tóm tắt; tối thiểu 1 |
 | `prompt` | prompt tích hợp sẵn | Chỉ dẫn cho lời gọi tóm tắt |
 | `max_output_tokens` | `4096` | Số token nhiều nhất bản tóm tắt được dùng; tối thiểu 1 |
+| `micro` | `False` | Xóa các kết quả tool cũ trước khi tóm tắt, không có lời gọi model ([Memory](./memory.md#micro-compaction)) |
+| `max_forced` | `3` | Số bản tóm tắt nhiều nhất một run tạo ra vì provider từ chối một prompt là quá dài so với context window; `0` là không bao giờ ([Memory](./memory.md#when-the-prompt-does-not-fit)) |
 
 Khi không có `threshold_tokens` (`"compaction": {}` bật tính năng này), run nén
 giống như Python Linch: khi giá trị ước tính cộng với phần dự trữ cho đầu ra đạt
@@ -250,7 +253,9 @@ phần năm cửa sổ, tối thiểu 1 và tối đa 32768. `threshold_tokens` 
 đó và bỏ qua cửa sổ.
 
 Compaction thực hiện thêm một lời gọi provider trên provider và model của agent,
-và run báo cáo nó bằng một [event](./events.md) `compaction`.
+và run báo cáo nó bằng một [event](./events.md) `compaction`. Khi compaction bật, một prompt bị
+provider từ chối vì quá dài sẽ được rút ngắn và gửi lại; khi tắt, lần từ chối kết thúc run.
+[Memory](./memory.md) nói về cả hai, và về bộ nhớ ngoài.
 
 ### `budget`
 

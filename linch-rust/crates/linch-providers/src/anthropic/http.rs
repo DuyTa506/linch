@@ -8,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::API_VERSION;
 use crate::ApiKey;
+use crate::overflow;
 
 /// Longest error summary kept in a [`ProviderError`].
 const MAX_ERROR_CHARS: usize = 500;
@@ -70,7 +71,9 @@ pub(crate) fn transport(key: &ApiKey, err: &reqwest::Error) -> ProviderError {
     }
 }
 
-/// Map a non-2xx response to [`ProviderError::Status`].
+/// Map a non-2xx response to [`ProviderError::Status`], or to
+/// [`ProviderError::ContextLength`] for a prompt too long for the model
+/// (see [`overflow::ANTHROPIC`]).
 ///
 /// The body is `{"type": "error", "error": {"type", "message"}}`; the
 /// summary is `type: message`, or the trimmed body when it is not that
@@ -85,13 +88,14 @@ pub(crate) fn status_error(
         .ok()
         .and_then(|value| summarize(value.get("error")?))
         .unwrap_or_else(|| body.trim().to_string());
-    ProviderError::Status {
+    let error = ProviderError::Status {
         status,
         retry_after: retry_after
             .and_then(|value| value.trim().parse::<u64>().ok())
             .map(Duration::from_secs),
         message: clean(&summary, key),
-    }
+    };
+    overflow::ANTHROPIC.classify(error, &[])
 }
 
 /// An `error` object received inside a 200 stream.
@@ -115,11 +119,12 @@ pub(crate) fn stream_error(error: &JsonValue, key: &ApiKey) -> ProviderError {
         Some("overloaded_error") => 529,
         _ => return ProviderError::Transport { message },
     };
-    ProviderError::Status {
+    let error = ProviderError::Status {
         status,
         retry_after: None,
         message,
-    }
+    };
+    overflow::ANTHROPIC.classify(error, &[])
 }
 
 fn summarize(error: &JsonValue) -> Option<String> {
@@ -185,6 +190,41 @@ mod tests {
         assert_clean(&err);
         let plain = format!("{}x-api-key={SECRET}", "y".repeat(MAX_ERROR_CHARS - 12));
         assert_clean(&status_error(500, None, &plain, &key()));
+    }
+
+    /// Both forms of Anthropic's 400 for a prompt over the context window
+    /// are a context-length error, in a response or inside a stream; a 413
+    /// (too many bytes) and any other bad request are not.
+    #[test]
+    fn a_prompt_too_long_is_a_context_length_error() {
+        let body = |message: &str| {
+            json!({"type": "error", "error": {"type": "invalid_request_error", "message": message}})
+                .to_string()
+        };
+        for message in [
+            "prompt is too long: 208310 tokens > 200000 maximum",
+            "input length and `max_tokens` exceed context limit: 188240 + 21333 > 200000, \
+             decrease input length or `max_tokens` and try again",
+        ] {
+            let err = status_error(400, None, &body(message), &key());
+            assert!(
+                matches!(&err, ProviderError::ContextLength { status: Some(400), message: m }
+                    if m.contains(message)),
+                "{err:?}"
+            );
+            assert!(!err.retryable());
+            let streamed = json!({"type": "invalid_request_error", "message": message});
+            let err = stream_error(&streamed, &key());
+            assert!(
+                matches!(err, ProviderError::ContextLength { .. }),
+                "{err:?}"
+            );
+        }
+        let too_big = json!({"type": "error", "error": {"type": "request_too_large", "message": "Request exceeds the maximum size"}});
+        let err = status_error(413, None, &too_big.to_string(), &key());
+        assert!(matches!(err, ProviderError::Status { status: 413, .. }));
+        let err = status_error(400, None, &body("tools: bad schema"), &key());
+        assert!(matches!(err, ProviderError::Status { status: 400, .. }));
     }
 
     #[test]

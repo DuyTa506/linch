@@ -185,7 +185,12 @@ class ContextBuildEvent:
 
 @dataclass(frozen=True)
 class CompactionEvent:
-    """The provider view was compacted into a summary, in `duration_ms`."""
+    """The provider view was compacted, in `duration_ms`.
+
+    `strategy` is `summary`, or `micro` when old tool results were cleared
+    with no model call. `forced` is true when the provider's refusal of a
+    prompt as too long caused it, rather than the view reaching the trigger.
+    """
 
     type: ClassVar[str] = "compaction"
     messages_before: int
@@ -194,6 +199,7 @@ class CompactionEvent:
     tokens_after: int
     strategy: str
     duration_ms: int
+    forced: bool = False
 
 
 @dataclass(frozen=True)

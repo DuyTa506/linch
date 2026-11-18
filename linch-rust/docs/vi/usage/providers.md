@@ -257,7 +257,9 @@ Mỗi lượt là `{"events": [...]}`, tức stream event của provider cho m�
 
 Một lượt cũng có thể kết thúc bằng một `error`, để kiểm thử cách host xử lý một
 lời gọi thất bại: `connect` (`message`), `transport` (`message`), `status`
-(`status`, `message`, `retry_after_ms?`) hoặc `invalid_request` (`message`). Khi
+(`status`, `message`, `retry_after_ms?`), `context_length` (`status?`, `message`: prompt
+không vừa, xem [Memory](./memory.md#when-the-prompt-does-not-fit)) hoặc
+`invalid_request` (`message`). Khi
 không có `events`, lời gọi thất bại trước khi có bất kỳ đầu ra nào. Mặc định run
 thử lại một lỗi có thể thử lại, nên ví dụ này tắt thử lại để thấy lỗi kết thúc run:
 
@@ -351,8 +353,12 @@ timeout), HTTP 408, 429 hoặc 5xx (kể cả 529 quá tải của Anthropic), h
 mà provider gửi ngay trong stream với một trong các status đó. Adapter không bao
 giờ thử lại; run mới làm. Một lỗi mà run không thử lại kết thúc run bằng một event
 `error` và một `result` có subtype `error`; dict `error` của event lỗi mang `kind`
-(`connect`, `transport`, `status`, `invalid_request`, `stream`), `retryable` và, với
-lỗi HTTP, cả `status`. Một lời gọi bị hủy kết thúc run ở trạng thái `aborted`. Mỗi
+(`connect`, `transport`, `status`, `context_length`, `invalid_request`, `stream`),
+`retryable` và, với lỗi HTTP, cả `status`. Một prompt bị provider từ chối vì dài hơn
+context window của model (`context_length`) không bao giờ được thử lại: với
+`spec.compaction`, run rút ngắn nó và gọi lại
+([Memory](./memory.md#when-the-prompt-does-not-fit)). Một lời gọi bị hủy kết thúc run ở
+trạng thái `aborted`. Mỗi
 adapter có timeout kết nối 30 giây và timeout đọc giữa các lần đọc (300 giây hoặc
 600 giây); không có hạn chót cho cả một lời gọi.
 

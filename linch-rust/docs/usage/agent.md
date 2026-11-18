@@ -203,6 +203,7 @@ absent, except `bash`.
 | `structured_output_retries` | `0` | How many answers that fail `output_schema` go back to the model before the run fails; also bounds a run's own schema, so it may be set without `output_schema` |
 | `redaction` | none | Regex rules that scrub responses, tool results and optionally the prompt before anything logs, streams or sees them, `{"rules": [{"pattern", "replacement"?}], "response"?, "tool_results"?, "prompt"?}` ([Security](./security.md#redaction)) |
 | `verification` | none | Checks the final answer must pass and the retry budget they share with `stop` callbacks, `{"max_retries"?, "verifiers"?}` ([Security](./security.md#verifiers)) |
+| `truncation_recovery` | none: a cut answer is final | Continue a text answer the output limit cut off, `{"max_attempts"?, "feedback"?}` ([Memory](./memory.md#cut-off-answers)) |
 
 ### System blocks
 
@@ -238,6 +239,8 @@ spec = {
 | `keep_recent_turns` | `10` | Assistant turns kept verbatim after the summary; at least 1 |
 | `prompt` | the built-in prompt | Instructions for the summary call |
 | `max_output_tokens` | `4096` | Most tokens the summary may use; at least 1 |
+| `micro` | `False` | Clear old tool results before summarizing, with no model call ([Memory](./memory.md#micro-compaction)) |
+| `max_forced` | `3` | Most summaries one run makes because the provider refused a prompt as longer than the context window; `0` never ([Memory](./memory.md#when-the-prompt-does-not-fit)) |
 
 Without `threshold_tokens` (`"compaction": {}` turns it on), the run compacts as
 Python Linch does: when the estimate plus an output reserve reaches 80% of the
@@ -247,7 +250,10 @@ at least 1 and at most 32768. A `threshold_tokens` replaces that rule and
 ignores the window.
 
 Compaction makes one extra provider call on the agent's provider and model,
-and the run reports it with a `compaction` [event](./events.md).
+and the run reports it with a `compaction` [event](./events.md). With
+compaction on, a prompt the provider refuses as too long is shortened and
+sent again; without it, the refusal ends the run. [Memory](./memory.md)
+covers both, and external memory.
 
 ### `budget`
 

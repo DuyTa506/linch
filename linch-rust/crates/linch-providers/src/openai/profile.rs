@@ -13,6 +13,7 @@ use serde_json::json;
 use crate::context::ContextRule;
 use crate::openai_compat::payload;
 use crate::openai_compat::stream::{ReasoningField, WireUsage};
+use crate::overflow::Overflow;
 
 /// The wire rules of one Chat Completions target.
 #[derive(Debug)]
@@ -41,6 +42,8 @@ pub(crate) struct ChatProfile {
     pub usage: fn(&WireUsage) -> Usage,
     /// How the target's context window is known when none is configured.
     pub context: ContextRule,
+    /// How the target refuses a prompt longer than its context window.
+    pub overflow: &'static Overflow,
 }
 
 /// Which forced `tool_choice` forms a target accepts; `auto` and `none`
@@ -68,6 +71,7 @@ pub(crate) static OPENAI: ChatProfile = ChatProfile {
     template_thinking_switch: false,
     usage: openai_usage,
     context: ContextRule::Known(OPENAI_CONTEXT),
+    overflow: &crate::overflow::OPENAI_CHAT,
 };
 
 /// Python's `openai_chat._KNOWN_CONTEXT`; 128000 for the other models.

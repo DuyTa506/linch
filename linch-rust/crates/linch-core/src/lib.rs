@@ -46,6 +46,7 @@ mod structured;
 pub mod subagents;
 pub mod tool;
 pub mod tool_search;
+pub mod truncation;
 pub mod usage;
 pub mod verification;
 pub mod vfs;
@@ -107,4 +108,5 @@ pub use tool::{
     Tool, ToolContext, ToolOutput, ToolOutputError, ToolProgress, ToolResult, ToolScope,
 };
 pub use tool_search::ToolSearch;
+pub use truncation::TruncationRecovery;
 pub use usage::Usage;

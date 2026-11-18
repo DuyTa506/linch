@@ -300,11 +300,13 @@ Một lời gọi `AskUser` đang chờ người dùng: một event cho mỗi l�
 
 ### `CompactionEvent` (`compaction`)
 
-Phần cũ của cuộc hội thoại đã được tóm tắt
+View mà model nhìn thấy đã được rút ngắn
 ([`spec.compaction`](./agent.md#compaction)): `messages_before`,
-`messages_after`, `tokens_before`, `tokens_after` (là giá trị ước tính),
-`strategy`, và `duration_ms`, là thời gian từ lúc quyết định nén đến event này
-(lời gọi tóm tắt và phép chiếu).
+`messages_after`, `tokens_before`, `tokens_after` (là giá trị ước tính), `strategy`
+(`summary`, hoặc `micro` khi các kết quả tool cũ bị xóa mà không có lời gọi model),
+`duration_ms`, là thời gian từ lúc quyết định nén đến event này (lời gọi tóm tắt và
+phép chiếu), và `forced`, là true khi nguyên nhân là provider từ chối một prompt vì quá
+dài ([Memory](./memory.md#when-the-prompt-does-not-fit)).
 
 ### `LoopGuardEvent` (`loop_guard`)
 
@@ -350,7 +352,7 @@ Một lời gọi [callback](./agent.md#callback) và cách nó kết thúc.
 
 Một lỗi mà run đã ghi lại. `error` là một dict có `name`, `message` và
 `retryable`; lỗi của provider còn có `kind` (`connect`, `transport`,
-`status`, `invalid_request`, `stream`) và, với lỗi HTTP, cả `status`:
+`status`, `context_length`, `invalid_request`, `stream`) và, với lỗi HTTP, cả `status`:
 
 ```text
 {'name': 'ProviderError', 'kind': 'status', 'message': 'provider returned HTTP 503: busy', 'retryable': True, 'status': 503}

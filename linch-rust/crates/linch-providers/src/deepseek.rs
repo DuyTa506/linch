@@ -115,9 +115,11 @@ impl Provider for DeepSeek {
             self.options.base_url.trim_end_matches('/')
         );
         let key = &self.options.api_key;
-        let response = http::post(&self.client, &url, Some(key), &body, &cancel).await?;
+        let overflow = &crate::overflow::DEEPSEEK;
+        let response = http::post(&self.client, &url, Some(key), &body, overflow, &cancel).await?;
         let translator =
-            Translator::new(request.model, Some(ReasoningField::ReasoningContent), usage);
+            Translator::new(request.model, Some(ReasoningField::ReasoningContent), usage)
+                .refusing(overflow);
         Ok(stream::events(
             response.bytes_stream(),
             translator,

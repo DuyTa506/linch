@@ -153,3 +153,163 @@ fn without_a_threshold_it_is_due_at_80_percent_of_the_window_less_the_reserve() 
     assert!(due(&explicit, None, 1_000_000, 10));
     assert!(!due(&explicit, Some(1), 1, 9));
 }
+
+#[test]
+fn the_ladder_fields_stay_off_the_wire_at_their_defaults() {
+    let spec = CompactionSpec::new(9);
+    assert!(!spec.micro);
+    assert_eq!(spec.max_forced, 3);
+    assert_eq!(
+        serde_json::to_value(&spec).unwrap(),
+        json!({"threshold_tokens": 9, "keep_recent_turns": 10, "max_output_tokens": 4096}),
+        "a spec written before the ladder keeps its contract"
+    );
+    let set: CompactionSpec =
+        serde_json::from_value(json!({"micro": true, "max_forced": 0})).unwrap();
+    assert!(set.micro);
+    assert_eq!(set.max_forced, 0);
+    assert_eq!(
+        serde_json::to_value(&set).unwrap()["micro"],
+        json!(true),
+        "a set field is part of the contract"
+    );
+}
+
+/// The prompt, then `n` tool turns whose results are `size` bytes long.
+fn long_view(n: usize, size: usize) -> Vec<Arc<Message>> {
+    let mut messages = vec![Arc::new(Message::user_text("go"))];
+    for i in 0..n {
+        let [call, _] = tool_turn(i);
+        let result = ToolResultBlock::text(format!("c{i}"), "x".repeat(size), false);
+        messages.push(Arc::new(call));
+        messages.push(Arc::new(Message::new(
+            Role::User,
+            vec![ContentBlock::ToolResult(result)],
+        )));
+    }
+    messages
+}
+
+fn result_text(message: &Message) -> String {
+    match &message.content[0] {
+        ContentBlock::ToolResult(result) => match &result.content[0] {
+            ToolResultPart::Text(text) => text.text.clone(),
+            ToolResultPart::Image(_) => "image".into(),
+        },
+        _ => panic!("not a tool result"),
+    }
+}
+
+#[test]
+fn micro_compaction_clears_old_results_and_keeps_every_call_paired() {
+    let view = long_view(3, 100);
+    let (before, cleared) = clear_tool_results(&view, 1).unwrap();
+    assert_eq!(before, 5, "the last assistant turn is kept");
+    assert_eq!(cleared.len(), view.len());
+    assert_eq!(result_text(&cleared[2]), CLEARED_RESULT);
+    assert_eq!(result_text(&cleared[4]), CLEARED_RESULT);
+    assert_eq!(result_text(&cleared[6]), "x".repeat(100), "kept as it was");
+    for at in [0, 1, 3, 5, 6] {
+        assert!(Arc::ptr_eq(&view[at], &cleared[at]), "{at} is shared");
+    }
+    match &cleared[2].content[0] {
+        ContentBlock::ToolResult(result) => assert_eq!(result.tool_use_id, "c0"),
+        _ => panic!("not a tool result"),
+    }
+    assert!(estimate_tokens(&cleared) < estimate_tokens(&view));
+    assert_eq!(
+        clear_tool_results(&cleared, 1),
+        None,
+        "nothing left to clear"
+    );
+    assert_eq!(cleared_before(&view, before), Some(cleared));
+}
+
+#[test]
+fn micro_compaction_skips_short_results_and_short_views() {
+    // "text" is shorter than the placeholder.
+    assert_eq!(clear_tool_results(&view(3), 1), None);
+    assert_eq!(clear_tool_results(&long_view(1, 100), 1), None);
+    assert_eq!(clear_tool_results(&long_view(3, 100), 10), None);
+    let image = ToolResultBlock {
+        tool_use_id: "c0".into(),
+        content: vec![ToolResultPart::Image(ImageBlock {
+            source: ImageSource::Url { url: "u".into() },
+        })],
+        is_error: false,
+    };
+    let mut view = long_view(2, 1);
+    view[2] = Arc::new(Message::new(
+        Role::User,
+        vec![ContentBlock::ToolResult(image)],
+    ));
+    let (_, cleared) = clear_tool_results(&view, 1).unwrap();
+    assert_eq!(
+        result_text(&cleared[2]),
+        CLEARED_RESULT,
+        "an image is cleared"
+    );
+}
+
+#[test]
+fn a_forced_summary_keeps_only_the_last_turn_when_the_kept_turns_fold_nothing() {
+    let view = long_view(3, 10);
+    assert_eq!(forced_keep_from(&view, 2), Some(3));
+    assert_eq!(forced_keep_from(&view, 10), Some(5));
+    assert_eq!(forced_keep_from(&long_view(1, 10), 10), None);
+}
+
+mod forced {
+    use super::super::Forced;
+    use crate::events::model_call::{ModelCallDeliveryEvent, ModelCallKind};
+    use crate::events::{Envelope, Event};
+    use crate::ids::RunId;
+
+    fn delivery(seq: u64, kind: ModelCallKind, turn: u64) -> Envelope {
+        let event = Event::ModelCallDelivery(ModelCallDeliveryEvent {
+            run_id: RunId::new("r"),
+            logical_call_id: format!("r:{kind:?}:{turn}"),
+            delivery_attempt_id: format!("r:{kind:?}:{turn}:{seq}"),
+            kind,
+            turn_index: Some(turn),
+            requested_model: "m".into(),
+        });
+        Envelope {
+            v: crate::events::WIRE_VERSION,
+            seq,
+            run_id: RunId::new("r"),
+            ts_ms: 0,
+            ignorable: false,
+            event,
+        }
+    }
+
+    fn forced(spent: u32, summary_calls: u32, primary_calls: u32, latest: bool) -> Forced {
+        Forced {
+            spent,
+            summary_calls,
+            primary_calls,
+            latest_forced: latest,
+        }
+    }
+
+    #[test]
+    fn a_summary_after_a_primary_call_of_its_turn_is_forced() {
+        use ModelCallKind::{Compaction as C, Primary as P};
+        let events: Vec<_> = [(C, 0), (P, 0), (P, 1), (C, 1), (C, 1), (P, 1), (C, 2)]
+            .into_iter()
+            .enumerate()
+            .map(|(seq, (kind, turn))| delivery(seq as u64, kind, turn))
+            .collect();
+        let at = |turn, upto: usize| Forced::of(&events[..upto], turn);
+        assert_eq!(at(0, 2), forced(0, 1, 1, false));
+        assert_eq!(at(1, 4), forced(1, 1, 1, true));
+        assert_eq!(
+            at(1, 5),
+            forced(1, 2, 1, true),
+            "a second attempt of one summary is not another"
+        );
+        assert_eq!(at(1, 6), forced(1, 2, 2, true));
+        assert_eq!(at(2, 7), forced(1, 1, 0, false));
+    }
+}

@@ -45,18 +45,31 @@ pub(super) enum Step {
     },
     /// Compact the provider view if it passed the threshold, with summary
     /// delivery `attempt`, after staging the `abandoned` receipt of an
-    /// unsettled earlier attempt; then dispatch.
+    /// unsettled earlier attempt; then dispatch. With `redispatch`, the
+    /// provider refused the turn's primary call as too long: compact
+    /// whether due or not, then dispatch that attempt of the call.
     Compact {
         attempt: u32,
         abandoned: Option<ModelCallReceiptEvent>,
+        redispatch: Option<u32>,
     },
     /// Append the projection of a durable summary unless `appended`, then
-    /// dispatch.
+    /// dispatch `attempt`.
     Compacted {
         summary: Message,
         keep_from: u64,
         appended: bool,
+        attempt: u32,
     },
+    /// Append the projection of a durable micro-compaction unless
+    /// `appended`, then dispatch `attempt`.
+    Cleared {
+        before: u64,
+        attempt: u32,
+        appended: bool,
+    },
+    /// A forced summary settled without a summary: end the run failed.
+    Unshortened,
     /// Dispatch delivery `attempt` of the current turn, after staging the
     /// `abandoned` receipt of an unsettled earlier attempt.
     Dispatch {
@@ -138,6 +151,19 @@ pub(super) struct Runner {
     /// Verification retries the run spent (see `runner/structured.rs`),
     /// counted from its durable log on a resume.
     pub(super) verify_retries: u32,
+    /// Summaries the run began because the provider refused a prompt as
+    /// too long (see `runner/compact.rs`), counted from its durable
+    /// deliveries on a resume.
+    pub(super) forced: u32,
+    /// Summary deliveries of the current turn, so the next one takes the
+    /// next attempt id.
+    pub(super) summary_calls: u32,
+    /// Cut answers the run continued (see [`crate::truncation`]), counted
+    /// from its durable log on a resume.
+    pub(super) truncations: u32,
+    /// The cut parts the next text answer continues; its final answer
+    /// starts with them.
+    pub(super) truncated: String,
 }
 
 impl Runner {
@@ -179,6 +205,10 @@ impl Runner {
             output,
             schema_retries: 0,
             verify_retries: 0,
+            forced: 0,
+            summary_calls: 0,
+            truncations: 0,
+            truncated: String::new(),
         };
         runner.narrow();
         runner
@@ -227,12 +257,26 @@ impl Runner {
                     }
                     Some(self.turn_start().await)
                 }
-                Step::Compact { attempt, abandoned } => self.compact(attempt, abandoned).await?,
+                Step::Compact {
+                    attempt,
+                    abandoned,
+                    redispatch,
+                } => self.compact(attempt, abandoned, redispatch).await?,
                 Step::Compacted {
                     summary,
                     keep_from,
                     appended,
-                } => self.compacted(summary, keep_from, appended).await?,
+                    attempt,
+                } => (self.compacted(summary, keep_from, appended, attempt)).await?,
+                Step::Cleared {
+                    before,
+                    attempt,
+                    appended,
+                } => self.cleared(before, attempt, appended).await?,
+                Step::Unshortened => {
+                    self.unshortened().await?;
+                    None
+                }
                 Step::Dispatch { attempt, abandoned } => self.dispatch(attempt, abandoned).await?,
                 Step::Received {
                     message,
@@ -249,6 +293,7 @@ impl Runner {
                     // start.
                     self.post_turn(self.stop_reason).await;
                     self.turn += 1;
+                    self.summary_calls = 0;
                     Some(self.turn_start().await)
                 }
             };
@@ -268,6 +313,7 @@ impl Runner {
             Some(_) => Step::Compact {
                 attempt: 1,
                 abandoned: None,
+                redispatch: None,
             },
             None => Step::Dispatch {
                 attempt: 1,
@@ -412,6 +458,13 @@ impl Runner {
             self.abort().await?;
             return Ok(None);
         }
+        // A prompt too long for the model: shorten the view and call again,
+        // which is not a provider retry.
+        if matches!(failure.error, ProviderError::ContextLength { .. })
+            && let Some(next) = self.overflow(attempt).await?
+        {
+            return Ok(Some(next));
+        }
         match self.recover(&failure, attempt, &call_model).await? {
             Recovered::Call(next) => return Ok(Some(next)),
             Recovered::Ended => return Ok(None),
@@ -497,7 +550,21 @@ impl Runner {
         if let Some(retry) = retry {
             return Ok(Some(self.feedback(retry).await?));
         }
+        // The parts the output limit cut off before this response.
+        let parts = std::mem::take(&mut self.truncated);
         if calls.is_empty() {
+            if let Some(reminder) = self.continuing(stop_reason, &text) {
+                self.truncated = parts + &text;
+                self.truncations += 1;
+                return Ok(Some(self.feedback(Message::user_text(reminder)).await?));
+            }
+            let stitched = !parts.is_empty();
+            let mut text = parts + &text;
+            // Each part was scrubbed as a response; a match the cut split
+            // across two parts is whole only here.
+            if stitched && let Some(redactor) = self.agent.response_redactor() {
+                text = redactor.text(&text).into_owned();
+            }
             if let Some(next) = self.hear_back().await? {
                 return Ok(next);
             }
@@ -529,5 +596,14 @@ impl Runner {
             approvals: HashMap::new(),
             after_seq: None,
         })))
+    }
+
+    /// The feedback that continues a text answer with `text` that stopped
+    /// for `stop_reason`, when it is cut off and the spec's truncation
+    /// recovery has an attempt left; `None` takes it as the answer.
+    fn continuing(&self, stop_reason: StopReason, text: &str) -> Option<String> {
+        let spec = self.agent.spec.truncation_recovery.as_ref()?;
+        let left = self.truncations < spec.max_attempts;
+        (left && crate::truncation::cut(stop_reason, text)).then(|| spec.reminder())
     }
 }

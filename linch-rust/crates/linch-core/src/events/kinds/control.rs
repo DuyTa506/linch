@@ -75,6 +75,11 @@ pub struct CompactionEvent {
     /// Wall time in milliseconds from the decision to compact to this
     /// event: the summary call and building the projection.
     pub duration_ms: u64,
+    /// Whether the provider's refusal of a prompt as longer than its
+    /// context window forced this compaction, rather than the view
+    /// reaching the trigger at a turn's start. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub forced: bool,
 }
 
 /// Why a [`LoopGuardEvent`] tripped.

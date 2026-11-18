@@ -105,7 +105,7 @@ request; the cancel token is the second argument of `stream`.
 
 ## Errors and retries
 
-`ProviderError` (`client.rs:58`) has six variants. Messages are written by
+`ProviderError` (`client.rs:58`) has seven variants. Messages are written by
 the adapter and must never hold credentials or request headers.
 
 | Variant | Meaning | `retryable()` |
@@ -113,6 +113,7 @@ the adapter and must never hold credentials or request headers.
 | `Connect { message }` | The connection was never made (refused, DNS, TLS handshake, connect timeout), so the request never went out. Each adapter's `transport` maps reqwest's `is_connect()` to it (`anthropic/http.rs:66`, `openai_compat/http.rs:66`, `gemini/http.rs:63`) | yes |
 | `Transport { message }` | The request went out but no response came back (reset, read timeout), or the stream broke after it began | yes |
 | `Status { status, retry_after, message }` | Non-success HTTP status | 408, 429 and >= 500 only |
+| `ContextLength { status, message }` | The provider refused the prompt as longer than the model's context window. `status` is `None` for an error inside a stream. Each adapter maps its own provider's refusal ([below](#context-length-refusals)) | no |
 | `InvalidRequest { message }` | The adapter refused the request as built | no |
 | `Stream(StreamError)` | The event stream broke the stream contract | no |
 | `Cancelled` | The cancel token fired | no |
@@ -236,9 +237,40 @@ retries off and no fallbacks (pinned by
 `reliability_costs_nothing_when_no_call_fails`,
 `crates/linch-core/tests/e2e_provider_retry.rs`).
 
-Python's context-length recovery (a
-forced compaction and one retry when a provider says the prompt is too
-long) is not ported: Rust adapters report that as a non-retryable 400.
+A `ContextLength` failure is not retryable, and before any event with a 4xx,
+503 or 529 status it cost nothing, like a `Status` refusal. With
+`spec.compaction` set, the run shortens its view and calls again instead of
+failing ([context-length recovery](./compaction.md#context-length-recovery));
+that call is the turn's next attempt, not a retry.
+
+### Context-length refusals
+
+`crates/linch-providers/src/overflow.rs` holds one `Overflow` per provider
+family: the statuses it may come with, the error codes or types that name it,
+and the message phrases, matched in lower case. `Overflow::classify` turns a
+matching error into `ProviderError::ContextLength` and leaves any other as it
+was. Each adapter applies its own on an HTTP error body and on an error that
+arrives inside the stream:
+
+| Adapter | Status | Code or type | Message phrases |
+|---|---|---|---|
+| Anthropic (`anthropic/http.rs`) | 400 | none | `prompt is too long`, `exceed context limit` |
+| OpenAI Chat (`openai_compat/http.rs`, `openai/profile.rs`) | 400 | `context_length_exceeded` | `maximum context length` |
+| OpenAI Responses (`responses/stream.rs`) | 400, or `response.failed` | `context_length_exceeded` | `exceeds the context window`, `maximum context length` |
+| Gemini (`gemini/http.rs`) | 400 | none | `exceeds the maximum number of tokens allowed` |
+| DeepSeek (`deepseek.rs`) | 400 | none | `maximum context length` |
+| vLLM (server profile) | 400 | none | `maximum context length` |
+| SGLang (server profile) | 400 | none | `maximum context length`, `exceeds the maximum allowed length` |
+| llama.cpp (server profile) | 400 | `exceed_context_size_error` | `exceeds the available context size`, `larger than the max context size` |
+
+Anthropic's 413 means the body is too large in bytes, which compaction may
+not fix, so it stays a `Status`. Sources: OpenAI's code is in its SDKs and
+the Responses `response.failed` code in Codex's fixtures; vLLM, SGLang and
+llama.cpp's texts are in their source; the Anthropic, Gemini and DeepSeek
+phrases are not documented by the vendor and come from the errors those
+APIs return. A server that rewords its message falls back to a plain
+`Status`, the behaviour before this mapping. The SSE loop scrubs a
+`ContextLength` message like any error message.
 
 There is no deadline on a whole provider call. Each adapter's HTTP client has
 a 30 s connect timeout and a read timeout between reads (below); cancel the

@@ -346,6 +346,38 @@ async fn a_failure_carries_its_error_event_payload() {
     assert!(failure.event.error.get("status").is_none());
 }
 
+/// A prompt refused as too long is free when the refusal came with a
+/// client status before any event; one sent inside a stream with no
+/// status may have been billed, so its usage stays unknown.
+#[tokio::test]
+async fn a_context_length_refusal_follows_the_status_rule() {
+    for (status, free) in [(Some(400), true), (Some(413), true), (None, false)] {
+        let outcome = drive_turn(ScriptedTurn::failing(ScriptedError::ContextLength {
+            status,
+            message: "prompt is too long".into(),
+        }))
+        .await;
+        assert_eq!(
+            outcome.receipt.usage,
+            free.then(Usage::default),
+            "{status:?}"
+        );
+        assert_eq!(outcome.receipt.disposition, CallDisposition::Failed);
+        let failure = outcome.result.unwrap_err();
+        assert_eq!(failure.free, free, "{status:?}");
+        assert_eq!(failure.event.error["kind"], "context_length");
+        assert_eq!(failure.event.error["retryable"], false);
+        assert_eq!(
+            failure
+                .event
+                .error
+                .get("status")
+                .and_then(JsonValue::as_u64),
+            status.map(u64::from)
+        );
+    }
+}
+
 #[test]
 fn the_drive_future_is_send() {
     fn assert_send<T: Send>(_: &T) {}

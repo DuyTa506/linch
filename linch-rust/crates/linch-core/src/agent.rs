@@ -176,6 +176,9 @@ pub(crate) struct AgentInner {
     /// The lease releases of runs dropped mid-run, still in flight.
     pub(crate) releases: Releases,
     session_close: Vec<SessionClose>,
+    /// Run when a run of a session records a compaction (see
+    /// [`AgentBuilder::on_compact`]).
+    compact: Vec<SessionClose>,
     /// The built-in tools this agent registered, removed when it goes.
     registrations: Vec<Registration>,
     /// The reloads of this agent not disposed yet, undone when it goes,
@@ -223,6 +226,13 @@ impl AgentInner {
     /// Run every session-close callback for `session`.
     pub(crate) fn close(&self, session: &SessionId) {
         for callback in &self.session_close {
+            callback(session);
+        }
+    }
+
+    /// Run every compaction callback for `session`.
+    pub(crate) fn compacted(&self, session: &SessionId) {
+        for callback in &self.compact {
             callback(session);
         }
     }

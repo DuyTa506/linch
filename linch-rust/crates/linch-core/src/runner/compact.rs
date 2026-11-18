@@ -1,4 +1,7 @@
-//! Compaction before a turn's primary call (see [`crate::compaction`]).
+//! Compaction of the provider view (see [`crate::compaction`]): at a
+//! turn's start, before the primary call, when the view is due; and out of
+//! turn, forced, when the provider refused the primary call's prompt as
+//! longer than its context window.
 //!
 //! A compacting turn adds two run writes and one session write:
 //! 1. the summary delivery is staged and flushed with a held
@@ -17,11 +20,26 @@
 //! byte-identical. The projection logs both, so they are in the provider
 //! view and never in the full history.
 //!
-//! A summary call that fails, or answers with no text, is not fatal: the
-//! turn goes on uncompacted. Its receipt and `Usage` are written at once,
-//! with a `CompactionPending` checkpoint that counts them (one more run
-//! write), because a paid response is durable as soon as it exists: resume
-//! then goes on to the turn's primary call and never buys it again.
+//! A summary call that fails, or answers with no text, is not fatal at a
+//! turn's start: the turn goes on uncompacted. Its receipt and `Usage` are
+//! written at once, with a `CompactionPending` checkpoint that counts them
+//! (one more run write), because a paid response is durable as soon as it
+//! exists: resume then goes on to the turn's primary call and never buys it
+//! again. A forced summary that gives none ends the run failed instead: the
+//! provider already refused the prompt it would leave.
+//!
+//! Micro-compaction ([`crate::CompactionSpec::micro`]) makes no call: the
+//! `compaction` event rides a held `Cleared` checkpoint, which the session
+//! write of its projection flushes first (one run write, one session
+//! write).
+//!
+//! A forced compaction is never a provider retry: the next primary call is
+//! the next delivery attempt of the turn, with no `provider_retry` event.
+//! Whether a summary was forced, and how many the run began, is read back
+//! from the durable deliveries on resume ([`crate::compaction::Forced`]).
+
+use std::sync::Arc;
+use std::time::Instant;
 
 use crate::agent::RunError;
 use crate::compaction::{self, estimate_tokens};
@@ -36,19 +54,26 @@ use crate::skills;
 
 use super::turn::{Runner, Step};
 
-/// The turn's primary call, first attempt.
-const DISPATCH: Step = Step::Dispatch {
-    attempt: 1,
-    abandoned: None,
-};
+/// Delivery `attempt` of the turn's primary call.
+fn dispatch(attempt: u32) -> Step {
+    Step::Dispatch {
+        attempt,
+        abandoned: None,
+    }
+}
 
 impl Runner {
-    /// Compact the provider view if it passed the threshold, with summary
-    /// delivery `attempt`; then go on to the turn's primary call.
+    /// Compact the provider view with summary delivery `attempt`, then go
+    /// on to the turn's primary call. At a turn's start (`redispatch`
+    /// `None`) only a view that is due compacts, and the primary call's
+    /// first attempt follows. A forced compaction (`redispatch` the primary
+    /// call's next attempt) summarizes whether due or not, and ends the
+    /// run when it cannot.
     pub(super) async fn compact(
         &mut self,
         attempt: u32,
         abandoned: Option<ModelCallReceiptEvent>,
+        redispatch: Option<u32>,
     ) -> Result<Option<Step>, RunError> {
         if let Some(mut receipt) = abandoned {
             self.settle(&mut receipt);
@@ -58,34 +83,55 @@ impl Runner {
             self.abort().await?;
             return Ok(None);
         }
-        let agent = std::sync::Arc::clone(&self.agent);
+        let agent = Arc::clone(&self.agent);
+        let next = dispatch(redispatch.unwrap_or(1));
         let Some(spec) = agent.spec.compaction.as_ref() else {
-            return Ok(Some(DISPATCH));
+            return Ok(Some(next));
         };
         // The primary call ends the run then, with its terminal.
         if self.out_of_turns() || self.refusal().is_some() {
-            return Ok(Some(DISPATCH));
+            return Ok(Some(next));
         }
+        let forced = redispatch.is_some();
         let view = self.log.provider_view();
-        let Some(keep_from) = compaction::keep_from(&view, spec.keep_recent_turns) else {
-            return Ok(Some(DISPATCH));
-        };
+        let keep = spec.keep_recent_turns;
         let tokens_before = estimate_tokens(&view);
-        let window = agent.context_window();
-        if !compaction::due(spec, agent.spec.max_output_tokens, window, tokens_before) {
-            return Ok(Some(DISPATCH));
-        }
-        self.pre_compact(
-            self.turn,
-            view.len() as u64,
-            tokens_before,
-            compaction::STRATEGY,
-        )
-        .await;
-        let started = std::time::Instant::now();
+        let keep_from = if forced {
+            compaction::forced_keep_from(&view, keep)
+        } else {
+            let window = agent.context_window();
+            let limit = agent.spec.max_output_tokens;
+            if !compaction::due(spec, limit, window, tokens_before) {
+                return Ok(Some(next));
+            }
+            // The cheaper step first: enough when it brings the view back
+            // under the trigger.
+            if spec.micro
+                && let Some((before, cleared)) = compaction::clear_tool_results(&view, keep)
+                && !compaction::due(spec, limit, window, estimate_tokens(&cleared))
+            {
+                return self.clear(&view, before, cleared, 1, false).await.map(Some);
+            }
+            compaction::keep_from(&view, keep)
+        };
+        let Some(keep_from) = keep_from else {
+            if forced {
+                self.unshortened().await?;
+                return Ok(None);
+            }
+            return Ok(Some(next));
+        };
+        let strategy = compaction::STRATEGY;
+        self.pre_compact(self.turn, view.len() as u64, tokens_before, strategy)
+            .await;
+        let started = Instant::now();
         self.snapshot = agent.snapshot();
-        let older = view[..keep_from]
-            .iter()
+        // With micro on, the summary reads the folded part with its old
+        // tool results cleared, as Python's does after its micro step.
+        let source = (spec.micro)
+            .then(|| compaction::cleared_before(&view, keep_from))
+            .flatten();
+        let older = (source.as_deref().unwrap_or(&view)[..keep_from].iter())
             .map(|m| Message::clone(m))
             .collect();
         let (tools, appended) = match &self.catalog {
@@ -100,6 +146,7 @@ impl Runner {
         }
         let call =
             ModelCall::prepare_compaction(&self.run.run_id, self.turn, attempt, &request.model);
+        self.summary_calls = self.summary_calls.max(attempt);
         self.journal
             .stage(Event::ModelCallDelivery(call.delivery().clone()));
         self.save(Phase::CompactionPending { attempt }).await?;
@@ -133,11 +180,16 @@ impl Runner {
         };
         let text = text.trim();
         if text.is_empty() {
+            if forced {
+                // One terminal write: the receipt, usage, error and result.
+                self.unshortened().await?;
+                return Ok(None);
+            }
             self.save(Phase::CompactionPending { attempt }).await?;
             let ready = self.journal.flush().await?;
             self.event_emit(&ready).await;
             self.outbox.deliver(ready).await;
-            return Ok(Some(DISPATCH));
+            return Ok(Some(next));
         }
         let mut summary = compaction::summary_message(text);
         if agent.skills.is_some() {
@@ -159,8 +211,9 @@ impl Runner {
             messages_after,
             tokens_before,
             tokens_after,
-            strategy: compaction::STRATEGY.into(),
+            strategy: strategy.into(),
             duration_ms: super::end::millis(started.elapsed()),
+            forced,
         }));
         let keep_from = keep_from as u64;
         self.save(Phase::Compacted {
@@ -174,31 +227,133 @@ impl Runner {
             messages_after,
             tokens_before,
             tokens_after,
-            compaction::STRATEGY,
+            strategy,
         )
         .await;
         Ok(Some(Step::Compacted {
             summary,
             keep_from,
             appended: false,
+            attempt: redispatch.unwrap_or(1),
         }))
     }
 
     /// Append the projection of a durable summary unless `appended`, then
-    /// go on to the turn's primary call. The view is the one the summary
-    /// was made from: the checkpoint's session length proves it unchanged.
+    /// go on to the turn's primary call `attempt`. The view is the one the
+    /// summary was made from: the checkpoint's session length proves it
+    /// unchanged.
     pub(super) async fn compacted(
         &mut self,
         summary: Message,
         keep_from: u64,
         appended: bool,
+        attempt: u32,
     ) -> Result<Option<Step>, RunError> {
         if !appended {
             let view = self.log.provider_view();
             let keep_from = usize::try_from(keep_from).unwrap_or(usize::MAX);
-            self.project(compaction::replacement(&view, summary, keep_from))
+            let replacement = compaction::replacement(&view, summary, keep_from);
+            self.project(replacement, compaction::PROJECTION_REASON)
                 .await?;
         }
-        Ok(Some(DISPATCH))
+        Ok(Some(dispatch(attempt)))
+    }
+
+    /// What follows primary call `attempt` of this turn, which the provider
+    /// refused as longer than the model's context window: micro-compaction
+    /// when the spec has it and it clears something, else a forced summary
+    /// while the run has one left and the view has something to fold, then
+    /// the call's next attempt. `None` when nothing can shorten the view:
+    /// the refusal ends the run, as it does without compaction.
+    pub(super) async fn overflow(&mut self, attempt: u32) -> Result<Option<Step>, RunError> {
+        let agent = Arc::clone(&self.agent);
+        let Some(spec) = agent.spec.compaction.as_ref() else {
+            return Ok(None);
+        };
+        let view = self.log.provider_view();
+        let next = attempt + 1;
+        if spec.micro
+            && let Some((before, cleared)) =
+                compaction::clear_tool_results(&view, spec.keep_recent_turns)
+        {
+            return self
+                .clear(&view, before, cleared, next, true)
+                .await
+                .map(Some);
+        }
+        if self.forced >= spec.max_forced
+            || compaction::forced_keep_from(&view, spec.keep_recent_turns).is_none()
+        {
+            return Ok(None);
+        }
+        self.forced += 1;
+        Ok(Some(Step::Compact {
+            attempt: self.summary_calls + 1,
+            abandoned: None,
+            redispatch: Some(next),
+        }))
+    }
+
+    /// Micro-compaction: record `cleared`, the view with its tool results
+    /// before `before` cleared, as a logged projection, then go on to
+    /// primary call `attempt`. The `compaction` event rides the held
+    /// `Cleared` checkpoint, which the session write flushes first.
+    async fn clear(
+        &mut self,
+        view: &[Arc<Message>],
+        before: usize,
+        cleared: Vec<Arc<Message>>,
+        attempt: u32,
+        forced: bool,
+    ) -> Result<Step, RunError> {
+        let started = Instant::now();
+        let strategy = compaction::MICRO_STRATEGY;
+        let messages = view.len() as u64;
+        let tokens_before = estimate_tokens(view);
+        self.pre_compact(self.turn, messages, tokens_before, strategy)
+            .await;
+        let tokens_after = estimate_tokens(&cleared);
+        self.journal.stage(Event::Compaction(CompactionEvent {
+            messages_before: messages,
+            messages_after: messages,
+            tokens_before,
+            tokens_after,
+            strategy: strategy.into(),
+            duration_ms: super::end::millis(started.elapsed()),
+            forced,
+        }));
+        let before = before as u64;
+        self.save(Phase::Cleared { before, attempt }).await?;
+        self.project(cleared, compaction::MICRO_REASON).await?;
+        self.post_compact(
+            self.turn,
+            messages,
+            messages,
+            tokens_before,
+            tokens_after,
+            strategy,
+        )
+        .await;
+        Ok(dispatch(attempt))
+    }
+
+    /// Append the projection of a durable micro-compaction unless
+    /// `appended`, then go on to primary call `attempt`. The checkpoint's
+    /// session length proves the view unchanged, so clearing it again gives
+    /// the same projection.
+    pub(super) async fn cleared(
+        &mut self,
+        before: u64,
+        attempt: u32,
+        appended: bool,
+    ) -> Result<Option<Step>, RunError> {
+        if !appended {
+            let view = self.log.provider_view();
+            let before = usize::try_from(before).unwrap_or(usize::MAX);
+            if let Some(cleared) = compaction::cleared_before(&view, before) {
+                self.project(cleared, compaction::MICRO_REASON).await?;
+            }
+        }
+        Ok(Some(dispatch(attempt)))
     }
 }

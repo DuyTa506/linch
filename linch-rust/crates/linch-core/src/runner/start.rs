@@ -30,6 +30,7 @@ use crate::store::{Lease, RunRecord, StoreError};
 use crate::structured::{self, OutputContract};
 use crate::subagents::{CONTINUE_TOOL, SUBAGENT_TOOL};
 use crate::tool_search::Loads;
+use crate::truncation::Truncated;
 use crate::usage::Usage;
 
 /// Create the run (the `Started` write-through), append the prompt, and go.
@@ -375,16 +376,36 @@ pub(super) async fn continue_run(
             })
         }
         Recovery::ToolResults { message, appended } => Step::Results { message, appended },
-        Recovery::Recompact { attempt, abandoned } => Step::Compact { attempt, abandoned },
+        Recovery::Recompact {
+            attempt,
+            abandoned,
+            redispatch,
+        } => Step::Compact {
+            attempt,
+            abandoned,
+            redispatch,
+        },
         Recovery::Compacted {
             summary,
             keep_from,
             appended,
+            attempt,
         } => Step::Compacted {
             summary,
             keep_from,
             appended,
+            attempt,
         },
+        Recovery::Cleared {
+            before,
+            attempt,
+            appended,
+        } => Step::Cleared {
+            before,
+            attempt,
+            appended,
+        },
+        Recovery::Unshortened => Step::Unshortened,
     };
     let mut journal = Journal::new(Arc::clone(&agent.runs), lease, record.last_seq);
     held.watch(&journal);
@@ -443,6 +464,17 @@ pub(super) async fn continue_run(
     runner.budget = budget;
     runner.schema_retries = structured::retries_spent(&events);
     runner.verify_retries = crate::verification::retries_spent(&events);
+    let forced = crate::compaction::Forced::of(&events, checkpoint.turn);
+    (runner.forced, runner.summary_calls) = (forced.spent, forced.summary_calls);
+    if let Some(truncation) = &runner.agent.spec.truncation_recovery {
+        let spent = Truncated::of(&events, &truncation.reminder());
+        runner.truncations = spent.attempts;
+        // A response already received continues the parts before it.
+        runner.truncated = match checkpoint.phase {
+            Phase::AssistantReceived { .. } => spent.before_latest,
+            _ => spent.chain,
+        };
+    }
     if let Some(schema) = schema_of(&events) {
         runner.output = Some(compile(&runner.run.run_id, schema)?);
     }

@@ -8,6 +8,26 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ### Added
 
+- Context-length recovery: each adapter maps its provider's refusal of a
+  prompt longer than the context window to `ProviderError::ContextLength`
+  (error kind `context_length`, never retried); with `spec.compaction` set,
+  the run shortens its view and calls again, and without it the run ends.
+- Forced compaction: `spec.compaction.max_forced` (3) bounds the summaries a
+  run makes for context-length refusals; the `compaction` event has `forced`.
+- Micro-compaction: `spec.compaction.micro` clears old tool results with no
+  model call, before a summary (strategy `micro`). Python's
+  `CompactionLadder` micro rung.
+- `DETAILED_PROMPT` (`DETAILED_COMPACTION_PROMPT` in the Python client), for
+  `spec.compaction.prompt`. Python's `DetailedCompaction`.
+- Truncation recovery: `spec.truncation_recovery` continues a text answer
+  the output limit cut off and joins the parts into the final answer.
+  Python's `TruncationRecovery`.
+- A workspace agent must read a file again after a compaction before it
+  edits it (`AgentBuilder::on_compact`). Python's `reset_read_tracker`.
+- `linch_rust.memory`: `retrieval` turns any `Retriever` into a
+  `context_build` callback for external memory, with
+  `examples/external_memory.py` on a folder of Markdown notes.
+- `Compaction` and `TruncationRecovery` TypedDicts in the Python client.
 - Redaction: `spec.redaction` holds regex rules that scrub assistant
   responses (text and unsigned reasoning, before `after_provider_call` and
   before they are logged), tool results (before `post_tool_use`, and
@@ -97,6 +117,8 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ### Changed
 
+- A provider's refusal of a prompt longer than the context window ends a run without `spec.compaction` as `kind` `context_length` with the message `prompt exceeds the model's context window: ...`, where it was `kind` `status` with `provider returned HTTP 400: ...`; `retryable` stays false.
+- A binary older than this one cannot resume a run of an agent with `spec.compaction.micro` that crashed during a micro-compaction (the `cleared` checkpoint phase), nor read the events of a run that made a forced compaction (`forced: true`; events refuse unknown fields). Roll back only once those runs have ended.
 - `ProviderError::retryable()` is true for an HTTP 408, as Python treats a request timeout.
 - With an `after_provider_call` hook attached, an accepted call's receipt and `usage` event are written before the hooks run (`provider_call_stop` included), with `ProviderPending` at the totals that count them; the response is written after them, as before. A crash while such a hook runs no longer loses the paid usage: the resume keeps it in the totals and the budget and calls again under the next delivery attempt, which spends no `provider_retry`. The run costs one more write per accepted call; without an `after_provider_call` hook nothing changes, a `provider_call_stop` observer alone included. `ReconcileError::MissingAssistant` is gone.
 - A binary older than this one refuses to resume a run that crashed between such a receipt and its response (an accepted receipt with no `assistant` event, under `provider_pending`): it fails with `MissingAssistant` and resumes nothing wrongly, but an older `linch-worker` marks such a run `failed` (it fails a run on any reconcile error). Roll back only once those runs have been resumed or ended.

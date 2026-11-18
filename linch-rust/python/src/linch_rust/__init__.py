@@ -17,7 +17,9 @@ from ._binary import find_server
 from .agent import Agent, Allow, Answer, Decision, Deny, Skipped
 from .callbacks import Callback, FailMode, Point, callback
 from .config import (
+    DETAILED_COMPACTION_PROMPT,
     AgentConfig,
+    Compaction,
     DeepAgent,
     DeepAgentProfile,
     Filesystem,
@@ -29,6 +31,7 @@ from .config import (
     Redaction,
     RedactionRule,
     ToolSearch,
+    TruncationRecovery,
     Verification,
     Verifier,
     VerifierCheck,
@@ -104,10 +107,12 @@ __all__ = [
     "BudgetEvent",
     "Callback",
     "ChildRunStatusEvent",
+    "Compaction",
     "CompactionEvent",
     "ConnectionClosed",
     "ContextBuildEvent",
     "ContractMismatch",
+    "DETAILED_COMPACTION_PROMPT",
     "Decision",
     "DeepAgent",
     "DeepAgentProfile",
@@ -168,6 +173,7 @@ __all__ = [
     "ToolOutput",
     "ToolProgressEvent",
     "ToolSearch",
+    "TruncationRecovery",
     "Unauthenticated",
     "UnknownEvent",
     "UsageEvent",

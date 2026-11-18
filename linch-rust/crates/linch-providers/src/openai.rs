@@ -206,12 +206,14 @@ impl Provider for OpenAiChat {
         let body = profile::build_payload(self.profile, &self.thinking_off, &request)?;
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let key = self.api_key.as_ref();
-        let response = http::post(&self.client, &url, key, &body, &cancel).await?;
+        let overflow = self.profile.overflow;
+        let response = http::post(&self.client, &url, key, &body, overflow, &cancel).await?;
         let translator = Translator::new(
             request.model,
             self.profile.reasoning_field,
             self.profile.usage,
-        );
+        )
+        .refusing(overflow);
         Ok(stream::events(
             response.bytes_stream(),
             translator,

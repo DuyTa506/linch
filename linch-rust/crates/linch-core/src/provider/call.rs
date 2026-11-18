@@ -257,9 +257,11 @@ async fn consume(
 fn costs_nothing(error: &ProviderError, seen: &Observed) -> bool {
     match error {
         ProviderError::Connect { .. } => true,
-        ProviderError::Status { status, .. } => {
-            !seen.began && matches!(status, 400..=499 | 503 | 529)
-        }
+        ProviderError::Status { status, .. }
+        | ProviderError::ContextLength {
+            status: Some(status),
+            ..
+        } => !seen.began && matches!(status, 400..=499 | 503 | 529),
         _ => false,
     }
 }
@@ -327,6 +329,7 @@ fn error_event(error: &ProviderError) -> ErrorEvent {
         ProviderError::Connect { .. } => "connect",
         ProviderError::Transport { .. } => "transport",
         ProviderError::Status { .. } => "status",
+        ProviderError::ContextLength { .. } => "context_length",
         ProviderError::InvalidRequest { .. } => "invalid_request",
         ProviderError::Stream(_) => "stream",
         ProviderError::Cancelled => "cancelled",
@@ -336,7 +339,12 @@ fn error_event(error: &ProviderError) -> ErrorEvent {
     payload.insert("kind".into(), kind.into());
     payload.insert("message".into(), error.to_string().into());
     payload.insert("retryable".into(), error.retryable().into());
-    if let ProviderError::Status { status, .. } = error {
+    if let ProviderError::Status { status, .. }
+    | ProviderError::ContextLength {
+        status: Some(status),
+        ..
+    } = error
+    {
         payload.insert("status".into(), (*status).into());
     }
     ErrorEvent { error: payload }
