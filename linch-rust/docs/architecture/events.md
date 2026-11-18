@@ -69,6 +69,7 @@ encoding.
 | `workflow` | `WorkflowEvent`, `kinds/skills.rs:80` | yes | yes | Never in a run's log: `linch-ext` workflows hand it to their event sink ([extensions](./ext.md)) |
 | `verification` | `VerificationEvent`, `kinds/control.rs:209` | yes | yes | The answer gates (`runner/structured.rs`): the output-schema check, `verifier` `output_schema`; a built-in verifier, its `name`; a `stop` hook's retry under `spec.verification`, its `policy_id` (`runner/hooks.rs`). `retry` is staged with the feedback beside it, `stop` in the terminal write, `exhausted` with the accepted answer. A resume counts the retries spent from these, the schema's apart from the rest |
 | `hook` | `HookEvent`, `kinds/hook.rs:14` | no | yes | |
+| `cache_diagnostic` | `CacheDiagnosticEvent`, `kinds/control.rs` | no | yes | Only with `monitoring.cache_diagnostic` on: the run's `CacheWatch` (`crates/linch-core/src/cache_diagnostic.rs`) hashes each request (system, tools, every message; never content) and compares it with the previous answered call. The runner notes the request after `stage_context` and settles it after `provider_call_stop` (`runner/cache.rs`, two calls in `dispatch`), and stages the event stream-only: no write, no barrier, no seq. It is not a hook, because every hook enters the contract digest (`Hooks::policy_digest`) and switching a diagnostic on must not strand a resumable run. Off, the watch is `None` and nothing is hashed |
 | `error` | `ErrorEvent`, `kinds/lifecycle.rs:90` | yes | yes | |
 | `result` | `ResultEvent`, `kinds/lifecycle.rs:115` | yes | yes | The terminal outcome |
 | `model_call_delivery` | `ModelCallDeliveryEvent`, `model_call.rs:33` | yes | no | |
@@ -110,7 +111,7 @@ is classified.
 
 | Class | Kinds | Where it goes |
 |---|---|---|
-| `StreamOnly` | `partial_assistant`, `tool_progress`, `hook` | `Journal::stage` returns it at once with the last durable seq and never stores it (`crates/linch-core/src/journal.rs:136-143`). Tool progress goes straight to the stream's outbox (`crates/linch-core/src/runner/sink.rs:184-189`) |
+| `StreamOnly` | `partial_assistant`, `tool_progress`, `hook`, `cache_diagnostic` | `Journal::stage` returns it at once with the last durable seq and never stores it (`crates/linch-core/src/journal.rs:136-143`). Tool progress goes straight to the stream's outbox (`crates/linch-core/src/runner/sink.rs:184-189`) |
 | `Both` | every other known kind, and `IgnorableEvent` | Staged with the next seq, held until the next barrier write, then delivered in seq order (`journal.rs:328-334`) |
 | `JournalOnly` | the three `model_call_*` kinds | Staged with the next seq and stored like `Both`, but never delivered. `Agent::events` leaves them out too (`crates/linch-core/src/agent.rs:401-417`), and so does the RPC method `run.events`, which calls it |
 

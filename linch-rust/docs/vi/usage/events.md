@@ -155,7 +155,7 @@ stream sẽ đọc đúng những gì nó đã bỏ lỡ.
 
 | Loại | Được lưu và replay |
 |---|---|
-| `partial_assistant`, `tool_progress`, `hook` | Không: gửi ngay, không bao giờ replay |
+| `partial_assistant`, `tool_progress`, `hook`, `cache_diagnostic` | Không: gửi ngay, không bao giờ replay |
 | Mọi loại khác | Có: gửi khi nó đã bền vững |
 
 Stream của một run kết thúc bằng `result` (đã xong) hoặc `suspended` (đang chờ
@@ -408,6 +408,28 @@ Một lời gọi [callback](./agent.md#callback) và cách nó kết thúc.
 | `point`, `policy_id`, `policy_version` | Callback nào |
 | `tool_use_id` | Lời gọi mà nó nhắm tới, ở các điểm tool; ngược lại là `None` |
 | `outcome` | `{"status": "answered", "verdict"}`, `{"status": "failed", "error", "fail_mode"}` hoặc `{"status": "timed_out", "timeout_ms", "fail_mode"}` |
+
+### `CacheDiagnosticEvent` (`cache_diagnostic`), chỉ có trong stream
+
+Vì sao prompt cache của provider đọc được đúng chừng đó ở một lời gọi, so với lời gọi
+trước của run. Event chỉ được gửi khi
+[`monitoring.cache_diagnostic`](./providers.md#tìm-hiểu-vì-sao-cache-bị-trượt) của agent
+bật; nó không được lưu, không được replay và không nằm trong run contract. Khi tắt thì
+không có gì được băm, và stream, log cùng các lần ghi y hệt như trước.
+
+| Trường | Ý nghĩa |
+|---|---|
+| `reason` | Kiểm tra đầu tiên đúng, theo thứ tự: `model_changed`, `provider_changed`, `ttl_expired` (lâu hơn thời gian provider giữ một entry: 5 phút của Anthropic, hoặc 1 giờ khi request yêu cầu; adapter khác không khai báo), `system_changed`, `tools_changed`, `compaction` (hội thoại ngắn đi), `prefix_changed` (một message phía trước khác đi), `low_read` (prefix giữ nguyên nhưng provider chỉ đọc dưới một nửa số input token của lời gọi trước) hoặc `none` |
+| `previous_cached` | Số token lời gọi trước đọc từ cache |
+| `cached` | Số token lời gọi này đọc từ cache |
+| `prompt_tokens` | Input token của lời gọi này, kể cả phần cached |
+| `first_changed_message` | Chỉ số của message đầu tiên khác với request trước, hoặc `None` |
+
+Một event theo sau mỗi lời gọi provider có báo input token, từ lời gọi thứ hai của một
+lần chạy run trở đi (run được resume không còn gì trong bộ nhớ để so, nên lời gọi đầu
+của nó không nói gì). Lời gọi dưới 1024 input token (2048 với OpenAI) không nói gì, vì
+không provider nào cache ít hơn. Event chỉ chứa số đếm và một chỉ số, không bao giờ có
+văn bản hay mã băm.
 
 ### `ErrorEvent` (`error`)
 

@@ -218,9 +218,8 @@ pub struct MonitoringConfig {
     /// Emit a stream-only `cache_diagnostic` event after each provider call
     /// that reports its input tokens, against the run's previous call: why
     /// the provider's prompt cache read what it did (the `CacheDiagnosticEvent`
-    /// of `linch_core`). It keeps a hash
-    /// chain of each request, so a long conversation costs one pass over it
-    /// per call.
+    /// of `linch_core`). It hashes each request, so a long conversation
+    /// costs one pass over it per call; only hashes are kept.
     #[serde(default, skip_serializing_if = "is_false")]
     pub cache_diagnostic: bool,
 }

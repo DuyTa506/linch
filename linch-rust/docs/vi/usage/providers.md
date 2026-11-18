@@ -671,6 +671,67 @@ config = {
   thuộc [hợp đồng của run](./agent.md#hợp-đồng-của-run), nên đổi nó không bao giờ làm
   kẹt một run đang tạm dừng.
 
+## Giữ prompt cache của tenant này tách khỏi tenant khác
+
+Provider cache tiền tố prompt sẽ phục vụ nhanh và rẻ hơn một request bắt đầu giống một
+request trước, và sự chênh lệch đó đo được bằng thời gian. Hai tenant dùng chung một key
+và endpoint của provider vì vậy có thể biết tenant kia đã gửi một tiền tố hay chưa: đó là
+một kênh phụ. Điều mỗi nhà cung cấp cho phép, kiểm tra ngày 2026-11-18 theo tài liệu của họ:
+
+| Provider | Trường | Tài liệu nói gì |
+|---|---|---|
+| `vllm` | `cache_salt`, trường cấp cao nhất của `/v1/chat/completions` | Salt được đưa vào hash của block đầu, nên chỉ các request cùng salt mới dùng lại block đã cache; thêm từ vLLM 0.9.0 (engine V1; V0 từ chối trường này), có trong trang thiết kế prefix caching. vLLM khuyên dùng salt ngẫu nhiên 256 bit. Dùng endpoint chat: một `cache_salt` bị bỏ rơi ở phần tiếp nối của Responses trên vLLM từng là một advisory đã công bố |
+| `openai-chat`, `openai-responses` | `prompt_cache_key` | OpenAI không chia sẻ cache giữa các organization. Trong một organization, key tách việc tái sử dụng cache của các nhóm request, nhưng OpenAI mô tả nó là ảnh hưởng tới routing, không phải bảo đảm. Coi nó là một phân vùng, không phải bức tường; muốn có bức tường, dùng một project và key riêng cho mỗi tenant |
+| `anthropic` | không có | Cache được cô lập theo organization và, trên Claude API, theo workspace. Không có gì cho từng request: các tenant dùng chung key và workspace thì dùng chung cache. Dùng một workspace và key cho mỗi tenant |
+| `deepseek`, `gemini`, `sglang`, `llamacpp` | không có | Không có trường request nào được tài liệu hóa cho việc này. Một key cho mỗi tenant là cách tách duy nhất |
+
+Linch gửi trường đó khi có, từ một tenant của server có `allow.cache_isolation` bật
+([Server](./server.md#cô-lập-prompt-cache)): HMAC-SHA256 của tên tenant dưới secret của
+operator, 64 ký tự hex, giống nhau cho mọi run của tenant trên mọi server và worker có
+secret đó, và khác nhau giữa các tenant. Trong một tenant, cache vẫn như cũ; giữa các
+tenant, các tiền tố giống hệt nhau (ví dụ system prompt dùng chung) không còn trúng entry của
+nhau, nên một triển khai dựa vào việc chia sẻ chéo tenant đó sẽ mất nó. Vì vậy tính năng
+mặc định tắt. Agent trên provider không có trường như vậy bị từ chối (`NotAllowed`, `kind`
+là `cache_isolation`) thay vì để dùng chung. Salt không nằm trong config, run contract,
+event hay log, và `request.extra_body` không thay được nó. Với run cục bộ
+(`AgentConfig.open`, stdio) không có tenant; hãy tự đặt `request.extra_body`
+(`{"cache_salt": "..."}`) nếu cần.
+
+## Tìm hiểu vì sao cache bị trượt
+
+`monitoring: {"cache_diagnostic": True}` khiến agent so sánh mỗi lời gọi provider với lời
+gọi trước của run và stream một event
+[`cache_diagnostic`](./events.md#cachediagnosticevent-cache_diagnostic-chỉ-có-trong-stream)
+chỉ có trong stream: `reason`, `previous_cached`, `cached`, `prompt_tokens` và
+`first_changed_message`. Mặc định tắt; khi bật, nó băm mỗi request (system, tool và từng
+message, một lần cho mỗi lời gọi) và chỉ giữ các mã băm. Nó không đổi request, lần ghi
+store hay event bền vững nào, và không nằm trong run contract.
+
+```python
+from linch_rust import AgentConfig, CacheDiagnosticEvent, Server
+
+config: AgentConfig = {
+    "namespace": "acme",
+    "spec": {"model": "claude-sonnet-4-5", "max_turns": 12},
+    "provider": {"id": "anthropic"},
+    "monitoring": {"cache_diagnostic": True},
+}
+
+
+async def run(server: Server) -> None:
+    agent = await server.open_agent(config)
+    run = await agent.run("s1", "Summarize the repository.")
+    async for envelope in run:
+        if isinstance(envelope.event, CacheDiagnosticEvent):
+            e = envelope.event
+            print(e.reason, e.previous_cached, "->", e.cached, "of", e.prompt_tokens)
+```
+
+`tools_changed` sau khi thêm một tool giữa session, `system_changed` do một dấu thời gian
+trong prompt, hay `prefix_changed` ở message 7 (một hook đã viết lại nó) đều chỉ ra nơi cần
+xem. `ttl_expired` chỉ được khai báo cho Anthropic, vì thời gian giữ của OpenAI phụ thuộc
+model và cài đặt retention.
+
 ## Một HTTP client cho mỗi bộ cài đặt
 
 Một HTTP client giữ một pool kết nối và một cấu hình TLS, khoảng 90 KB. Server mở các
@@ -697,4 +758,5 @@ model của Anthropic; mọi model khác báo `None`. Xem
 
 - [Config của agent](./agent.md#spec): `thinking`, `effort`, `max_output_tokens`.
 - [Event](./events.md): các event `error`, `usage` và `result`.
+- [Server](./server.md#cô-lập-prompt-cache): một salt cho mỗi tenant khi dùng chung key.
 - [Khắc phục sự cố](./troubleshooting.md#opening-an-agent): lỗi khi mở agent.

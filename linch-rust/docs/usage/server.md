@@ -104,6 +104,7 @@ linch-server: listening on ws://127.0.0.1:8731/rpc
 | `tenants` | Each tenant by name: 1 to 64 ASCII letters, digits, `.`, `_` or `-` |
 | `tenants.<name>.tokens` | Its bearer tokens, each `{"env": "VAR"}` (read at startup) or `{"value": "..."}` |
 | `tenants.<name>.allow` | Its allowlists, below |
+| `cache_salt_secret` | `{"env": "VAR"}` or `{"value": "..."}`, at least 16 bytes: what the tenants' prompt-cache salts are derived from ([below](#prompt-cache-isolation)). Required by a tenant whose `allow.cache_isolation` is on |
 | `worker` | Run a worker in this process: it fires schedules and runs background jobs ([Scheduler](./scheduler.md#run-a-worker)). Absent: none |
 | `liveness` | How the HTTP listener notices a client that vanished: TCP keepalive and WebSocket pings ([below](#liveness)). Every field has a default |
 
@@ -117,6 +118,7 @@ token twice is refused. A tenant only a worker serves needs no token.
 | `provider_info` | `false` | `provider.capabilities`, `provider.models` and `provider.model`: the model calls send the server's key to the provider's `base_url`, which must be allowed too. `provider.models` and `provider.model` are limited to 10 a minute per tenant (`-32005`, `kind: provider_calls`); `provider.capabilities` sends no key |
 | `exec_tools` | `false` | `Bash` for workspace agents, which runs commands through the agent's execution backend |
 | `task_ledger` | `false` | A config's `task_ledger`: one task list shared by all the tenant's sessions, whose open tasks every request carries ([Tasks](./tasks.md#a-ledger-that-outlives-sessions)) |
+| `cache_isolation` | `false` | Keeps the tenant's provider prompt cache apart from other tenants' on the same key: every agent sends a salt derived from the tenant's name (`cache_salt` to `vllm`, `prompt_cache_key` to `openai-chat` and `openai-responses`), and an agent on a provider with no such field is refused. It needs the config's top-level `cache_salt_secret` ([below](#tenants-and-namespaces)) |
 | `provider_request` | `false` | A provider's `request` (body fields, headers, a timeout) and `chat` settings ([Providers](./providers.md#request-settings)). Credential, `proxy-*` and forwarding headers stay refused, and the counts and sizes are bounded |
 | `max_runs` | 16 | Runs the tenant drives at once, across all its connections |
 | `max_agents` | 16 | Agents the tenant keeps open at once, across all its connections |
@@ -307,6 +309,85 @@ curl -i -H "Authorization: Bearer $LINCH_TOKEN_ACME" \
 - Tokens are kept only as SHA-256 digests and compared in constant time. No
   token is written to any output.
 
+### What keeps tenants apart
+
+Every table the stores and the worker use (`linch_runs`, `linch_run_events`,
+`linch_sessions`, `linch_session_entries`, `linch_files`, `linch_memories`,
+`linch_mailbox`, `linch_tasks`, `linch_tool_cache`, `linch_ext_workflows`,
+`linch_worker_schedules`) has `namespace` in its primary key. The job tables
+(`linch_worker_jobs`, `linch_worker_history`) are keyed by one global id and
+carry a `namespace` column that `job.get` and `job.list` always bind
+(`crates/linch-worker/src/status.rs:153-186`). Each query names the namespace,
+so a run, session, file, memory, workflow, job or schedule is found only under
+the namespace of the agent that asks. A tenant's
+namespaces all start with its name, and the name never holds `/`, so
+`acme/support` cannot be reached from `acme-eu`. Run, session, workflow, job
+and schedule ids that another tenant holds read exactly like ids nobody has:
+the same code, message and data, with the asked id the only difference
+(`tenant_oracle` in `crates/linch-rpc/tests` pins it for `run.events`,
+`run.report`, `run.resume`, `run.approve`, `run.answer`, `run.steer`,
+`run.cancel`, `workflow.status`, `workflow.start`, `job.get`,
+`schedule.pause`, `schedule.resume`, `schedule.delete` and `session.close`).
+A refused claim (`-32033`) shows only the owner of a run in the tenant's own namespace.
+
+What the key does not do, and what to do about it:
+
+- **One database, one set of tables.** Isolation is the namespace in each
+  query, not row-level security or a schema per tenant. A tenant that must
+  survive a bug in a query gets its own database or schema: give it its own
+  `postgres_dsns` entry (a DSN with its own `search_path`).
+- **Users of one tenant are not apart.** A run, session, file and the shared
+  memory scope belong to the namespace. `principal.user` scopes only the
+  per-principal memory and the permission roles. To keep two users from each
+  other, give each its own namespace (`acme/ada`, `acme/bob`).
+- **Queue names are shared.** `job.enqueue` and `schedule.create` take a
+  `queue` the tenant chooses, and `linch_worker_queues` (the `max_held`
+  concurrency limits) is keyed by the name alone. A tenant that names another
+  tenant's queue lands in its FIFO and counts against its limit. Name one queue
+  per tenant in the worker's `queues` (the worker serves its queues in turn, so
+  that is a fair share) and have the host set the `queue` it sends.
+- **Job ids are one counter.** `linch_worker_jobs.id` is a single identity
+  sequence, so a tenant that reads its own job ids learns how many jobs the
+  server queued in between. It reads nothing else.
+- **A worker's queue is first in, first out.** A tenant with a large
+  `max_queued_jobs` can fill the worker's `max_jobs` slots and make another
+  tenant's jobs of the same queue wait. The per-tenant `max_runs` bounds what
+  it drives at once, not what it holds in the queue; set `max_queued_jobs`
+  to what the worker can drain.
+- **A provider key is shared.** `max_provider_concurrency` caps one tenant's
+  calls on one key and endpoint, and each tenant has its own gate, so no
+  tenant holds another's places. There is no cap across tenants: the sum of
+  the tenants' caps is what the vendor sees on the one key, so keep that sum
+  under the vendor's limit. The vendor's prompt cache is shared too, unless
+  `cache_isolation` is on.
+
+#### Prompt-cache isolation
+
+With the config's `cache_salt_secret` and `allow.cache_isolation` on for a
+tenant, admission puts a salt into every agent of that tenant: the lower-case
+hex HMAC-SHA256 of the tenant's name under the secret (64 characters, 256
+bits), in the field the provider has for it: `cache_salt` on `vllm` and
+`prompt_cache_key` on `openai-chat` and `openai-responses`. The same tenant
+sends the same salt on every run, from every server and worker that has the
+same secret, so its own cache hits are what they were; two tenants send
+different salts. The salt is not the tenant's name, it is not in the config
+(a stored schedule or job holds none; the worker derives it again), a tenant's
+`extra_body` cannot replace it, and it is hidden from `Debug` and from an
+error a provider echoes. Keep the secret at least 16 bytes, the same on every
+server and worker of the fleet, and out of the repository; changing it gives
+every tenant a new salt, which starts their caches cold. See
+[Providers](./providers.md#keep-one-tenants-prompt-cache-from-anothers) for
+what each vendor does and does not offer.
+
+```json
+{
+  "cache_salt_secret": {"env": "LINCH_CACHE_SALT_SECRET"},
+  "tenants": {"acme": {"tokens": [{"env": "ACME_TOKEN"}],
+                       "allow": {"cache_isolation": true,
+                                 "provider_base_urls": ["https://vllm.internal/v1"]}}}
+}
+```
+
 ---
 
 ## Limits
@@ -355,6 +436,7 @@ is read, no MCP process starts and no database is connected. A refusal is
 | `namespace` | The namespace is not the tenant's | Stores are scoped by namespace |
 | `principal` | `principal.tenant` is another tenant | A client cannot act for another tenant |
 | `provider` | The `scripted` provider without `scripted_provider` | It is for tests and evals |
+| `cache_isolation` | `allow.cache_isolation` is on and the agent's provider has no request field for a cache salt (`deepseek`, `anthropic`, `gemini`, `sglang`, `llamacpp`) | The operator asked for an isolated cache and the vendor offers no way to give one; see [Providers](./providers.md#keep-one-tenants-prompt-cache-from-anothers) |
 | `provider_base_url` | A `base_url` outside `provider_base_urls` (origin or path), or one that is not plain (query, fragment, userinfo, escape, dot segments); vLLM, SGLang and llama.cpp always name one | The server's key would be sent there, or to another path of that origin |
 | `permission_mode` | A mode outside `permission_modes` | The mode decides what runs without asking |
 | `auto_allow` | `auto_allow` entries, `tasks: True` or a `deep_agent`, without `skip_dangerous` in `permission_modes` | They let calls run without asking, as `skip_dangerous` does; `tasks` and `deep_agent` add the four task tools to `auto_allow` |
