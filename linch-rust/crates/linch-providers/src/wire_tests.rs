@@ -545,13 +545,16 @@ fn salt_targets() -> Vec<(&'static str, Option<&'static str>, Make)> {
         };
         targets.push((name, field, make));
     }
-    for (name, server) in [("sglang", Server::SgLang), ("llamacpp", Server::LlamaCpp)] {
+    for (name, field, server) in [
+        ("sglang", Some("cache_salt"), Server::SgLang),
+        ("llamacpp", None, Server::LlamaCpp),
+    ] {
         let make: Make = Box::new(move |url, request| {
             let mut o = ServerOptions::new(server, url);
             o.request = request;
             Box::new(OpenAiChat::server(o).unwrap())
         });
-        targets.push((name, None, make));
+        targets.push((name, field, make));
     }
     targets
 }
@@ -577,6 +580,22 @@ async fn a_cache_salt_goes_where_the_vendor_has_a_field_and_nowhere_else() {
             assert!(plain.get(field).is_none(), "{name}: no salt, no {field}");
         }
     }
+}
+
+/// SGLang 0.5.23 (`entrypoints/openai/protocol.py`, `ChatCompletionRequest.cache_salt`):
+/// a salted prompt does not share radix-cache prefixes with another salt. Checked
+/// live on Qwen3.6-35B-A3B: the same 2907-token prompt gave `cached_tokens` 0
+/// (salt A), 2880 (salt A again), 0 (salt B), 0 (no salt).
+#[tokio::test]
+async fn sglang_sends_a_cache_salt_in_the_cache_salt_field() {
+    let make: Make = Box::new(|url, request| {
+        let mut o = ServerOptions::new(Server::SgLang, url);
+        o.request = request;
+        Box::new(OpenAiChat::server(o).unwrap())
+    });
+    let (url, handle) = serve_once(bad_request());
+    let (_, body) = sent(make(url, salted()).as_ref(), handle, request("m")).await;
+    assert_eq!(body["cache_salt"], SALT, "{body}");
 }
 
 #[tokio::test]

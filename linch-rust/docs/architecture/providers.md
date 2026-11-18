@@ -299,7 +299,7 @@ arrives inside the stream:
 | Gemini (`gemini/http.rs`) | 400 | none | `exceeds the maximum number of tokens allowed` |
 | DeepSeek (`deepseek.rs`) | 400 | none | `maximum context length` |
 | vLLM (server profile) | 400 | none | `maximum context length` |
-| SGLang (server profile) | 400 | none | `maximum context length`, `exceeds the maximum allowed length` |
+| SGLang (server profile) | 400 | none | `maximum context length`, `exceeds the maximum allowed length`, `is longer than the model's context length` |
 | llama.cpp (server profile) | 400 | `exceed_context_size_error` | `exceeds the available context size`, `larger than the max context size` |
 
 Anthropic's 413 means the body is too large in bytes, which compaction may

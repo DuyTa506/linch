@@ -690,9 +690,10 @@ sent a prefix: a side channel. What each vendor offers against it, checked on
 | Provider | Field | What the docs say |
 |---|---|---|
 | `vllm` | `cache_salt`, a top-level field of `/v1/chat/completions` | The salt goes into the hash of the first block, so only requests with the same salt reuse cached blocks; added in vLLM 0.9.0 (V1 engine; V0 refuses the field), documented in the prefix-caching design page. vLLM asks for a random salt of 256 bits. Use the chat endpoint: a `cache_salt` that a vLLM Responses continuation dropped is a published advisory |
+| `sglang` | `cache_salt`, a top-level field of `/v1/chat/completions` | `ChatCompletionRequest.cache_salt` is in SGLang's protocol and isolates its radix cache: measured live on SGLang 0.5.23, one 2907-token prompt read 0 cached tokens with salt A, 2880 with salt A again, 0 with salt B and 0 with none. It applies to the in-process radix cache; SGLang issue #37160 reports the salt is dropped on the LMCache path, so do not rely on it there |
 | `openai-chat`, `openai-responses` | `prompt_cache_key` | OpenAI does not share caches across organizations. Within one, the key separates the cache reuse of groups of requests and (GPT-5.6 and later) its accounting, but OpenAI describes it as influencing routing, not as a guarantee. Treat it as a partition, not a wall; for a wall use one project and key per tenant |
 | `anthropic` | none | Caches are isolated by organization and, on the Claude API, by workspace. Nothing per request: tenants on one key and workspace share a cache. Use a workspace and key per tenant |
-| `deepseek`, `gemini`, `sglang`, `llamacpp` | none | No request field is documented for it. A key per tenant is the only separation |
+| `deepseek`, `gemini`, `llamacpp` | none | No request field is documented for it. A key per tenant is the only separation |
 
 Linch sends the field where there is one, from a server tenant whose
 `allow.cache_isolation` is on ([Server](./server.md#prompt-cache-isolation)):
@@ -703,7 +704,7 @@ cache is what it was; across tenants, identical prefixes (a shared system
 prompt, say) no longer hit each other's entries, so a deployment that relies on
 that cross-tenant sharing loses it. That is why it is off by default. The field
 goes only to the adapters listed above, each declared by hand, never inherited
-by another OpenAI-compatible server: `deepseek`, `sglang` and `llamacpp` send
+by another OpenAI-compatible server: `deepseek` and `llamacpp` send
 none. A gateway behind `openai-chat` or a vLLM older than 0.9.0 that rejects
 unknown request fields rejects this one: leave `allow.cache_isolation` off for
 a tenant that uses it. An agent
