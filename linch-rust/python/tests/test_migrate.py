@@ -79,3 +79,23 @@ async def test_an_unreachable_database_is_an_open_error_without_the_dsn() -> Non
         await schema_status(dsn)
 
     assert "hunter2-secret" not in str(raised.value)
+
+
+async def test_a_changed_migration_is_not_current_though_the_newest_is_applied(
+    pg_dsn: str,
+) -> None:
+    import psycopg
+    from psycopg import sql
+
+    status = await migrate(pg_dsn)
+    schema = re.search(r"search_path%3D(\w+)", pg_dsn)
+    assert schema is not None
+    update = sql.SQL("UPDATE {}.linch_migrations SET checksum = '\\x00' WHERE version = 1").format(
+        sql.Identifier(schema.group(1))
+    )
+    with psycopg.connect(os.environ["LINCH_TEST_PG_DSN"], autocommit=True) as admin:
+        admin.execute(update)
+
+    checked = await schema_status(pg_dsn)
+    assert checked.store.applied == status.store.latest
+    assert not checked.store.is_current and not checked.is_current

@@ -276,13 +276,27 @@ fn migrator() -> Migrator {
 ///     MigrateError: If the database is unreachable, a migration fails, or
 ///         an applied migration differs from the embedded one.
 pub async fn migrate(pool: &PgPool) -> Result<(), MigrateError> {
-    let migrator = migrator();
     // Starting a server on a schema that is already migrated only reads: it
     // takes no lock, so it does not wait behind a migration that is running
     // (or hold others up for the milliseconds of a lock and a connection).
-    if schema::is_applied(pool, MIGRATIONS_TABLE, &migrator).await {
+    if schema::is_applied(pool, MIGRATIONS_TABLE, &migrator()).await {
         return Ok(());
     }
+    migrate_locked(pool).await
+}
+
+/// [`migrate`] for a caller that has just read the schema (see
+/// [`schema_version`]) and found it not current: it skips the read-only
+/// path, so the open takes one read, not two, and no second pool
+/// connection while the first is still being returned.
+///
+/// Args:
+///     pool: Pool for the database (and `search_path` schema) to migrate.
+///
+/// Raises:
+///     MigrateError: As [`migrate`].
+pub async fn migrate_locked(pool: &PgPool) -> Result<(), MigrateError> {
+    let migrator = migrator();
     // The lock lives on a connection of its own, outside the pool, so a
     // one-connection pool can still migrate; closing it (or dropping this
     // future) releases the lock.

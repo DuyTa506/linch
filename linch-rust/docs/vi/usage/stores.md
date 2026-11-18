@@ -165,7 +165,8 @@ linch-server --check --config /etc/linch/linch-server.json  # the DSN of its wor
 ```
 
 Mỗi lệnh in một dòng JSON, `{"current": true, "store": {"applied": 10,
-"latest": 10}, "worker": {"applied": 7, "latest": 7}}`, và thoát với một mã trạng thái mà
+"latest": 10, "current": true}, "worker": {"applied": 7, "latest": 7,
+"current": true}}`, và thoát với một mã trạng thái mà
 script có thể rẽ nhánh theo:
 
 | Mã thoát | Ý nghĩa |
@@ -174,7 +175,7 @@ script có thể rẽ nhánh theo:
 | 1 | Không đến được cơ sở dữ liệu, hoặc một migration thất bại |
 | 2 | Dòng lệnh hoặc cấu hình sai, hoặc một biến chưa được đặt |
 | 3 | Cơ sở dữ liệu có một migration mà binary này không biết: một bản phát hành mới hơn đã migrate nó |
-| 4 | Chỉ với `--check`: schema đứng sau binary này; hãy chạy `--migrate` |
+| 4 | Chỉ với `--check`: schema đứng sau binary này, hoặc khác với nó (thiếu hoặc đổi một migration); hãy chạy `--migrate` |
 
 `migrate` bao gồm cả hai bảng migration, của các store và của worker. Chạy lặp lại an toàn và
 chạy từ nhiều host cùng lúc cũng an toàn. Trong Rust, nó là `linch::migrate(dsn)` và
@@ -295,9 +296,10 @@ connections = servers x (tenants x (max_pool_connections + agents per tenant)
 
 Ví dụ cụ thể: 3 server, mỗi server có 5 tenant (mỗi tenant một agent) với pool 10 kết nối mặc
 định và một worker pool 10 kết nối, cần tối đa `3 x (5 x (10 + 1) + 10 + 1) = 198` kết nối, so
-với 100 của Postgres. Đặt `max_pool_connections` là 3 cho mỗi tenant và `worker.max_connections`
-là 3, thì con số là `3 x (5 x (3 + 1) + 3 + 1) = 72`, vừa với chỗ dư cho 4 workflow đang chạy, một session quản trị và
-`migrate` của một lần deploy. Hãy dự trù khoảng hai kết nối cho mỗi run đang chạy cùng lúc,
+với 100 của Postgres. Đặt `max_pool_connections` là 4 cho mỗi tenant và `worker.max_connections`
+là 4, thì con số là `3 x (5 x (4 + 1) + 4 + 1) = 90`, vừa khít: với 4 workflow đang chạy, một session quản trị và `migrate` của một lần deploy
+là 96 trên 97 kết nối mà một Postgres mặc định còn lại sau `superuser_reserved_connections`.
+Dùng 3 cho mỗi giá trị (`3 x (5 x (3 + 1) + 3 + 1) = 72`) để có thêm chỗ dư. Hãy dự trù khoảng hai kết nối cho mỗi run đang chạy cùng lúc,
 trên mỗi pool; một pool nhỏ hơn mức đó làm các run phải chờ, và quá 30 s thì lỗi với `pool
 timed out` (ở trên).
 
