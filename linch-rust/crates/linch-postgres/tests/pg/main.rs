@@ -7,6 +7,7 @@ mod common;
 mod conformance;
 mod crash;
 mod files;
+mod heartbeat;
 mod idle;
 mod isolation;
 mod lease;
