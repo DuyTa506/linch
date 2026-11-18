@@ -36,7 +36,11 @@ fn tool(name: &str) -> ToolDefinition {
     ToolDefinition {
         name: name.into(),
         description: "reads".into(),
-        input_schema: json!({"type": "object"}).as_object().unwrap().clone(),
+        input_schema: json!({"type": "object"})
+            .as_object()
+            .unwrap()
+            .clone()
+            .into(),
     }
 }
 

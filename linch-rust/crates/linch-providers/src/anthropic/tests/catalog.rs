@@ -18,7 +18,7 @@ fn row(name: &str) -> ToolDefinition {
     ToolDefinition {
         name: name.into(),
         description: format!("{name} tool."),
-        input_schema: schema.as_object().unwrap().clone(),
+        input_schema: schema.as_object().unwrap().clone().into(),
     }
 }
 
@@ -162,7 +162,7 @@ fn a_late_tool_goes_at_its_notice_with_its_rows_definition() {
     // Late's schema changed after it was added: its row has the new one.
     let mut reshaped = row("Late");
     let schema = json!({"type": "object", "properties": {"r": {"type": "string"}}});
-    reshaped.input_schema = schema.as_object().unwrap().clone();
+    reshaped.input_schema = schema.as_object().unwrap().clone().into();
     let messages = vec![
         Message::user_text("hi"),
         Message::assistant_text("a"),

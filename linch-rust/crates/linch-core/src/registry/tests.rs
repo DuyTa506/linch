@@ -192,6 +192,19 @@ fn dispose_after_the_registry_is_gone_is_a_no_op() {
     assert!(handle.is_disposed());
 }
 
+/// Every request, catalog row and logged prefix of N sessions takes its
+/// definitions from the registry: they must share one schema, not copy it.
+#[test]
+fn definitions_share_the_registered_schema() {
+    let registry = ToolRegistry::new();
+    let _a = registry.register(tool("a", "a1")).unwrap();
+    let snapshot = registry.snapshot();
+    let (first, second) = (snapshot.definitions(), snapshot.definitions());
+    let held = &snapshot.resolve("a").unwrap().definition().input_schema;
+    assert!(Arc::ptr_eq(&first[0].input_schema, &second[0].input_schema));
+    assert!(Arc::ptr_eq(&first[0].input_schema, held));
+}
+
 #[test]
 fn snapshot_is_stable_while_the_registry_changes() {
     let registry = ToolRegistry::new();

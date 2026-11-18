@@ -442,7 +442,7 @@ async fn the_final_tool_call_ends_the_run_with_its_input() {
         let names: Vec<_> = request.tools.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, ["Read", "invoice"], "the final tool goes last");
         assert_eq!(request.tool_choice, None, "not the only tool");
-        assert_eq!(request.tools[1].input_schema, schema().schema);
+        assert_eq!(*request.tools[1].input_schema, schema().schema);
     }
     let log = messages(&*stores, "s1").await;
     assert_paired(&log, "after the answer");

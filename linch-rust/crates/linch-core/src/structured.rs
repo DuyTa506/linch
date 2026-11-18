@@ -157,7 +157,7 @@ impl FinalTool {
         let definition = ToolDefinition {
             name: schema.name.clone(),
             description,
-            input_schema: schema.schema.clone(),
+            input_schema: Arc::new(schema.schema.clone()),
         };
         Self {
             name: schema.name.clone(),
@@ -217,7 +217,7 @@ impl FinalTool {
                 format!("the final tool {name:?} is not a registered tool any more")
             });
         };
-        let mut schema = definition.input_schema.clone();
+        let mut schema = (*definition.input_schema).clone();
         schema
             .entry("type")
             .or_insert_with(|| JsonValue::from("object"));
@@ -417,7 +417,7 @@ mod tests {
             (made.name.as_str(), definition.name.as_str()),
             ("invoice", "invoice")
         );
-        assert_eq!(definition.input_schema, invoice.schema().schema);
+        assert_eq!(*definition.input_schema, invoice.schema().schema);
         assert_eq!(definition.description, FINAL_DESCRIPTION);
         let named = FinalTool::of(Some("Submit"), Some(&invoice), false).unwrap();
         assert_eq!((named.name.as_str(), named.made.as_ref()), ("Submit", None));

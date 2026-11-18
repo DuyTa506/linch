@@ -93,7 +93,8 @@ fn weather_tool() -> ToolDefinition {
         })
         .as_object()
         .unwrap()
-        .clone(),
+        .clone()
+        .into(),
     }
 }
 
