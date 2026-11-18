@@ -1,4 +1,6 @@
-//! A sliding window of call times, for a tenant's per-minute caps.
+//! A sliding window of call times, for a tenant's per-minute caps. The times
+//! are monotonic ([`std::time::Instant`]), so a change of the wall clock
+//! neither opens nor closes a window.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};

@@ -48,7 +48,7 @@ Every live provider takes `request`, the data form of Python's `extra_body`,
 | Field | Meaning |
 |---|---|
 | `request.extra_body` | Fields merged into every request body. They replace what the adapter set, except `model`, `stream`, `temperature`, the conversation (`messages`, `input`, `contents`, `system`, `instructions`, `systemInstruction`, `system_instruction`), the tools and how they are chosen (`tools`, `tool_choice`, `toolConfig`, `tool_config`) and the vendor-side state fields (`store`, `previous_response_id`, `conversation`), which the session owns. `chat_template_kwargs` merges per field, and so does Gemini's `generationConfig`, where the request's own fields win |
-| `request.default_headers` | Headers sent with every request, for gateways. `authorization`, `x-api-key`, `x-goog-api-key` or `api-key` replaces the provider key for every call (a turn, a model list, a window probe): the key from the environment is then not sent and need not be set. `host`, `content-length`, `transfer-encoding`, `connection`, `upgrade`, `te`, `trailer`, `proxy-authorization` and `proxy-connection` are refused at open. Values are hidden when a config is printed or logged, and removed (8 bytes or longer) from a provider's error text |
+| `request.default_headers` | Headers sent with every request, for gateways. `authorization`, `x-api-key`, `x-goog-api-key` or `api-key` replaces the provider key for every call (a turn, a model list, a window probe): the key from the environment is then not sent and need not be set. `host`, `content-length`, `transfer-encoding`, `connection`, `upgrade`, `te`, `trailer`, `proxy-authorization` and `proxy-connection` are refused at open. In the Rust types a value is hidden from `Debug` output; a Python config is a plain dict and shows its values when printed or logged. A value is removed from a provider's error text when it is 8 bytes or longer, or at any length when the header's name says `token`, `key`, `secret`, `auth` or `cookie` |
 | `request.timeout_ms` | Longest silence between two chunks of a response before the call fails; absent: the adapter's own limit |
 | `chat.parallel_tool_calls` | Sent when the request has tools; absent: the server's default |
 | `chat.include_stream_options` | `false` drops `stream_options`, for servers that reject it. On when absent |
@@ -76,10 +76,15 @@ excludes. Python's `timeout` is one number applied to every phase of the call
 (connect, read, write, the pool); `request.timeout_ms` only replaces the read
 timeout above, and the 30 s connect timeout stays fixed.
 
-A `default_headers` value is hidden when a config is echoed or logged, and
-removed from a provider's error text when it is 8 bytes or longer (a gateway
-that quotes a rejected header back in its response body shows `[redacted]`).
-A shorter value is left in the text, since it would mangle the message. Put a
+In the Rust types (`RequestOptions`, `Schedule`, `RunRequest`) a
+`default_headers` value is hidden from `Debug` output; this does not reach
+Python, where a config is a plain dict that prints and logs its values, so
+keep one out of logs. A value is removed from a provider's error text when it
+is 8 bytes or longer, and whatever its length when the header's name says
+`token`, `key`, `secret`, `auth` or `cookie` (a gateway that quotes a
+rejected header back in its response body shows `[redacted]`). Another
+header's value shorter than 8 bytes is left in the text, since it would
+mangle the message. Put a
 secret in the server's environment where you can; a value in the config is
 stored with the config (a scheduled run keeps it in the store, as the MCP
 header values are kept), and `extra_body` values are not hidden at all. None of

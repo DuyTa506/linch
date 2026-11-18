@@ -12,6 +12,8 @@
 //! - `append` and `set_status` land only under the current epoch, and a
 //!   rejected write changes nothing;
 //! - a `(call_key, occurrence)` is recorded at most once;
+//! - a workflow keeps the principal its first claim named (none included):
+//!   a claim naming another is `PrincipalMismatch` and changes nothing;
 //! - values and statuses round-trip exactly, and namespaces never share
 //!   workflows;
 //! - a workflow has at most one hold at a time, a refused hold writes
@@ -20,6 +22,7 @@
 
 use std::time::Duration;
 
+use linch_core::Principal;
 use serde_json::json;
 
 use super::journal::{
@@ -33,6 +36,7 @@ pub async fn journal_store_suite(store: &dyn JournalStore) {
     stale_leases_are_fenced(store).await;
     statuses_round_trip(store).await;
     namespaces_are_isolated(store).await;
+    claims_keep_the_principal(store).await;
     holds_are_exclusive(store).await;
 }
 
@@ -51,19 +55,19 @@ async fn claim_creates_and_bumps_the_epoch(store: &dyn JournalStore) {
         missing.is_none(),
         "load of a never-claimed workflow is None"
     );
-    let first = store.claim(ns, "w1").await.expect("first claim");
+    let first = store.claim(ns, "w1", None).await.expect("first claim");
     assert_eq!(first.epoch, 1, "the first claim gives epoch 1");
     let run = store.load(ns, "w1").await.expect("load").expect("created");
     assert_eq!(run.status, WorkflowStatus::Running, "a claim sets running");
     assert_eq!(run.epoch, 1, "load reports the claimed epoch");
     assert!(run.records.is_empty(), "a new workflow has no records");
-    let second = store.claim(ns, "w1").await.expect("second claim");
+    let second = store.claim(ns, "w1", None).await.expect("second claim");
     assert_eq!(second.epoch, 2, "each claim adds 1 to the epoch");
 }
 
 async fn records_round_trip(store: &dyn JournalStore) {
     let ns = "conformance/records";
-    let lease = store.claim(ns, "w1").await.expect("claim");
+    let lease = store.claim(ns, "w1", None).await.expect("claim");
     for (key, occurrence) in [("b", 0), ("a", 1), ("a", 0)] {
         let appended = store.append(&lease, record(key, occurrence)).await;
         appended.expect("append under the current lease");
@@ -83,7 +87,7 @@ async fn records_round_trip(store: &dyn JournalStore) {
         "records are ordered by (call_key, occurrence)"
     );
     assert_eq!(run.records[0], record("a", 0), "a value round-trips");
-    let again = store.claim(ns, "w1").await.expect("claim again");
+    let again = store.claim(ns, "w1", None).await.expect("claim again");
     let run = store.load(ns, "w1").await.expect("load").expect("exists");
     assert_eq!(run.records.len(), 3, "a claim keeps the records");
     let appended = store.append(&again, record("c", 0)).await;
@@ -92,8 +96,8 @@ async fn records_round_trip(store: &dyn JournalStore) {
 
 async fn stale_leases_are_fenced(store: &dyn JournalStore) {
     let ns = "conformance/fence";
-    let old = store.claim(ns, "w1").await.expect("claim");
-    let new = store.claim(ns, "w1").await.expect("claim again");
+    let old = store.claim(ns, "w1", None).await.expect("claim");
+    let new = store.claim(ns, "w1", None).await.expect("claim again");
     let appended = store.append(&old, record("k", 0)).await;
     assert!(
         matches!(appended, Err(JournalStoreError::LeaseLost { epoch: 1, .. })),
@@ -124,7 +128,7 @@ async fn stale_leases_are_fenced(store: &dyn JournalStore) {
 
 async fn statuses_round_trip(store: &dyn JournalStore) {
     let ns = "conformance/status";
-    let lease = store.claim(ns, "w1").await.expect("claim");
+    let lease = store.claim(ns, "w1", None).await.expect("claim");
     let interrupt = Interrupt {
         key: "approve".into(),
         payload: json!({"plan": ["a", "b"], "n": 1.5}),
@@ -139,14 +143,20 @@ async fn statuses_round_trip(store: &dyn JournalStore) {
         let run = store.load(ns, "w1").await.expect("load").expect("exists");
         assert_eq!(run.status, status, "{} round-trips", status.name());
     }
-    let lease = store.claim(ns, "w1").await.expect("claim a completed run");
+    let lease = store
+        .claim(ns, "w1", None)
+        .await
+        .expect("claim a completed run");
     let suspended = WorkflowStatus::AwaitingInput(Interrupt {
         key: "k".into(),
         payload: json!(null),
     });
     let set = store.set_status(&lease, suspended).await;
     set.expect("suspend");
-    store.claim(ns, "w1").await.expect("claim a suspended run");
+    store
+        .claim(ns, "w1", None)
+        .await
+        .expect("claim a suspended run");
     let run = store.load(ns, "w1").await.expect("load").expect("exists");
     assert_eq!(
         run.status,
@@ -157,16 +167,45 @@ async fn statuses_round_trip(store: &dyn JournalStore) {
 
 async fn namespaces_are_isolated(store: &dyn JournalStore) {
     let (a, b) = ("conformance/ns-a", "conformance/ns-b");
-    let lease = store.claim(a, "w1").await.expect("claim in a");
+    let lease = store.claim(a, "w1", None).await.expect("claim in a");
     store.append(&lease, record("k", 0)).await.expect("append");
     assert!(
         store.load(b, "w1").await.expect("load").is_none(),
         "a workflow is invisible from another namespace"
     );
-    let other = store.claim(b, "w1").await.expect("claim in b");
+    let other = store.claim(b, "w1", None).await.expect("claim in b");
     assert_eq!(other.epoch, 1, "namespaces keep separate epochs");
     let run = store.load(a, "w1").await.expect("load").expect("exists");
     assert_eq!(run.epoch, 1, "a claim in b leaves a alone");
+}
+
+async fn claims_keep_the_principal(store: &dyn JournalStore) {
+    let ns = "conformance/principal";
+    let alice = Principal::new("acme", "alice", ["admin", "dev"]).unwrap();
+    let reordered = Principal::new("acme", "alice", ["dev", "admin"]).unwrap();
+    let bob = Principal::new("acme", "bob", ["dev"]).unwrap();
+    let fewer_roles = Principal::new("acme", "alice", ["dev"]).unwrap();
+    let first = store.claim(ns, "w1", Some(&alice)).await.expect("claim");
+    assert_eq!(first.epoch, 1, "the first claim gives epoch 1");
+    store.append(&first, record("k", 0)).await.expect("append");
+    let same = store.claim(ns, "w1", Some(&reordered)).await;
+    assert_eq!(same.expect("the same principal").epoch, 2, "same, whole");
+    for other in [Some(&bob), Some(&fewer_roles), None] {
+        let refused = store.claim(ns, "w1", other).await;
+        assert!(
+            matches!(refused, Err(JournalStoreError::PrincipalMismatch { .. })),
+            "a claim naming another principal (or none) is PrincipalMismatch"
+        );
+    }
+    let run = store.load(ns, "w1").await.expect("load").expect("exists");
+    assert_eq!(run.epoch, 2, "a refused claim leaves the epoch alone");
+    assert_eq!(run.records.len(), 1, "and the records");
+    store.claim(ns, "w2", None).await.expect("claim for nobody");
+    let refused = store.claim(ns, "w2", Some(&alice)).await;
+    assert!(
+        matches!(refused, Err(JournalStoreError::PrincipalMismatch { .. })),
+        "a workflow started for nobody is not taken over by a principal"
+    );
 }
 
 async fn holds_are_exclusive(store: &dyn JournalStore) {

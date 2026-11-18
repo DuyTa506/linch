@@ -25,6 +25,8 @@ from scripted import config, text_turn, tool_turn
 from linch_rust import (
     Budget,
     ConnectionClosed,
+    NotAllowed,
+    Principal,
     ResultEvent,
     RunLeased,
     Server,
@@ -543,3 +545,20 @@ async def test_run_or_resume_returns_a_run_that_waits_for_an_approval(pg_dsn: st
         first = await run_or_resume(agent, "job-4", "Edit it")
         again = await run_or_resume(agent, "job-4", "Edit it")
     assert isinstance(first, SuspendedEvent) and isinstance(again, SuspendedEvent)
+
+
+async def test_a_workflow_is_resumed_only_by_the_principal_it_started_with() -> None:
+    alice: Principal = {"tenant": "acme", "user": "alice", "roles": ["dev"]}
+    bob: Principal = {"tenant": "acme", "user": "bob"}
+    async with Server() as server:
+        agent = await server.open_agent(config([]))
+
+        async def flow(wf: WorkflowContext) -> str:
+            return await wf.step("n", lambda: "ok")
+
+        assert await run_workflow(agent, flow, run_id="w", principal=alice) == "ok"
+        for other in (bob, None):
+            with pytest.raises(NotAllowed) as refused:
+                await run_workflow(agent, flow, run_id="w", principal=other)
+            assert refused.value.kind == "workflow_principal"
+        assert await run_workflow(agent, flow, run_id="w", principal=alice) == "ok"

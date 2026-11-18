@@ -22,7 +22,7 @@ async fn an_append_racing_a_claim_never_lands_under_the_old_epoch() {
     };
     let pool = db.pool().await;
     let store = PgJournalStore::new(pool.clone());
-    let lease = store.claim("ns", "w1").await.unwrap();
+    let lease = store.claim("ns", "w1", None).await.unwrap();
     // The claim of another process, still open.
     let mut claim = pool.begin().await.unwrap();
     sqlx::query("UPDATE linch_ext_workflows SET epoch = epoch + 1 WHERE workflow_id = 'w1'")
@@ -69,7 +69,7 @@ async fn under_repeatable_read_an_append_behind_a_claim_is_fenced() {
         return;
     };
     let store = PgJournalStore::new(db.repeatable_read().await);
-    let lease = store.claim("ns", "w1").await.unwrap();
+    let lease = store.claim("ns", "w1", None).await.unwrap();
     let appended = db.behind_an_update(OPEN_CLAIM, store.append(&lease, record("k")));
     let appended = appended.await;
     assert!(
@@ -87,7 +87,7 @@ async fn under_repeatable_read_a_status_write_behind_a_claim_is_fenced() {
         return;
     };
     let store = PgJournalStore::new(db.repeatable_read().await);
-    let lease = store.claim("ns", "w1").await.unwrap();
+    let lease = store.claim("ns", "w1", None).await.unwrap();
     let status = store.set_status(&lease, WorkflowStatus::Completed);
     let status = db.behind_an_update(OPEN_CLAIM, status).await;
     assert!(
@@ -106,9 +106,9 @@ async fn under_repeatable_read_a_claim_behind_a_claim_wins() {
         return;
     };
     let store = PgJournalStore::new(db.repeatable_read().await);
-    store.claim("ns", "w1").await.unwrap();
+    store.claim("ns", "w1", None).await.unwrap();
     let lease = db
-        .behind_an_update(OPEN_CLAIM, store.claim("ns", "w1"))
+        .behind_an_update(OPEN_CLAIM, store.claim("ns", "w1", None))
         .await;
     assert_eq!(lease.expect("the claim").epoch, 3);
     db.finish().await;
@@ -131,7 +131,7 @@ async fn a_record_value_round_trips_exactly() {
     };
     let store = PgJournalStore::new(db.pool().await);
     let text = r#"{"zeta":0.1,"alpha":1e+300,"mid":[3,{"b":1,"a":2}],"pi":3.141592653589793}"#;
-    let lease = store.claim("ns", "w1").await.unwrap();
+    let lease = store.claim("ns", "w1", None).await.unwrap();
     let record = JournalRecord {
         call_key: "k".into(),
         occurrence: 0,
@@ -158,7 +158,11 @@ async fn migrate_is_idempotent_and_uses_its_own_table() {
             .fetch_all(&pool)
             .await
             .expect("read the migrations table");
-    assert_eq!(applied, [(1, "workflow".to_owned())]);
+    let names = [(1, "workflow"), (2, "workflow_principal")];
+    assert_eq!(
+        applied,
+        names.map(|(version, name)| (version, name.to_owned()))
+    );
     let sqlx_default: Option<String> =
         sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations')::text")
             .fetch_one(&pool)

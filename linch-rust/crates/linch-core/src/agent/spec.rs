@@ -301,7 +301,9 @@ impl AgentSpec {
 /// requests beyond the spec (the skills, a subagent's definition). A run
 /// stores it at creation; resume and approve refuse an agent whose
 /// contract differs. With no features the digest is the one an agent
-/// without them always had.
+/// without them always had. The tool cache's `quota` is left out: it is a
+/// resource cap the operator sets at every admission, not behaviour the run
+/// was made under, so changing it must not strand a stored run.
 pub(crate) fn contract_digest(
     spec: &AgentSpec,
     tools: &[(ToolDefinition, ToolScope)],
@@ -311,6 +313,13 @@ pub(crate) fn contract_digest(
     let tools: Vec<_> = (tools.iter())
         .map(|(definition, scope)| json!({"definition": definition, "scope": scope}))
         .collect();
+    let mut spec = json!(spec);
+    if let Some(cache) = spec
+        .get_mut("tool_cache")
+        .and_then(|cache| cache.as_object_mut())
+    {
+        cache.remove("quota");
+    }
     let mut value = json!({
         "spec": spec,
         "tools": tools,
@@ -667,6 +676,23 @@ mod tests {
             let ok = read.is_ok_and(|spec| spec.tool_cache.is_some_and(|c| c.problem().is_none()));
             assert!(!ok, "{refused}");
         }
+    }
+
+    /// RED: a tenant server sets `quota` (the tenant's name and the
+    /// operator's byte cap) at every admission, so changing the cap must not
+    /// make a stored run of the same agent a contract mismatch.
+    #[test]
+    fn the_cache_quota_is_not_part_of_the_contract() {
+        let hooks = crate::hooks::Hooks::default().policy_digest();
+        let none = JsonObject::new();
+        let digest = |max_bytes: u64| {
+            let quota = json!({"group": "acme", "max_bytes": max_bytes});
+            let cache = json!({"tools": ["Read"], "quota": quota});
+            let spec: AgentSpec =
+                serde_json::from_value(json!({"model": "m", "tool_cache": cache})).unwrap();
+            contract_digest(&spec, &[], hooks, &none).unwrap()
+        };
+        assert_eq!(digest(64 << 20), digest(128 << 20));
     }
 
     /// A spec with no policy is off, off the wire and the contract it had

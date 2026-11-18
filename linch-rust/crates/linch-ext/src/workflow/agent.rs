@@ -357,7 +357,7 @@ impl WorkflowContext {
             let options = RunOptions {
                 session_id: session_id.clone(),
                 run_id: Some(run_id.clone()),
-                principal: None,
+                principal: self.inner.principal.clone(),
                 owner: "workflow".into(),
                 cancel: token.child_token(),
                 trace_id: None,
