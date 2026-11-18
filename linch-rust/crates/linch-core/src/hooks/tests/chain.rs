@@ -96,6 +96,27 @@ async fn a_timeout_under_each_fail_mode() {
     assert_eq!(done.records.len(), 2, "the next hook still ran");
 }
 
+/// A tool gate that panics is a failure of the gate, not of the process:
+/// closed (the default at `pre_tool_use`), it blocks the call.
+#[tokio::test]
+async fn a_pre_tool_use_hook_that_panics_blocks_the_call() {
+    let hooks = Hooks::default();
+    let log = new_log();
+    let _ = register(
+        &hooks.pre_tool_use,
+        Scripted::new("gate", &log, |_| panic!("gate bug")),
+    );
+    let done = hooks
+        .pre_tool_use
+        .run(pre_request("Bash", obj(json!({}))))
+        .await;
+    assert!(
+        matches!(done.outcome, PreToolUseOutcome::Blocked { .. }),
+        "{:?}",
+        done.outcome
+    );
+}
+
 #[tokio::test]
 async fn a_hook_that_answers_in_time_is_not_cut() {
     let hooks = Hooks::default();
