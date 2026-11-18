@@ -12,6 +12,8 @@ mod base_url;
 #[cfg(test)]
 mod capabilities_tests;
 mod context;
+#[cfg(test)]
+mod cut_stream_tests;
 pub mod deepseek;
 pub mod gemini;
 mod models;
