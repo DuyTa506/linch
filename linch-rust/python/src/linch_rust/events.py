@@ -489,6 +489,35 @@ class HookEvent:
 
 
 @dataclass(frozen=True)
+class CacheDiagnosticEvent:
+    """What the provider's prompt cache did on one call, against the run's previous call.
+
+    Emitted only when the agent's `monitoring.cache_diagnostic` is on. Stream-only:
+    it is not stored, and `Agent.events` does not return it. It holds counts and an
+    index, never text.
+
+    Attributes:
+        reason: The first check that held, in this order: `model_changed`,
+            `provider_changed`, `ttl_expired`, `system_changed`, `tools_changed`,
+            `compaction`, `prefix_changed`, `low_read` (the prefix is the same yet
+            the provider read under half of what the previous call could have
+            left), or `none`.
+        previous_cached: Tokens the previous call read from the cache.
+        cached: Tokens this call read from the cache.
+        prompt_tokens: Input tokens of this call, cached and not.
+        first_changed_message: Index of the first message that differs from the
+            previous request's, or `None` when none does.
+    """
+
+    type: ClassVar[str] = "cache_diagnostic"
+    reason: str
+    previous_cached: int
+    cached: int
+    prompt_tokens: int
+    first_changed_message: int | None = None
+
+
+@dataclass(frozen=True)
 class ErrorEvent:
     """An error the run recorded, such as a provider failure."""
 
@@ -638,6 +667,7 @@ Event = (
     | SubagentEvent
     | ChildRunStatusEvent
     | HookEvent
+    | CacheDiagnosticEvent
     | ErrorEvent
     | ResultEvent
     | ModelCallDeliveryEvent
@@ -679,6 +709,7 @@ _KINDS: dict[str, type[Any]] = {
         SubagentEvent,
         ChildRunStatusEvent,
         HookEvent,
+        CacheDiagnosticEvent,
         ErrorEvent,
         ResultEvent,
         ModelCallDeliveryEvent,

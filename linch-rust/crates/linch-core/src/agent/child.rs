@@ -175,6 +175,7 @@ impl AgentInner {
             child: true,
             pricing: self.pricing.clone(),
             gate: self.gate.clone(),
+            cache_diagnostic: self.cache_diagnostic,
             tool_cache: None,
             mailbox: self.mailbox.clone(),
             families: Default::default(),

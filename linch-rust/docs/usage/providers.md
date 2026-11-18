@@ -679,6 +679,76 @@ config = {
   the [run contract](./agent.md#the-run-contract), so changing it never
   strands a suspended run.
 
+## Keep one tenant's prompt cache from another's
+
+A provider that caches prompt prefixes serves a request that starts like an
+earlier one faster and cheaper, and the difference can be timed. Two tenants
+that share one provider key and endpoint can therefore tell whether the other
+sent a prefix: a side channel. What each vendor offers against it, checked on
+2026-11-18 against its documentation:
+
+| Provider | Field | What the docs say |
+|---|---|---|
+| `vllm` | `cache_salt`, a top-level field of `/v1/chat/completions` | The salt goes into the hash of the first block, so only requests with the same salt reuse cached blocks; added in vLLM 0.9.0 (V1 engine; V0 refuses the field), documented in the prefix-caching design page. vLLM asks for a random salt of 256 bits. Use the chat endpoint: a `cache_salt` that a vLLM Responses continuation dropped is a published advisory |
+| `openai-chat`, `openai-responses` | `prompt_cache_key` | OpenAI does not share caches across organizations. Within one, the key separates the cache reuse of groups of requests and (GPT-5.6 and later) its accounting, but OpenAI describes it as influencing routing, not as a guarantee. Treat it as a partition, not a wall; for a wall use one project and key per tenant |
+| `anthropic` | none | Caches are isolated by organization and, on the Claude API, by workspace. Nothing per request: tenants on one key and workspace share a cache. Use a workspace and key per tenant |
+| `deepseek`, `gemini`, `sglang`, `llamacpp` | none | No request field is documented for it. A key per tenant is the only separation |
+
+Linch sends the field where there is one, from a server tenant whose
+`allow.cache_isolation` is on ([Server](./server.md#prompt-cache-isolation)):
+an HMAC-SHA256 of the tenant's name under the operator's secret, 64 hex
+characters, the same for every run of the tenant on every server and worker
+that has the secret, and different for each tenant. Inside one tenant the
+cache is what it was; across tenants, identical prefixes (a shared system
+prompt, say) no longer hit each other's entries, so a deployment that relies on
+that cross-tenant sharing loses it. That is why it is off by default. The field
+goes only to the adapters listed above, each declared by hand, never inherited
+by another OpenAI-compatible server: `deepseek`, `sglang` and `llamacpp` send
+none. A gateway behind `openai-chat` or a vLLM older than 0.9.0 that rejects
+unknown request fields rejects this one: leave `allow.cache_isolation` off for
+a tenant that uses it. An agent
+on a provider with no field is refused (`NotAllowed`, `kind` `cache_isolation`)
+rather than left sharing. The salt is not part of the config, the run contract,
+an event or a log, and `request.extra_body` cannot replace it. On a local run
+(`AgentConfig.open`, stdio) there is no tenant; set `request.extra_body`
+(`{"cache_salt": "..."}`) yourself if you need one.
+
+## Find out why a cache missed
+
+`monitoring: {"cache_diagnostic": True}` makes the agent compare each provider
+call with the run's previous one and stream a stream-only
+[`cache_diagnostic`](./events.md#cachediagnosticevent-cache_diagnostic-stream-only)
+event: `reason`, `previous_cached`, `cached`, `prompt_tokens` and
+`first_changed_message`. It is off by default; on, it hashes each request (the
+system text, the tools and every message, once per call) and keeps only the
+hashes. It changes no request, store write or durable event, and is not part of
+the run contract.
+
+```python
+from linch_rust import AgentConfig, CacheDiagnosticEvent, Server
+
+config: AgentConfig = {
+    "namespace": "acme",
+    "spec": {"model": "claude-sonnet-4-5", "max_turns": 12},
+    "provider": {"id": "anthropic"},
+    "monitoring": {"cache_diagnostic": True},
+}
+
+
+async def run(server: Server) -> None:
+    agent = await server.open_agent(config)
+    run = await agent.run("s1", "Summarize the repository.")
+    async for envelope in run:
+        if isinstance(envelope.event, CacheDiagnosticEvent):
+            e = envelope.event
+            print(e.reason, e.previous_cached, "->", e.cached, "of", e.prompt_tokens)
+```
+
+A `tools_changed` after a tool was added mid-session, a `system_changed` from a
+timestamp in the prompt, or a `prefix_changed` at message 7 (a hook rewrote
+it) each says where to look. `ttl_expired` is declared for Anthropic only,
+since OpenAI's retention depends on the model and the retention setting.
+
 ## One HTTP client per settings
 
 An HTTP client holds a connection pool and a TLS configuration, about 90 KB. A
@@ -706,4 +776,5 @@ holds Anthropic models only; every other model reports `None`. See
 
 - [Agent config](./agent.md#spec): `thinking`, `effort`, `max_output_tokens`.
 - [Events](./events.md): the `error`, `usage` and `result` events.
+- [Server](./server.md#prompt-cache-isolation): a salt per tenant for a shared key.
 - [Troubleshooting](./troubleshooting.md#opening-an-agent): open errors.

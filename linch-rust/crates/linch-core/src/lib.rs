@@ -19,6 +19,7 @@
 pub mod agent;
 pub mod ask_user;
 pub mod budget;
+mod cache_diagnostic;
 pub mod canonical;
 pub(crate) mod catalog;
 pub mod compaction;

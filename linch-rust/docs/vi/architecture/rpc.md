@@ -116,7 +116,7 @@ docs (`lib.rs:518-569`) và các mã nằm trong `crates/linch-rpc/src/error.rs:
 | -32001 | `AGENT_NOT_FOUND` | `AgentNotFound` | Không agent nào đang mở có handle đó |
 | -32002 | `RUN_BUSY` | `RunBusy` | Connection đã điều khiển run đó, hoặc `agent.close` nêu một agent đang có run |
 | -32003 | `UNAUTHENTICATED` | `Unauthenticated` | Message đầu tiên của socket không phải `connection.auth` với token đã biết; server đóng connection |
-| -32004 | `NOT_ALLOWED` | `NotAllowed` | Một kiểm tra tenant từ chối; `data.kind` nêu tên nó (bảng trong [Server](../usage/server.md#những-gì-admission-từ-chối-và-lý-do)), trong đó có `run_bound` và `workflow_principal` |
+| -32004 | `NOT_ALLOWED` | `NotAllowed` | Một kiểm tra tenant từ chối; `data.kind` nêu tên nó (bảng trong [Server](../usage/server.md#những-gì-admission-từ-chối-và-lý-do)), trong đó có `run_bound`, `workflow_principal` và `cache_isolation` |
 | -32005 | `LIMIT_REACHED` | `LimitReached` | Đã chạm một giới hạn và chưa có gì bắt đầu; `data: {kind, max}`, `kind` là một trong `runs`, `agents`, `connections`, `logins`, `schedules`, `jobs`, `workflows`, `agent_calls_in_flight`, `journal_records` hoặc `steers` (một run có 16 steer đang chờ), hoặc `provider_calls`, một tốc độ: tối đa `max` lời gọi `provider.models` và `provider.model` mỗi `per_seconds` (60) cho tenant |
 | -32010 | `BUILD_MISSING` | `OpenError` | `agent.open`: thiếu một binding bắt buộc |
 | -32011 | `BUILD_INVALID` | `OpenError` | `agent.open`: config không hợp lệ, hoặc lỗi workspace, policy hay tool. Trong đó có: `budget.max_cost_usd` trên một model không có giá (model chính hoặc một mục `fallback_models`; thông báo nêu tên model), `spec.call_timeout_ms` dưới 100, và `workflow.start` có `max_cost_usd` cho agent có model chưa có giá |

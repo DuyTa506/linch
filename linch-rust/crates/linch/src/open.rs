@@ -289,6 +289,9 @@ impl AgentConfig {
         if let Some(gate) = gate {
             builder = builder.provider_gate(gate);
         }
+        if self.monitoring.cache_diagnostic {
+            builder = builder.cache_diagnostic();
+        }
         if let Some(skills) = project.skills {
             builder = builder.skills(skills);
         }

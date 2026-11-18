@@ -327,6 +327,9 @@ impl Provider for OpenAiChat {
         let mut body = profile::build_payload(self.profile, &self.thinking_off, &request)?;
         self.chat.apply(&mut body);
         self.request.merge_body(&mut body);
+        if let Some(field) = self.profile.cache_isolation {
+            self.request.apply_cache_salt(&mut body, field);
+        }
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let key = self
             .api_key

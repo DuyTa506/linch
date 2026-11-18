@@ -105,6 +105,7 @@ linch-server: listening on ws://127.0.0.1:8731/rpc
 | `tenants` | Từng tenant theo tên: 1 đến 64 chữ cái ASCII, chữ số, `.`, `_` hoặc `-` |
 | `tenants.<name>.tokens` | Các bearer token của tenant, mỗi token là `{"env": "VAR"}` (đọc khi khởi động) hoặc `{"value": "..."}` |
 | `tenants.<name>.allow` | Các allowlist của tenant, bên dưới |
+| `cache_salt_secret` | `{"env": "VAR"}` hoặc `{"value": "..."}`, ít nhất 16 byte: nguồn để suy ra salt prompt-cache của các tenant ([bên dưới](#cô-lập-prompt-cache)). Bắt buộc với tenant có `allow.cache_isolation` bật |
 | `worker` | Chạy một worker trong tiến trình này: nó kích hoạt các lịch và chạy các job nền ([Scheduler](./scheduler.md#chạy-một-worker)). Không có: không chạy gì |
 | `liveness` | Cách listener HTTP nhận ra một client đã biến mất: TCP keepalive và ping WebSocket ([bên dưới](#liveness)). Mọi trường đều có mặc định |
 
@@ -118,6 +119,7 @@ sẽ bị từ chối. Một tenant chỉ do worker phục vụ thì không cầ
 | `provider_info` | `false` | `provider.capabilities`, `provider.models` và `provider.model`: các lời gọi model gửi key của server đến `base_url` của provider, nên `base_url` đó cũng phải được cho phép. `provider.models` và `provider.model` bị giới hạn 10 lần một phút cho mỗi tenant (`-32005`, `kind: provider_calls`); `provider.capabilities` không gửi key |
 | `exec_tools` | `false` | `Bash` cho agent có workspace, chạy lệnh qua execution backend của agent |
 | `task_ledger` | `false` | `task_ledger` của cấu hình: một danh sách task dùng chung cho mọi session của tenant, các task còn mở của nó đi kèm mỗi request ([Tasks](./tasks.md#một-ledger-tồn-tại-qua-các-session)) |
+| `cache_isolation` | `false` | Giữ prompt cache của provider của tenant tách khỏi tenant khác trên cùng một key: mỗi agent gửi một salt suy ra từ tên tenant (`cache_salt` tới `vllm`, `prompt_cache_key` tới `openai-chat` và `openai-responses`), và agent trên provider không có trường như vậy bị từ chối. Cần `cache_salt_secret` cấp cao nhất của config ([bên dưới](#cô-lập-prompt-cache)) |
 | `provider_request` | `false` | `request` (trường body, header, timeout) và `chat` của provider trong config ([Providers](./providers.md)). Header credential, `proxy-*` và forwarding vẫn bị từ chối, số lượng và kích thước bị giới hạn |
 | `max_runs` | 16 | Số run mà tenant điều khiển cùng lúc, trên tất cả các kết nối của nó |
 | `max_agents` | 16 | Số agent mà tenant giữ mở cùng lúc, trên tất cả các kết nối của nó |
@@ -308,6 +310,76 @@ curl -i -H "Authorization: Bearer $LINCH_TOKEN_ACME" \
 - Token chỉ được lưu dưới dạng digest SHA-256 và được so sánh trong thời gian không
   đổi. Không token nào được ghi ra bất kỳ đầu ra nào.
 
+### Điều gì giữ các tenant tách nhau
+
+Mọi bảng mà store và worker dùng (`linch_runs`, `linch_run_events`, `linch_sessions`,
+`linch_session_entries`, `linch_files`, `linch_memories`, `linch_mailbox`, `linch_tasks`,
+`linch_tool_cache`, `linch_ext_workflows`, `linch_worker_schedules`) có `namespace` trong
+khóa chính. Các bảng job (`linch_worker_jobs`, `linch_worker_history`) được khóa theo một
+id toàn cục và có cột `namespace` mà `job.get` và `job.list` luôn ràng buộc
+(`crates/linch-worker/src/status.rs:153-186`). Mỗi truy vấn nêu namespace, nên một run,
+session, file, memory, workflow, job hay schedule chỉ tìm thấy được dưới namespace của
+agent đang hỏi.
+Mọi namespace của một tenant bắt đầu bằng tên nó, và tên không chứa `/`, nên `acme/support`
+không với tới được từ `acme-eu`. Id của run, session, workflow, job và schedule mà tenant
+khác đang giữ trả lời y hệt id không ai có: cùng code, message và data, chỉ khác id được
+hỏi (`tenant_oracle` trong `crates/linch-rpc/tests` cố định điều này cho `run.events`,
+`run.report`, `run.resume`, `run.approve`, `run.answer`, `run.steer`, `run.cancel`,
+`workflow.status`, `workflow.start`, `job.get`, `schedule.pause`, `schedule.resume`,
+`schedule.delete` và `session.close`). Một claim bị từ chối (`-32033`) chỉ cho thấy owner
+của run trong namespace của chính tenant đó.
+
+Những gì khóa này không làm, và cách xử lý:
+
+- **Một database, một bộ bảng.** Cô lập là namespace trong mỗi truy vấn, không phải
+  row-level security hay một schema cho mỗi tenant. Tenant cần chịu được một lỗi trong
+  truy vấn thì cần database hoặc schema riêng: cho nó một mục `postgres_dsns` riêng (một
+  DSN có `search_path` riêng).
+- **Các user của một tenant không tách nhau.** Run, session, file và scope memory dùng
+  chung thuộc về namespace. `principal.user` chỉ phân vùng memory theo principal và các
+  role phân quyền. Muốn tách hai user, cho mỗi user một namespace (`acme/ada`, `acme/bob`).
+- **Tên queue là dùng chung.** `job.enqueue` và `schedule.create` nhận một `queue` do
+  tenant chọn, và `linch_worker_queues` (giới hạn đồng thời `max_held`) chỉ khóa theo tên.
+  Tenant nêu tên queue của tenant khác sẽ vào FIFO của nó và tính vào giới hạn của nó. Hãy
+  đặt một queue cho mỗi tenant trong `queues` của worker (worker phục vụ các queue luân
+  phiên, nên đó là chia phần công bằng) và để host đặt `queue` được gửi.
+- **Id job là một bộ đếm.** `linch_worker_jobs.id` là một identity sequence duy nhất, nên
+  tenant đọc id job của mình biết được server đã xếp hàng bao nhiêu job ở giữa. Nó không
+  đọc được gì khác.
+- **Queue của worker là vào trước ra trước.** Tenant có `max_queued_jobs` lớn có thể lấp
+  đầy các slot `max_jobs` của worker và khiến job của tenant khác cùng queue phải chờ.
+  `max_runs` của từng tenant giới hạn số nó chạy cùng lúc, không phải số nó giữ trong
+  queue; đặt `max_queued_jobs` bằng mức worker dọn được.
+- **Key provider là dùng chung.** `max_provider_concurrency` giới hạn các lời gọi của một
+  tenant trên một key và endpoint, và mỗi tenant có gate riêng, nên không tenant nào giữ
+  chỗ của tenant khác. Không có giới hạn xuyên tenant: tổng giới hạn của các tenant là
+  điều nhà cung cấp thấy trên một key, nên giữ tổng đó dưới giới hạn của nhà cung cấp.
+  Prompt cache của nhà cung cấp cũng dùng chung, trừ khi bật `cache_isolation`.
+
+#### Cô lập prompt cache
+
+Với `cache_salt_secret` của config và `allow.cache_isolation` bật cho một tenant, admission
+đặt một salt vào mọi agent của tenant đó: HMAC-SHA256 viết thường dạng hex của tên tenant
+dưới secret (64 ký tự, 256 bit), vào trường mà provider có cho việc này: `cache_salt` trên
+`vllm` và `prompt_cache_key` trên `openai-chat` và `openai-responses`. Cùng một tenant gửi
+cùng salt ở mọi run, từ mọi server và worker có cùng secret, nên số lần trúng cache của
+riêng nó vẫn như cũ; hai tenant gửi salt khác nhau. Salt không phải tên tenant, không nằm
+trong config (một schedule hay job đã lưu không chứa nó; worker suy ra lại), `extra_body`
+của tenant không thay được nó, và nó bị ẩn khỏi `Debug` và khỏi lỗi mà provider vọng lại.
+Giữ secret ít nhất 16 byte, giống nhau trên mọi server và worker của cụm, và ngoài kho mã;
+đổi secret thì mỗi tenant có salt mới, nghĩa là cache của họ bắt đầu lại từ nguội. Xem
+[Provider](./providers.md#giữ-prompt-cache-của-tenant-này-tách-khỏi-tenant-khác) để biết
+mỗi nhà cung cấp làm và không làm gì.
+
+```json
+{
+  "cache_salt_secret": {"env": "LINCH_CACHE_SALT_SECRET"},
+  "tenants": {"acme": {"tokens": [{"env": "ACME_TOKEN"}],
+                       "allow": {"cache_isolation": true,
+                                 "provider_base_urls": ["https://vllm.internal/v1"]}}}
+}
+```
+
 ---
 
 ## Giới hạn
@@ -356,6 +428,7 @@ kiểm tra: `NotAllowed` trong Python, có `kind` là tên đó.
 | `namespace` | Namespace không thuộc tenant | Kho lưu trữ được giới hạn theo namespace |
 | `principal` | `principal.tenant` là tenant khác | Một client không thể hành động thay mặt tenant khác |
 | `provider` | Provider `scripted` mà không có `scripted_provider` | Nó dành cho kiểm thử và đánh giá |
+| `cache_isolation` | `allow.cache_isolation` bật và provider của agent không có trường request cho cache salt (`deepseek`, `anthropic`, `gemini`, `sglang`, `llamacpp`) | Operator đã yêu cầu cache cô lập mà nhà cung cấp không có cách nào để làm; xem [Provider](./providers.md#giữ-prompt-cache-của-tenant-này-tách-khỏi-tenant-khác) |
 | `provider_base_url` | Một `base_url` ngoài `provider_base_urls` (origin hoặc path), hoặc không phải dạng thường (query, fragment, userinfo, mã hóa phần trăm, đoạn dấu chấm); vLLM, SGLang và llama.cpp luôn nêu một giá trị | Khóa của server sẽ bị gửi đến đó, hoặc đến một path khác của origin đó |
 | `permission_mode` | Một chế độ ngoài `permission_modes` | Chế độ quyết định cái gì chạy mà không hỏi |
 | `auto_allow` | Các mục `auto_allow`, `tasks: True` hoặc `deep_agent`, mà không có `skip_dangerous` trong `permission_modes` | Chúng cho phép lệnh gọi chạy mà không hỏi, như `skip_dangerous`; `tasks` và `deep_agent` thêm bốn tool task vào `auto_allow` |

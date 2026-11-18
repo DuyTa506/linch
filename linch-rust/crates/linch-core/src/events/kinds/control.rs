@@ -205,6 +205,55 @@ pub struct PromptCacheAdvisoryEvent {
     pub detail: String,
 }
 
+/// What the cache diagnostic found between two provider calls of a run, in
+/// the order it checks them: the first that holds is the reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheMissReason {
+    /// The model differs from the previous call's; the cache is per model.
+    ModelChanged,
+    /// The provider differs from the previous call's.
+    ProviderChanged,
+    /// More time passed than the provider keeps a cache entry
+    /// (Anthropic's 5 minutes); no other provider declares one.
+    TtlExpired,
+    /// The system prompt differs.
+    SystemChanged,
+    /// The tool definitions differ (added, removed, reordered or edited).
+    ToolsChanged,
+    /// The conversation got shorter: a compaction replaced its start.
+    Compaction,
+    /// An earlier message of the conversation differs;
+    /// `first_changed_message` is the first.
+    PrefixChanged,
+    /// The request shares the previous one's prefix, yet the provider read
+    /// under half of what the previous call could have left in its cache.
+    LowRead,
+    /// Nothing changed and the provider read what it could.
+    #[serde(rename = "none")]
+    NoMiss,
+}
+
+/// What a provider's prompt cache did on one call, against the run's
+/// previous call. Observation only: it is emitted when the agent's
+/// `monitoring.cache_diagnostic` is on, never stored, and never changes a
+/// request. It holds counts and an index, never text or a hash.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CacheDiagnosticEvent {
+    /// Why the cache read what it did.
+    pub reason: CacheMissReason,
+    /// Tokens the previous call read from the cache.
+    pub previous_cached: u64,
+    /// Tokens this call read from the cache.
+    pub cached: u64,
+    /// Input tokens of this call, cached and not.
+    pub prompt_tokens: u64,
+    /// The first message that differs from the previous call's request, as
+    /// an index into the request's messages; `null` when none does.
+    pub first_changed_message: Option<u64>,
+}
+
 /// Why a [`VerificationEvent`] fired.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
