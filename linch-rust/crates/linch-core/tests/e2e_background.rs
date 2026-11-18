@@ -617,3 +617,40 @@ async fn a_background_call_past_the_cap_is_refused() {
     let a = stores.runs.load(NS, &RunId::new("r1:sub_0")).await.unwrap();
     assert_eq!(a.status, RunStatus::Completed);
 }
+
+/// Eight background calls in one turn, the cap four: exactly four children
+/// start, whatever the awaits between the cap check and the child's
+/// registration (the calls are exec-scope, so they run one by one).
+#[tokio::test]
+async fn eight_background_calls_at_a_cap_of_four_start_exactly_four() {
+    let prompts: Vec<String> = (0..8).map(|i| format!("job {i}")).collect();
+    let prompts: Vec<&str> = prompts.iter().map(String::as_str).collect();
+    // One turn per child end the parent is woken for, and then some.
+    let mut parent = vec![background_turn(&prompts, &[]), text_turn("waiting")];
+    parent.extend((0..8).map(|_| text_turn("done")));
+    let child = vec![tool_turn(0, 1, "Nap"), text_turn("held")];
+    let family = Arc::new(Family::new(parent, child));
+    let stores = Arc::new(Stores::default());
+    let workers = Workers {
+        background: true,
+        max_background: 4,
+        ..Workers::default()
+    };
+    let nap = Nap(object(json!({"type": "object"})));
+    let agent = builder(family.clone(), &stores, vec![Arc::new(nap)])
+        .workers(workers)
+        .build()
+        .unwrap();
+    let mut options = RunOptions::new("s1");
+    options.run_id = Some(RunId::new("r1"));
+    finish(agent.run("go", options)).await;
+
+    let mut started = 0;
+    for i in 0..8 {
+        let id = RunId::new(format!("r1:sub_{i}"));
+        if stores.runs.load(NS, &id).await.is_ok() {
+            started += 1;
+        }
+    }
+    assert_eq!(started, 4, "the cap held");
+}

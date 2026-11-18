@@ -39,7 +39,10 @@ async fn invalid_final_tool_arguments_do_not_fail_the_run() {
         }
     }
     let runs = Runs::default();
-    let provider = Arc::new(Flaky::new(vec![text_turn("done")]).fail(0, MODEL, broken));
+    // Two turns: a retry answers from the first, a tool error the model
+    // reads (one assistant message behind it) from the second.
+    let turns = vec![text_turn("done"), text_turn("done")];
+    let provider = Arc::new(Flaky::new(turns).fail(0, MODEL, broken));
     let stores = Arc::new(Stores::default());
     let tools = registry(vec![Echo::new("Read", ToolScope::Read, &runs)]);
     let permissions = policy(PermissionMode::SkipDangerous);
