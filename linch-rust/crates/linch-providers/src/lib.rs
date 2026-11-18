@@ -5,6 +5,13 @@
 //! their own and never put credentials into errors or logs.
 
 #![forbid(unsafe_code)]
+#![deny(
+    clippy::todo,
+    clippy::unimplemented,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::expect_used
+)]
 
 pub mod anthropic;
 mod api_key;

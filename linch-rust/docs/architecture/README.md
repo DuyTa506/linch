@@ -20,6 +20,14 @@ has its own usage docs.
 - Python Linch's architecture docs live at the repository root, in
   [`docs/architecture/`](../../../docs/architecture/README.md). A page links
   them only where a concept is shared, and says what differs.
+- Clippy panic-family lints are denied where a crate is already clean, in each
+  crate root's `#![deny(...)]` (a root attribute leaves integration tests,
+  benches and examples alone; unit tests are exempt through `clippy.toml`):
+  `todo` and `unimplemented` in every crate; `unwrap_used` and `panic` in every
+  crate except `linch-core` (and `linch-ext` for `unwrap_used`);
+  `expect_used` in `linch-mcp`, `linch-otel`, `linch-providers` and
+  `linch-worker`; `let_underscore_must_use` in `linch-otel`. To lower a count,
+  fix the call sites in a crate, then add the lint to that crate's `#![deny]`.
 
 ## Pages
 

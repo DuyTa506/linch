@@ -15,6 +15,7 @@
 //! struct as a second, redundant path to the same type.
 
 #![forbid(unsafe_code)]
+#![deny(clippy::todo, clippy::unimplemented)]
 
 pub mod agent;
 pub mod ask_user;

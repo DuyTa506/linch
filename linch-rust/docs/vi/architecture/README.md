@@ -20,6 +20,14 @@ sử dụng riêng.
 - Tài liệu kiến trúc của Linch bản Python nằm ở thư mục gốc của repository, trong
   [`docs/architecture/`](../../../../docs/architecture/README.md). Một trang chỉ liên kết
   tới đó khi khái niệm được dùng chung, và nêu rõ điểm khác biệt.
+- Các lint clippy họ panic được đặt ở mức deny ở những crate đã sạch, trong
+  `#![deny(...)]` ở gốc mỗi crate (thuộc tính ở gốc không ảnh hưởng test tích
+  hợp, bench và example; unit test được miễn qua `clippy.toml`): `todo` và
+  `unimplemented` ở mọi crate; `unwrap_used` và `panic` ở mọi crate trừ
+  `linch-core` (và `linch-ext` với `unwrap_used`); `expect_used` ở `linch-mcp`,
+  `linch-otel`, `linch-providers` và `linch-worker`; `let_underscore_must_use`
+  ở `linch-otel`. Để giảm số lượng, hãy sửa các chỗ gọi trong một crate rồi
+  thêm lint đó vào `#![deny]` của crate.
 
 ## Các trang
 
