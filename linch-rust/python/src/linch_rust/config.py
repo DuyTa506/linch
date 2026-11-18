@@ -54,6 +54,23 @@ class Workers(TypedDict, total=False):
     max_background: int
 
 
+class AgentMonitoring(TypedDict, total=False):
+    """What the agent reports about its own runs, beyond the events every run has.
+
+    Off when absent, and an agent that sets none sends and stores exactly what
+    it did before. Not part of the run contract.
+
+    Attributes:
+        cache_diagnostic: Emit one stream-only `cache_diagnostic` event after
+            each provider call that reports its input tokens, saying why the
+            provider's prompt cache read what it did against the run's previous
+            call. It keeps a hash chain of the request, so a long
+            conversation costs one pass over it per call.
+    """
+
+    cache_diagnostic: bool
+
+
 class TaskLedger(TypedDict, total=False):
     """A task list every session of the agent shares, shown with each request.
 
@@ -1107,6 +1124,9 @@ class AgentConfig(TypedDict, total=False):
             asks for none. The limit is the server process's: a worker
             process or a second server counts its own calls. It is not
             part of the run contract.
+        monitoring: What the agent reports about its runs (see
+            `AgentMonitoring`); none when absent. Not part of the run
+            contract.
     """
 
     namespace: Required[str]
@@ -1134,3 +1154,4 @@ class AgentConfig(TypedDict, total=False):
     profile: Profile
     pricing: Mapping[str, ModelRates]
     max_provider_concurrency: int
+    monitoring: AgentMonitoring

@@ -66,6 +66,7 @@ pub(crate) use steer::{Arrival, Steering, Unsent, steers_of};
 pub(crate) use write::session_log;
 
 mod batch;
+mod cache;
 mod cancel;
 mod catalog;
 mod compact;

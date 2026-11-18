@@ -364,8 +364,8 @@ class Agent:
     async def events(self, run_id: str, after_seq: int = 0) -> list[Envelope]:
         """Return a run's durable envelopes with a seq above `after_seq`, in order.
 
-        Stream-only kinds (`partial_assistant`, `tool_progress`, `hook`) are
-        never replayed.
+        Stream-only kinds (`partial_assistant`, `tool_progress`, `hook`,
+        `cache_diagnostic`) are never replayed.
 
         Raises:
             RunError: The stores could not be read, or the run is unknown.

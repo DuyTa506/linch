@@ -40,6 +40,7 @@ impl Event {
             Event::Verification(_) => "verification",
             Event::Policy(_) => "policy",
             Event::Hook(_) => "hook",
+            Event::CacheDiagnostic(_) => "cache_diagnostic",
             Event::Error(_) => "error",
             Event::Result(_) => "result",
             Event::SteerReceived(_) => "steer_received",

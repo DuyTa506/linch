@@ -370,6 +370,37 @@ pub(super) fn prompt_cache_advisory_event() -> impl Strategy<Value = PromptCache
         .prop_map(|(reason, detail)| PromptCacheAdvisoryEvent { reason, detail })
 }
 
+pub(super) fn cache_diagnostic_event() -> impl Strategy<Value = CacheDiagnosticEvent> {
+    (
+        prop_oneof![
+            Just(CacheMissReason::ModelChanged),
+            Just(CacheMissReason::ProviderChanged),
+            Just(CacheMissReason::TtlExpired),
+            Just(CacheMissReason::SystemChanged),
+            Just(CacheMissReason::ToolsChanged),
+            Just(CacheMissReason::Compaction),
+            Just(CacheMissReason::PrefixChanged),
+            Just(CacheMissReason::LowRead),
+            Just(CacheMissReason::NoMiss)
+        ],
+        any::<u64>(),
+        any::<u64>(),
+        any::<u64>(),
+        proptest::option::of(any::<u64>()),
+    )
+        .prop_map(
+            |(reason, previous_cached, cached, prompt_tokens, first_changed_message)| {
+                CacheDiagnosticEvent {
+                    reason,
+                    previous_cached,
+                    cached,
+                    prompt_tokens,
+                    first_changed_message,
+                }
+            },
+        )
+}
+
 pub(super) fn skills_loaded_event() -> impl Strategy<Value = SkillsLoadedEvent> {
     vec(json_object(1), 0..3).prop_map(|skills| SkillsLoadedEvent { skills })
 }

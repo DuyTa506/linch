@@ -105,6 +105,8 @@ pub enum Event {
     Policy(PolicyEvent),
     /// One intercept-hook call. Stream-only.
     Hook(HookEvent),
+    /// What the prompt cache did against the previous call. Stream-only.
+    CacheDiagnostic(CacheDiagnosticEvent),
     /// A terminal or recoverable error payload.
     Error(ErrorEvent),
     /// The terminal outcome of a run.
@@ -247,6 +249,7 @@ impl Event {
             "verification" => Ok(Event::Verification(payload("verification", obj)?)),
             "policy" => Ok(Event::Policy(payload("policy", obj)?)),
             "hook" => Ok(Event::Hook(payload("hook", obj)?)),
+            "cache_diagnostic" => Ok(Event::CacheDiagnostic(payload("cache_diagnostic", obj)?)),
             "error" => Ok(Event::Error(payload("error", obj)?)),
             "result" => Ok(Event::Result(payload("result", obj)?)),
             "steer_received" => Ok(Event::SteerReceived(payload("steer_received", obj)?)),
@@ -304,6 +307,7 @@ impl Event {
             Event::ToolProgress(_) => StreamOnly,
             Event::PartialAssistant(_) => StreamOnly,
             Event::Hook(_) => StreamOnly,
+            Event::CacheDiagnostic(_) => StreamOnly,
             Event::SteerReceived(_) => JournalOnly,
             Event::ModelCallDelivery(_) => JournalOnly,
             Event::ModelCallReceipt(_) => JournalOnly,
@@ -410,6 +414,7 @@ impl Serialize for Event {
             Event::Verification(e) => tagged("verification", e).serialize(serializer),
             Event::Policy(e) => tagged("policy", e).serialize(serializer),
             Event::Hook(e) => tagged("hook", e).serialize(serializer),
+            Event::CacheDiagnostic(e) => tagged("cache_diagnostic", e).serialize(serializer),
             Event::Error(e) => tagged("error", e).serialize(serializer),
             Event::Result(e) => tagged("result", e).serialize(serializer),
             Event::SteerReceived(e) => tagged("steer_received", e).serialize(serializer),
