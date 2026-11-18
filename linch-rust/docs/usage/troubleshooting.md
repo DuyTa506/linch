@@ -12,7 +12,7 @@ exception class tells you its family:
 | Class | Codes | Raised by |
 |---|---|---|
 | `ProtocolError` | -32700, -32600, -32601, -32602, -32603 | A config or declaration the server cannot read (-32602); a method the server binary lacks (-32601: the binary is older than the client); a bug in the server (-32603: report it with the server's stderr) |
-| `OpenError` | -32010 to -32015 | `open_agent`: the config, provider, stores or an MCP server failed; -32012 is a run contract that could not be digested (report it) |
+| `OpenError` | -32010 to -32016 | `open_agent`: the config, provider, stores, a schema newer than the server (-32016, `SchemaNewer`) or an MCP server failed; -32012 is a run contract that could not be digested (report it) |
 | `RunError` and its subclasses | -32020 to -32034, -32038 and -32050 | The end of a run's stream, or `agent.events` |
 | `AgentNotFound`, `RunBusy` | -32001, -32002 | The call itself |
 | `Unauthenticated`, `NotAllowed`, `LimitReached` | -32003, -32004, -32005 | A remote server's token, tenant checks and caps ([A remote server](#a-remote-server-serverconnect)) |
@@ -122,6 +122,11 @@ on a DSN. The message never holds the DSN.
 | `error with configuration: relative URL without a base` | The DSN is not a URL | Use `postgres://user:pass@host:port/db` |
 | `failed to lookup address information` | The host name does not resolve | Fix the host |
 | `the migrations did not finish within 30s` | Another process holds the migration lock | Wait for it, or find the stuck migration |
+
+| Message (fragment) | Code | Cause | Fix |
+|---|---|---|---|
+| `the database schema is newer than this binary: linch_migrations holds migration <n>, the newest this binary knows is <m>` | -32016 (`SchemaNewer`; `.table`, `.applied`, `.latest`) | A newer release migrated this database; nothing was read or written | Upgrade this server to the release that migrated it, or restore the database from before the migration ([Stores: Migrations as a deploy step](./stores.md#migrations-as-a-deploy-step)) |
+| `pool timed out after 30s: raise max_pool_connections or lower concurrent runs` | -32020 (in a run's end) | Every connection of the pool was busy for 30 seconds; the server also logs the tenant and the pool's use | Raise `stores.max_connections` within the database's limit, or lower concurrent runs ([Stores: Connection budget](./stores.md#connection-budget)); resume the run |
 
 A dropped connection in the middle of a run ends that run's stream with a
 `RunError` (code -32020); the run stays at its last durable state and can be

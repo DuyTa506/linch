@@ -106,10 +106,13 @@ connects; give the server's host the network path and credentials.
 
 ### Tables and migrations
 
-The first agent that opens on a DSN connects and applies the migrations. This
-is safe on every start: applied migrations are skipped, and concurrent opens
-wait on a database lock. Applied versions are recorded in `linch_migrations`,
-so your own migration tool's table in the same schema does not collide.
+Run the migrations as a deploy step ([below](#migrations-as-a-deploy-step)).
+An agent that opens on a DSN also applies any that are missing, so a
+development setup needs nothing else; that is safe on every start: applied
+migrations are skipped, and concurrent opens wait on a database lock. Applied
+versions are recorded in `linch_migrations` (the worker's in
+`linch_worker_migrations`), so your own migration tool's table in the same
+schema does not collide.
 
 | Table | Holds |
 |---|---|
@@ -120,12 +123,12 @@ so your own migration tool's table in the same schema does not collide.
 
 Migration 6 adds two nullable columns to `linch_runs` (`lease_holder`,
 `lease_until`) for [run leases](#run-leases). It rewrites no rows and takes
-no long lock. A server of an earlier version refuses to start on a database
-migrated past it, as with every migration: upgrade every server before one
-of them restarts on the old version.
+no long lock.
 
 - The role in the DSN needs to create tables and indexes in its schema the
-  first time; after that it only reads and writes rows.
+  first time and at each upgrade that adds a migration; otherwise it only
+  reads and writes rows. Run [`migrate`](#migrations-as-a-deploy-step) with a
+  role that has those rights and give the servers a role that has not.
 - A migration that does not finish within 30 seconds fails the open with
   `OpenError` (code -32014); another process holding the migration lock is the
   usual cause.
@@ -138,6 +141,74 @@ of them restarts on the old version.
 
 Schema details, write paths and the refusal rules are in the
 [architecture stores page](../architecture/stores.md#postgres-stores).
+
+### Migrations as a deploy step
+
+Apply the schema once per release, before servers of that release start:
+
+```python
+import linch_rust
+
+status = await linch_rust.migrate("postgres://admin:...@db:5432/linch?options=-c%20search_path%3Dlinch")
+assert status.is_current                      # store and worker tables, both at the latest
+status = await linch_rust.schema_status(dsn)  # read only; status.store.applied / .latest
+```
+
+The same from a shell or a deploy script, with the DSN in an environment
+variable (never on the command line):
+
+```bash
+LINCH_DSN=postgres://admin:...@db/linch linch-server --migrate --dsn-env LINCH_DSN
+LINCH_DSN=... linch-server --check --dsn-env LINCH_DSN    # writes nothing
+linch-server --check --config /etc/linch/linch-server.json  # the DSN of its worker section
+```
+
+Each prints one JSON line, `{"current": true, "store": {"applied": 10,
+"latest": 10}, "worker": {"applied": 7, "latest": 7}}`, and exits with a
+status a script can branch on:
+
+| Exit | Meaning |
+|---|---|
+| 0 | The schema is current |
+| 1 | The database could not be reached, or a migration failed |
+| 2 | A bad command line or config, or an unset variable |
+| 3 | The database holds a migration this binary does not know: a newer release migrated it |
+| 4 | `--check` only: the schema is behind this binary; run `--migrate` |
+
+`migrate` covers both migration tables, the stores' and the worker's. It is
+safe to repeat and to run from several hosts at once. In Rust it is
+`linch::migrate(dsn)` and `linch::check(dsn)`.
+
+**The version gate.** Before `agent.open` touches a run, and before a worker
+starts, the server reads the migrations the database has applied. If it holds
+one this binary does not embed, the open fails with `OpenError` code -32016
+(`SchemaNewer` in Python, with `.table`, `.applied` and `.latest`) and nothing
+is read or written; a worker refuses to start with the same text on stderr
+(exit 2). A normal open on a current or older schema is unchanged: it applies
+what is missing, as above.
+
+**Rolling deploy.** Migrations are only added, and each new release's tables
+and columns are additive, so an old server keeps working on a database the
+new release has migrated as long as it does not open a new pool: every
+connection target it already has open keeps running. An old server that opens
+a new tenant's pool, or restarts, finds the newer schema and refuses with
+-32016. So:
+
+1. Run `migrate` with the new binary (the deploy step above).
+2. Start the new servers; drain and stop the old ones. Clients of a stopped
+   server resume their runs on a new one ([Which server drives a
+   run](./server.md#which-server-drives-a-run)).
+3. To roll back a release that added a migration, restore the database from
+   before step 1: an older binary refuses a newer schema. Nothing deletes a
+   migration.
+
+A release that changes a built-in tool's description, the tool list of an MCP
+server, or a hook's policy version changes the [run
+contract](./agent.md#the-run-contract), and a stored run that has not
+finished (one that waits for an approval or an answer, or that a stop left
+midway) cannot resume under it (`ContractMismatch`). The
+CHANGELOG names such releases: read its "Unreleased" and version sections
+before an upgrade, and let suspended runs finish first.
 
 ### Connections and pools
 
@@ -162,12 +233,18 @@ Schema details, write paths and the refusal rules are in the
   - Postgres's own `max_connections` (100 by default) is shared by every pool
     of every process on the database, workers and admin tools included. That
     is why the default stops at 32: three server processes at the default
-    still fit. Four do not: runs then fail with `pool timed out`. With N
-    processes (sidecars) on one database, set each one's
-    `stores.max_connections` to about (the database's limit minus headroom)
-    / N, for example 20 for four sidecars on a limit of 100. Raise
-    `stores.max_connections` past 32 only after raising the database's
-    limit, or put a pooler such as PgBouncer in front.
+    still fit. Four do not: runs then fail with `pool timed out` (see
+    [Connection budget](#connection-budget)). With N processes (sidecars) on
+    one database, set each one's `stores.max_connections` to about (the
+    database's limit minus headroom) / N, for example 20 for four sidecars on
+    a limit of 100. Raise `stores.max_connections` past 32 only after raising
+    the database's limit, or put a pooler such as PgBouncer in front.
+- A call that finds every connection of its pool busy waits 30 seconds, then
+  fails with `pool timed out after 30s: raise max_pool_connections or lower
+  concurrent runs`. A run that hits it stays at its last durable state;
+  resume it. The server also logs one `warn` line per run that hit it, with
+  the tenant, the pool's maximum, its open connections and how many were in
+  use (`LINCH_LOG=warn`, the default level, shows it).
 - The open that connects a pool sets its size; agents that share the pool
   share that size. Several server processes on one database each have their
   own pools.
@@ -183,6 +260,80 @@ Schema details, write paths and the refusal rules are in the
   idle timeout), so a run that waited on a long model call still writes its
   answer. A connection that fails in the middle of a write stops the run at
   its last durable state; resume it.
+
+### Connection budget
+
+Postgres has one limit for everything that connects: its `max_connections`
+(100 by default, minus `superuser_reserved_connections`). Count what your
+fleet can open at once:
+
+```text
+connections = servers x (tenants x max_pool_connections + worker pool)
+              + extras
+```
+
+- **servers** is the number of `linch-server` processes (or embedded
+  sidecars) on the database.
+- **tenants** is the number of tenants that have an agent open on a server. A
+  tenant has one pool per connection target (host, database, user and
+  `search_path`), and two tenants never share one. A server without tenants
+  (stdio) has one pool for its local agents.
+- **max_pool_connections** is the pool's size: the tenant's `stores.
+  max_connections`, at most its `max_pool_connections`, and that defaults to
+  the cores of the server's machine clamped to 10 to 32. A pool opens its
+  connections as runs need them, so a quiet tenant holds few, but a busy
+  one can reach the maximum.
+- **worker pool** is `worker.max_connections` (the same default) for a
+  server with a `worker` section, and 0 without.
+- **extras**: the migration lock takes one connection outside the pool while a
+  pool connects and migrates (concurrent opens of one schema each need one for
+  that moment); a [workflow](./workflows.md) that is running holds one more,
+  outside the pool's maximum, for its whole run (a session-level advisory
+  lock); the worker's `LISTEN` holds one connection for as long as it runs
+  (leave room for it in `worker.max_connections`).
+
+Worked example: 3 servers, each with 5 tenants at the default 10-connection
+pool and a worker pool of 10 connections, need `3 x (5 x 10 + 10) = 180`
+connections at the most, against Postgres's 100. Set `max_pool_connections`
+to 4 for each tenant and `worker.max_connections` to 4, and it is `3 x (5 x 4
++ 4) = 72`, which fits with room for 4 running workflows, an admin session
+and a deploy's `migrate`. Plan about two connections per run in flight at
+once, per pool; a pool smaller than that makes runs wait, and past 30 s fail
+with `pool timed out` (above).
+
+Every cap of a tenant is per process, and there is no server-wide cap:
+
+- `max_runs`, `max_agents` and `max_connections` of a tenant are counted in
+  each server on its own, so N servers allow N times as many. Likewise
+  `max_provider_concurrency`: a worker process or a second server counts its
+  own.
+- Nothing bounds the total over tenants in one process, so fifty tenants at
+  the defaults can open fifty pools. Size `max_pool_connections` for the
+  number of tenants you host, not for one.
+
+**A pooler.** PgBouncer in transaction mode shares a few Postgres
+connections among many clients, which suits many idle tenants, but four
+things in linch-rust need a session-level connection or a feature a
+transaction pooler may not have:
+
+- The migration lock (`pg_advisory_lock`, held on its own connection while
+  migrations run), a running workflow's lock and the retention pass's lock
+  are session-level advisory locks; through a transaction pooler they may
+  land on different backends or outlive their holder.
+- The worker's `LISTEN` needs a session; a worker through a transaction
+  pooler loses its wake-ups and falls back to polling every
+  `poll_interval_ms`.
+- sqlx caches prepared statements per connection (100 by default); a
+  transaction pooler needs prepared-statement support (PgBouncer 1.21 or
+  later with `max_prepared_statements`) or `statement-cache-capacity=0` in
+  the DSN.
+- The DSN's `options=-c search_path=...` is a startup parameter; the pooler
+  must pass it on (or set the role's `search_path` in the database instead).
+
+The simple setup is a direct connection for the workers, `migrate`, and
+workflows, and the pooler for the servers' run traffic. Test the pooler with
+your own configuration before you rely on it; this page does not claim a
+setup the tests do not cover.
 
 ### Run leases
 

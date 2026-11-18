@@ -219,6 +219,61 @@ workspace persists between commands. The daemon is root's, so a client that
 may reach it may do anything; keep its socket away from tenants (the
 sandbox backend refuses Unix sockets for that reason).
 
+### Isolation levels
+
+A container shares the host's kernel. The system calls a command makes go to
+that kernel, so a bug in it can let a command out of the container. The
+`sandbox` backend has the same residual risk (Landlock and seccomp are kernel
+features too). For commands that come from untrusted content, or on a server
+shared by tenants, run the containers under a stronger runtime. From weakest
+to strongest:
+
+| Level | Isolation | Notes |
+|---|---|---|
+| `local` | None beyond the server's user | Trusted agents only |
+| `sandbox` | Landlock, seccomp, rlimits on the host kernel | No daemon; Linux 6.12 or later |
+| `docker` with `runc` (Docker's default) | Namespaces, cgroups, dropped capabilities on the host kernel | The residual risk is a kernel or runtime escape |
+| `docker` with gVisor (`runsc`) | A user-space kernel answers the container's system calls; few reach the host's | Linux only; see the costs below |
+| `docker` with a VM runtime (Kata Containers, Firecracker) | A guest kernel in a virtual machine | The strongest; needs virtualization on the host |
+
+gVisor needs no change to linch-rust, since it is a Docker runtime. Install
+`runsc` and register it with the daemon, then either make it the daemon's
+default, in `/etc/docker/daemon.json`, so every `docker run` the backend
+issues uses it:
+
+```json
+{"runtimes": {"runsc": {"path": "/usr/local/bin/runsc"}}, "default-runtime": "runsc"}
+```
+
+or leave the default alone and point the policy's `docker_path` at a wrapper
+that adds the runtime to `run` only:
+
+```sh
+#!/bin/sh
+# /usr/local/bin/docker-runsc
+if [ "$1" = run ]; then shift; exec docker run --runtime=runsc "$@"; fi
+exec docker "$@"
+```
+
+```python
+execution = {"backend": "docker", "docker_path": "/usr/local/bin/docker-runsc"}
+```
+
+On a server, set the same `docker_path` in the tenant's `allow.execution`
+entry, which a config must equal.
+
+What gVisor costs: a command that makes many system calls runs slower (reports
+put it at tens of percent for such work) and a container takes longer to
+start; some system calls and `/proc` and `/sys` files are not implemented, so a
+tool that needs one fails; it runs on Linux only. Measure your own commands
+before you rely on it. For a VM-level runtime, register it with the daemon the
+same way and use it in place of `runsc`.
+
+The docker backend is not verified against a Docker daemon in linch-rust's
+CI, and not against gVisor or a VM runtime at all: try your configuration
+with a command that must fail (reading a file outside the workspace) before
+you trust it.
+
 ## On a server
 
 A remote tenant may use only the backends its server lists, each with the
