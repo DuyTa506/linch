@@ -77,12 +77,17 @@ của stream và thực thi các quy tắc ở mỗi lần push; `assemble`
 - mỗi `tool_use_start` có một id không rỗng, duy nhất trên cả stream, và một
   tên không rỗng;
 - một input delta hoặc `tool_use_end` nêu tên một lời gọi đang mở;
-- mọi lời gọi đã mở đều kết thúc trước `message_end`, và input đã nối của nó
-  parse được thành một đối tượng JSON;
+- mọi lời gọi đã mở đều kết thúc trước `message_end`;
 - `stop_reason` là `tool_use` khi và chỉ khi có ít nhất một lời gọi hoàn tất.
 
+Một lời gọi mà input đã nối không phải đối tượng JSON (sai cú pháp, bị cắt, một mảng)
+không làm stream thất bại: block giữ `input` rỗng và văn bản của model trong
+`ToolUseBlock.raw_input`, scheduler lập kế hoạch nó như một lỗi
+(`invalid JSON arguments for <tool>: <lỗi parse>; received: <200 ký tự đầu>`, trước hook
+và permission) và không bao giờ chạy nó, còn model đọc lỗi đó và gọi lại. Các hàm dựng
+request chỉ phát lại `input`, nên provider thấy `{}`; văn bản thô nằm lại trong log.
 Ngoại lệ duy nhất là một lần dừng `max_tokens`: một lời gọi vẫn đang mở, hoặc có input
-không phải một đối tượng trọn vẹn, bị bỏ đi thay vì làm stream thất bại. Lượt khi đó
+không phải một đối tượng trọn vẹn, bị bỏ đi. Lượt khi đó
 dừng với `max_tokens` nếu không còn lời gọi nào và `tool_use` nếu còn các lời gọi đã xong.
 Một response bị cắt trước khi có bất kỳ văn bản hay lời gọi trọn vẹn nào bị runner từ chối
 (`crates/linch-core/src/runner.rs:12-16`).

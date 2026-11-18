@@ -533,6 +533,8 @@ What a run does after a retryable failure:
    call answers from the start, so drop what you showed of it.
 2. Then, with a fallback left, it sends a `ModelFallbackEvent` (`from_model`,
    `to_model`, `error`) and calls the fallback at once, with its own retries.
+   The failed call's text is void here too: the event comes after its deltas
+   and before the fallback's.
    The run keeps that model for the rest of the run, compaction included. A
    turn that failed over calls the fallback even if a skill set its model.
 3. Otherwise the run ends with the last failure's `error`.
@@ -676,6 +678,22 @@ config = {
 - **Contract.** Unset is no limit and is not sent. The limit is not part of
   the [run contract](./agent.md#the-run-contract), so changing it never
   strands a suspended run.
+
+## One HTTP client per settings
+
+An HTTP client holds a connection pool and a TLS configuration, about 90 KB. A
+server opens the agents of one connection (or of one tenant) with one holder
+of clients, so agents whose providers have the same connect and read timeouts
+and the same `request.default_headers` share one client, and with it its
+connections and TLS sessions: 50 opens of a vLLM agent cost one client, not
+fifty. A client goes once no open agent holds it. The key is sent per request
+and the endpoint is part of the URL, so neither splits clients, and a tenant's
+agents never share a client with another tenant's: the holder is per tenant.
+Measured on a release `linch-server`, each extra open of a vLLM-kind agent
+cost about 95 KB of resident memory before and about 6 KB after. A library
+host gets the same from `PgPools`: agents opened with one
+`PgPools` share, `AgentConfig::open` (a fresh one each time) shares nothing,
+and `PgPools::http_clients` says how many clients the open agents hold.
 
 ## Cost
 

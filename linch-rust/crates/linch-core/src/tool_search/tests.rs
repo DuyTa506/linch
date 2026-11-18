@@ -41,6 +41,7 @@ fn loads_are_read_from_successful_search_results() {
         id: id.into(),
         name: name.into(),
         input: Default::default(),
+        raw_input: None,
     };
     let response = Message::new(
         Role::Assistant,

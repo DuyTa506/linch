@@ -128,6 +128,35 @@ async fn a_stream_broken_mid_answer_is_called_again() {
     );
 }
 
+/// The deltas the broken call streamed already reached the consumer, so the
+/// `provider_retry` event is its signal to drop them: it comes after those
+/// deltas and before the next call's, which stream the answer from the
+/// start. A consumer that keeps the text between two such markers never
+/// shows an answer twice.
+#[tokio::test]
+async fn a_retry_event_separates_the_void_deltas_from_the_next_call() {
+    let mut broken = TurnBuilder::new(MODEL).text("parti").build();
+    broken.events.pop();
+    broken.error = Some(ScriptedError::Transport {
+        message: "connection reset".into(),
+    });
+    let provider = Arc::new(Flaky::new(vec![text_turn("whole")]).fail(0, MODEL, broken));
+    let stores = Arc::new(Stores::default());
+    let agent = flaky_agent(retrying(2, 1), provider, stores);
+    let envelopes = finish(agent.run("go", RunOptions::new("s1"))).await;
+    let stream: Vec<String> = (envelopes.iter())
+        .filter_map(|e| match &e.event {
+            Event::PartialAssistant(partial) => Some(format!("text:{}", partial.delta["text"])),
+            Event::ProviderRetry(_) => Some("provider_retry".into()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        stream,
+        [r#"text:"parti""#, "provider_retry", r#"text:"whole""#]
+    );
+}
+
 /// `max_attempts` bounds the calls to a model: the last failure ends the
 /// run with its error, as a run without retries ends.
 #[tokio::test]

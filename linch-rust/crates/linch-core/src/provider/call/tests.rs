@@ -2,8 +2,7 @@ use super::*;
 use crate::message::{ContentBlock, Message};
 use crate::provider::scripted::{ScriptedError, ScriptedProvider, ScriptedTurn};
 use crate::provider::{
-    MessageEndEvent, MessageStartEvent, StreamError, TextDeltaEvent, ToolUseEndEvent,
-    ToolUseInputDeltaEvent, ToolUseStartEvent,
+    MessageEndEvent, MessageStartEvent, StreamError, TextDeltaEvent, ToolUseStartEvent,
 };
 use crate::run::StopReason;
 use proptest::prelude::*;
@@ -144,17 +143,18 @@ async fn every_failure_path_settles_one_receipt() {
         usage: Option<Usage>,
         stream_error: bool,
     }
-    let malformed_tool = vec![
+    // A violation before `message_end`: the call drains the rest of the
+    // stream for the usage it reports.
+    let repeated_tool = vec![
         start(),
         ProviderEvent::ToolUseStart(ToolUseStartEvent {
             id: "c1".into(),
             name: "Read".into(),
         }),
-        ProviderEvent::ToolUseInputDelta(ToolUseInputDeltaEvent {
+        ProviderEvent::ToolUseStart(ToolUseStartEvent {
             id: "c1".into(),
-            json_delta: "{\"path\":".into(),
+            name: "Read".into(),
         }),
-        ProviderEvent::ToolUseEnd(ToolUseEndEvent { id: "c1".into() }),
         end(StopReason::ToolUse, usage(5, 6)),
     ];
     let cases = [
@@ -241,9 +241,9 @@ async fn every_failure_path_settles_one_receipt() {
             stream_error: true,
         },
         Case {
-            name: "malformed tool input drains to the reported usage",
+            name: "a repeated tool id drains to the reported usage",
             turn: ScriptedTurn {
-                events: malformed_tool,
+                events: repeated_tool,
                 error: None,
             },
             model: Some("m"),

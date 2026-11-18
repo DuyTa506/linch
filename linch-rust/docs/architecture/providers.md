@@ -73,12 +73,18 @@ consumer of the stream and enforces the rules on every push; `assemble`
 - every `tool_use_start` has a non-empty id, unique across the stream, and a
   non-empty name;
 - an input delta or `tool_use_end` names a call that is open;
-- every opened call ends before `message_end`, and its concatenated input
-  parses as a JSON object;
+- every opened call ends before `message_end`;
 - `stop_reason` is `tool_use` if and only if at least one call completed.
 
-The one exception is a `max_tokens` stop: a call still open, or with input
-that is not a whole object, is dropped instead of failing the stream. The turn
+A call whose concatenated input is not a JSON object (malformed, cut off,
+an array) does not fail the stream: the block keeps an empty `input` and the
+model's text in `ToolUseBlock.raw_input`, the scheduler plans it as an error
+(`invalid JSON arguments for <tool>: <parse error>; received: <first 200
+characters>`, before hooks and permission) and never runs it, and the model
+reads that error and calls again. The provider request builders replay only
+`input`, so a provider sees `{}` for it; the raw text stays in the log. The
+one exception is a `max_tokens` stop: a call still open, or with input that is
+not a whole object, is dropped instead. The turn
 then stops with `max_tokens` if no call is left and `tool_use` if finished
 calls remain. A response cut off before it held any text or whole call is
 rejected by the runner (`crates/linch-core/src/runner.rs:12-16`).

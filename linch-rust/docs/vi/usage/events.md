@@ -205,7 +205,7 @@ Một phản hồi hoàn chỉnh của model.
 
 | Trường | Ý nghĩa |
 |---|---|
-| `message` | `{"role": "assistant", "content": [blocks]}`: các block `text`, `thinking`, `tool_use` |
+| `message` | `{"role": "assistant", "content": [blocks]}`: các block `text`, `thinking`, `tool_use`. Một block `tool_use` là `{"type", "id", "name", "input"}`, và chỉ mang `raw_input` (các đối số đúng như model viết) khi chúng không phải một đối tượng JSON: `input` khi đó là `{}` và lời gọi được trả lời bằng lỗi, không bao giờ chạy ([Khắc phục sự cố](./troubleshooting.md)) |
 | `stop_reason` | `end_turn`, `tool_use`, `max_tokens`, `stop_sequence`, `refusal`, `error`, `lease_lost` hoặc `interrupted` |
 
 ### `PartialAssistantEvent` (`partial_assistant`), chỉ có trong stream
@@ -379,7 +379,8 @@ lại từ đầu.
 Run đã bỏ một model và gọi model kế tiếp trong
 [`spec.fallback_models`](./providers.md#lỗi-và-thử-lại) cho đến hết run:
 `from_model`, `to_model` và `error` (lỗi đã kết thúc các lời gọi của `from_model`).
-Event của Python Linch có chuỗi `reason` thay cho `error`.
+Event của Python Linch có chuỗi `reason` thay cho `error`. Như với `provider_retry`,
+hãy bỏ phần văn bản dở dang của lời gọi lỗi: model fallback trả lời lại từ đầu.
 
 ### `VerificationEvent` (`verification`)
 

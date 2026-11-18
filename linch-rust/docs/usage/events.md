@@ -202,7 +202,7 @@ A complete model response.
 
 | Field | What it is |
 |---|---|
-| `message` | `{"role": "assistant", "content": [blocks]}`: `text`, `thinking`, `tool_use` blocks |
+| `message` | `{"role": "assistant", "content": [blocks]}`: `text`, `thinking`, `tool_use` blocks. A `tool_use` block is `{"type", "id", "name", "input"}`, and carries `raw_input` (the arguments as the model wrote them) only when they were not a JSON object: `input` is then `{}` and the call is answered with an error, never run ([Troubleshooting](./troubleshooting.md)) |
 | `stop_reason` | `end_turn`, `tool_use`, `max_tokens`, `stop_sequence`, `refusal`, `error`, `lease_lost` or `interrupted` |
 
 ### `PartialAssistantEvent` (`partial_assistant`), stream-only
@@ -383,7 +383,8 @@ The run gave up on a model and calls the next of
 [`spec.fallback_models`](./providers.md#failures-and-retries) for the rest of
 the run: `from_model`, `to_model` and `error` (the failure that ended
 `from_model`'s calls). Python Linch's event has a `reason` string in place of
-`error`.
+`error`. As for `provider_retry`, discard the partial text of the failed call:
+the fallback answers from the start.
 
 ### `VerificationEvent` (`verification`)
 

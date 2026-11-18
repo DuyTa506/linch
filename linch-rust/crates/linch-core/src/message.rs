@@ -141,8 +141,59 @@ pub struct ToolUseBlock {
     pub id: String,
     /// Name of the requested tool.
     pub name: String,
-    /// Tool arguments as a JSON object.
+    /// Tool arguments as a JSON object. Empty when [`Self::raw_input`] is set.
     pub input: JsonObject,
+    /// The arguments exactly as the model wrote them, kept only when they
+    /// are not a JSON object (cut off, malformed, an array). Such a call
+    /// is never run: its result is an error that says why, so the model
+    /// can call again. A provider is replayed `input` (`{}`), never this
+    /// text, which stays in the log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_input: Option<String>,
+}
+
+/// Most characters of the model's arguments that [`ToolUseBlock::input_error`]
+/// quotes back to it.
+const QUOTED_ARGUMENTS: usize = 200;
+
+impl ToolUseBlock {
+    /// A call with valid `input`.
+    pub fn new(id: impl Into<String>, name: impl Into<String>, input: JsonObject) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            input,
+            raw_input: None,
+        }
+    }
+
+    /// A call whose arguments `raw` are not a JSON object; its `input` is
+    /// empty.
+    pub fn invalid(id: impl Into<String>, name: impl Into<String>, raw: String) -> Self {
+        Self {
+            raw_input: Some(raw),
+            ..Self::new(id, name, JsonObject::new())
+        }
+    }
+
+    /// What the model is told when [`Self::raw_input`] is set: the tool,
+    /// the parse error and the first characters it wrote. `None` for a call
+    /// with valid arguments.
+    pub fn input_error(&self) -> Option<String> {
+        let raw = self.raw_input.as_deref()?;
+        let why = match serde_json::from_str::<serde_json::Value>(raw) {
+            Err(error) => error.to_string(),
+            Ok(_) => "the arguments must be a JSON object".to_owned(),
+        };
+        let mut quoted: String = raw.chars().take(QUOTED_ARGUMENTS).collect();
+        if quoted.len() < raw.len() {
+            quoted.push_str("...");
+        }
+        Some(format!(
+            "invalid JSON arguments for {}: {why}; received: {quoted}",
+            self.name
+        ))
+    }
 }
 
 /// The result of one tool call.
@@ -264,6 +315,7 @@ mod tests {
                     id: "c1".into(),
                     name: "Read".into(),
                     input: json!({"path": "a"}).as_object().unwrap().clone(),
+                    raw_input: None,
                 }),
             ],
         );
@@ -278,6 +330,21 @@ mod tests {
         assert_eq!(serde_json::from_value::<Message>(wire).unwrap(), message);
         assert_eq!(message.tool_uses().count(), 1);
         assert_eq!(message.text(), "hi");
+    }
+
+    /// A call whose arguments were not an object keeps the model's text
+    /// next to an empty `input`; a valid call's wire form is unchanged.
+    #[test]
+    fn an_invalid_call_keeps_its_raw_arguments_on_the_wire() {
+        let call = ToolUseBlock::invalid("c1", "Read", r#"{"path": "a"#.into());
+        let wire = serde_json::to_value(ContentBlock::ToolUse(call.clone())).unwrap();
+        assert_eq!(
+            wire,
+            json!({"type": "tool_use", "id": "c1", "name": "Read", "input": {},
+                   "raw_input": "{\"path\": \"a"})
+        );
+        let back: ContentBlock = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, ContentBlock::ToolUse(call));
     }
 
     #[test]

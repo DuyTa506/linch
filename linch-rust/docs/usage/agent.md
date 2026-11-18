@@ -739,8 +739,26 @@ and never for a stream-only delta or tool-progress event.
 | `point` | required | One of the twenty-three points above |
 | `policy_id`, `policy_version` | required | Enter the run contract. Bump the version whenever the behaviour, matcher, timeout or fail mode changes |
 | `matcher` | every tool | Tool-name globs (`*`, `?`), only at the tool points (`pre_tool_use`, `permission_request`, `post_tool_use`, `tool_execute`); a miss never reaches this process |
-| `timeout` | none | How long the server waits for an answer; absent, it waits until the callback answers, the run is cancelled or the connection ends |
+| `timeout` | 30 s at `pre_tool_use` and `permission_request`, otherwise none | How long the server waits for an answer; absent at the two gates it is 30 seconds, so a gate that never answers cannot hold the run, and the hook then fails by its `fail_mode` (a `permission_request` that waits on a person sets its own longer `timeout`). Absent at any other point, it waits until the callback answers, the run is cancelled or the connection ends. `tool_execute` has no default: it wraps the tool's own run |
 | `fail_mode` | `closed` at `pre_tool_use` and `permission_request`, `open` elsewhere | What an exception, a bad answer or a timeout does: `closed` gives the point's blocking answer, `open` skips the callback. `context_build` and `post_turn` cannot fail closed |
+
+A callback that crashes (an exception, or a panic in a hook written in Rust),
+times out or answers badly is handled by its `fail_mode`; the record and the
+blocked call's reason name the hook's `policy_id` and nothing it said. The
+defaults, which are `HookPoint::default_fail_mode`:
+
+| Fail mode by default | Points |
+|---|---|
+| `closed` (the call or action is blocked) | `pre_tool_use`, `permission_request`, `tool_execute` |
+| `open` (the callback is skipped, the data goes through) | `user_prompt_submit`, `context_build`, `post_tool_use`, `before_provider_call`, `after_provider_call`, `stop`, `post_turn` and the other observe-only points |
+
+**A callback that guards data fails open by default.** A redaction or filter
+at `user_prompt_submit`, `before_provider_call`, `context_build` or
+`post_tool_use` lets the unfiltered prompt, request, context or result
+through when it crashes or times out, unless `fail_mode` is `closed`. Set
+`fail_mode="closed"` on every callback that is a guard (not at `context_build`
+or the observe-only points, which cannot fail closed: registering one is
+refused).
 
 Callbacks at one point run in declaration order. A `pre_tool_use` rewrite
 feeds the next callback and is checked against the tool's schema again. At

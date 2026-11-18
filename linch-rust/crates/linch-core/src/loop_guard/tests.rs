@@ -23,6 +23,7 @@ fn calling(calls: &[(&str, serde_json::Value)]) -> Event {
             id: format!("c{at}"),
             name: (*name).into(),
             input: input.as_object().cloned().unwrap_or_else(JsonObject::new),
+            raw_input: None,
         })
     });
     Event::Assistant(AssistantEvent {
@@ -396,6 +397,7 @@ fn offloaded_trip(preview: &str) -> Option<LoopGuardEvent> {
             id: id.into(),
             name: "Bash".into(),
             input: command.as_object().cloned().unwrap(),
+            raw_input: None,
         });
         watch.see(&Event::Assistant(AssistantEvent {
             message: Message::new(Role::Assistant, vec![call]),

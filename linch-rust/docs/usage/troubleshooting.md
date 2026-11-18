@@ -224,6 +224,7 @@ the run goes on.
 | `Host tool "<name>" timed out after <n>ms` | The host tool did not answer within its `timeout` (300 s by default); its task was cancelled | Raise `@tool(timeout=...)`, or make the tool faster |
 | `Input for tool "<name>" does not match its schema:` followed by the problems | The model's input does not fit the schema | Usually the model corrects itself; check the schema and description |
 | `Tool "<name>" is not registered` | The model called a tool the agent does not have | Check the tool list in the `init` event |
+| `invalid JSON arguments for <tool>: <parse error>; received: <first 200 characters>` | The arguments the model streamed for the call are not a JSON object (cut off, malformed, an array). The tool is not run and the run goes on: the model reads this error and calls again. The assistant message keeps the call with `input: {}` and the text it wrote in `raw_input` (a provider is replayed `{}`, never the text) | Usually the model corrects itself; a model that does it every time needs a simpler schema or a larger `max_tokens` |
 | `Tool call denied: <reason>` | `Deny(reason)` on approval | Expected |
 | `Tool call denied: <tool> denied by <kind> rule in layer "<layer>"` | A permission rule denied the call | Change the rule if the call should run ([Tools](./tools.md#permission-rules)) |
 | `Read <path> before changing it.` | `Write` over an existing file or `Edit` without a `Read` in this session, or after `close_session` or a restart | Expected; the model reads, then writes |

@@ -34,6 +34,7 @@ pub struct ModelFallbackEvent {
     /// The fallback model the run calls next.
     pub to_model: String,
     /// The failure that ended `from_model`'s calls, shaped as an `error`
-    /// event's payload.
+    /// event's payload. As for [`ProviderRetryEvent`], the deltas that call
+    /// streamed are void: `to_model` answers from the start.
     pub error: JsonObject,
 }

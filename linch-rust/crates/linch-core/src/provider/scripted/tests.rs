@@ -136,6 +136,7 @@ fn builder_turns_assemble_to_the_scripted_message() {
                 id: "c1".into(),
                 name: "Read".into(),
                 input: input.as_object().unwrap().clone(),
+                raw_input: None,
             }),
         ]
     );

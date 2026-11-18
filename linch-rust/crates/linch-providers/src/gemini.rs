@@ -108,7 +108,7 @@ impl GeminiOptions {
 /// The Gemini provider.
 #[derive(Debug, Clone)]
 pub struct Gemini {
-    client: reqwest::Client,
+    client: crate::clients::SharedClient,
     options: GeminiOptions,
 }
 

@@ -96,6 +96,135 @@ async fn a_timeout_under_each_fail_mode() {
     assert_eq!(done.records.len(), 2, "the next hook still ran");
 }
 
+/// A tool gate that panics is a failure of the gate, not of the process:
+/// closed (the default at `pre_tool_use`), it blocks the call.
+#[tokio::test]
+async fn a_pre_tool_use_hook_that_panics_blocks_the_call() {
+    let hooks = Hooks::default();
+    let log = new_log();
+    let _ = register(
+        &hooks.pre_tool_use,
+        Scripted::new("gate", &log, |_| panic!("gate bug")),
+    );
+    let done = hooks
+        .pre_tool_use
+        .run(pre_request("Bash", obj(json!({}))))
+        .await;
+    assert!(
+        matches!(done.outcome, PreToolUseOutcome::Blocked { .. }),
+        "{:?}",
+        done.outcome
+    );
+}
+
+/// A panic names the hook and nothing of what it said, and the record
+/// carries no panic text either.
+#[tokio::test]
+async fn a_panic_blocks_with_the_policy_id_only() {
+    let hooks = Hooks::default();
+    let log = new_log();
+    let _ = register(
+        &hooks.pre_tool_use,
+        Scripted::new("gate", &log, |_| panic!("secret-token-123")),
+    );
+    let done = hooks
+        .pre_tool_use
+        .run(pre_request("Bash", obj(json!({}))))
+        .await;
+    let PreToolUseOutcome::Blocked { reason, .. } = done.outcome else {
+        panic!("expected a block");
+    };
+    assert_eq!(reason, "hook `gate` panicked");
+    assert!(
+        !format!("{:?}", done.records).contains("secret-token-123"),
+        "the panic text leaked into the record"
+    );
+}
+
+/// A guard that panics and is set open is skipped, with the failure on
+/// record, and the next hook still runs.
+#[tokio::test]
+async fn a_panic_under_an_open_hook_is_skipped_and_recorded() {
+    let hooks = Hooks::default();
+    let log = new_log();
+    let _ = register(
+        &hooks.pre_tool_use,
+        Scripted::new("gate", &log, |_| panic!("bug")).fail_mode(FailMode::Open),
+    );
+    let _ = register(
+        &hooks.pre_tool_use,
+        Scripted::new("next", &log, |_| Act::Answer(PreToolUseResponse::Continue)),
+    );
+    let done = hooks
+        .pre_tool_use
+        .run(pre_request("Bash", obj(json!({}))))
+        .await;
+    assert!(matches!(done.outcome, PreToolUseOutcome::Run { .. }));
+    assert!(matches!(
+        done.records[0].status,
+        HookStatus::Failed {
+            fail_mode: FailMode::Open,
+            ..
+        }
+    ));
+    assert_eq!(done.records.len(), 2, "the next hook still ran");
+}
+
+/// A closed point cannot wait forever on a gate that never answers: with
+/// no timeout of its own the hook gets the point's default.
+#[tokio::test(start_paused = true)]
+async fn a_closed_point_hook_without_a_timeout_gets_the_default() {
+    let hooks = Hooks::default();
+    let log = new_log();
+    let _ = register(
+        &hooks.pre_tool_use,
+        Scripted::new("gate", &log, |_| Act::Hang),
+    );
+    let done = hooks
+        .pre_tool_use
+        .run(pre_request("Bash", obj(json!({}))))
+        .await;
+    assert!(
+        matches!(done.outcome, PreToolUseOutcome::Blocked { .. }),
+        "{:?}",
+        done.outcome
+    );
+    assert_eq!(
+        done.records[0].status,
+        HookStatus::TimedOut {
+            after: Duration::from_secs(30),
+            fail_mode: FailMode::Closed,
+        }
+    );
+    assert_eq!(
+        HookPoint::PreToolUse.default_timeout(),
+        Some(Duration::from_secs(30))
+    );
+}
+
+/// The default is for the closed points: a hook at an open point keeps
+/// waiting as before.
+#[tokio::test(start_paused = true)]
+async fn an_open_point_hook_without_a_timeout_still_waits() {
+    assert_eq!(HookPoint::PostToolUse.default_timeout(), None);
+    assert_eq!(HookPoint::UserPromptSubmit.default_timeout(), None);
+    let hooks = Hooks::default();
+    let log = new_log();
+    let _ = register(
+        &hooks.user_prompt_submit,
+        Scripted::new("filter", &log, |_| Act::Hang),
+    );
+    let request = UserPromptRequest {
+        session_id: SessionId::from("s"),
+        run_id: RunId::from("r"),
+        content: vec![crate::message::ContentBlock::text("hi")],
+        source: None,
+    };
+    let run = hooks.user_prompt_submit.run(request);
+    let waited = tokio::time::timeout(Duration::from_secs(3600), run).await;
+    assert!(waited.is_err(), "an open point's hook was cut");
+}
+
 #[tokio::test]
 async fn a_hook_that_answers_in_time_is_not_cut() {
     let hooks = Hooks::default();

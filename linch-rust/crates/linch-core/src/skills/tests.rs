@@ -151,6 +151,7 @@ fn call(id: &str, skill: &str) -> ContentBlock {
         id: id.into(),
         name: SKILL_TOOL.into(),
         input: input(json!({"skill": skill})),
+        raw_input: None,
     })
 }
 

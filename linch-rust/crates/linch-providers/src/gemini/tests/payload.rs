@@ -35,6 +35,7 @@ fn call(id: &str, city: &str) -> ContentBlock {
         id: id.into(),
         name: "get_weather".into(),
         input: json!({"city": city}).as_object().unwrap().clone(),
+        raw_input: None,
     })
 }
 

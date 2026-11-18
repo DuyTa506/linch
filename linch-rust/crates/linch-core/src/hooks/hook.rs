@@ -83,7 +83,9 @@ pub trait Hook<P: Point>: Send + Sync {
         None
     }
 
-    /// Longest time the chain waits for [`Self::call`]. `None` waits forever.
+    /// Longest time the chain waits for [`Self::call`]. `None` takes
+    /// [`HookPoint::default_timeout`]: 30 seconds at the closed gates
+    /// `pre_tool_use` and `permission_request`, no limit elsewhere.
     fn timeout(&self) -> Option<Duration> {
         None
     }

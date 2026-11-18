@@ -161,10 +161,16 @@ Mỗi chuỗi tự quyết định cách kết hợp các câu trả lời. Mộ
 | `post_turn` | Mọi hook đều chạy; lỗi chỉ được ghi lại. Không thể fail closed (`hooks/turn.rs:402-421`) | open |
 | `agent_start`, `agent_stop`, `turn_start`, `provider_call_start`, `provider_call_stop`, `tool_use_start`, `tool_use_stop`, `post_tool_use_failure`, `pre_compact`, `post_compact`, `subagent_start`, `subagent_stop`, `event_emit` | Mọi hook đều chạy; lỗi chỉ được ghi lại. Không thể fail closed (`hooks/observe.rs`). `event_emit` chạy một lần cho mỗi event sắp được gửi tới bên gọi, nhưng chỉ với event vừa được stream vừa được ghi bền: không bao giờ cho record của chính một hook, cũng không cho một delta hay tool-progress chỉ stream (`runner/hooks.rs`) | open |
 
-Các giá trị mặc định nằm trong `HookPoint::default_fail_mode` (`policy.rs:193-221`).
-Việc xử lý lỗi nằm trong `Entry::invoke` và `failed` (`hooks/chain.rs:208-259`):
-một hook gặp lỗi hoặc quá thời gian sẽ bị bỏ qua nếu là open, và bị biến thành câu
-trả lời chặn của point nếu là closed.
+Các giá trị mặc định nằm trong `HookPoint::default_fail_mode` (`policy.rs`).
+Việc xử lý lỗi nằm trong `Entry::invoke` và `failed` (`hooks/chain.rs`):
+một hook gặp lỗi, panic hoặc quá thời gian sẽ bị bỏ qua nếu là open, và bị biến thành câu
+trả lời chặn của point nếu là closed. Panic được bắt quanh lời gọi hook và tính như lỗi:
+record ghi `the hook panicked` và câu chặn chỉ nêu policy id, vì nội dung panic có thể
+chứa bí mật. Một hook không đặt timeout nhận `HookPoint::default_timeout` khi đăng ký:
+30 giây ở các cổng closed `pre_tool_use` và `permission_request`, không có ở các point
+khác. Giá trị này được áp dụng lúc đăng ký, không lưu trong spec, nên digest hợp đồng
+của run không đổi. `tool_execute` là chuỗi middleware bao quanh lần chạy của chính
+tool, và không có timeout riêng.
 
 Hook không phải là barrier. Không có gì được flush quanh một chuỗi, và một chuỗi không có
 hook nào sẽ bị bỏ qua trước khi request của nó được dựng, nên một run không có hook

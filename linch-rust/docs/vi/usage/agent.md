@@ -735,8 +735,25 @@ và không bao giờ cho một delta hay tool-progress chỉ stream.
 | `point` | bắt buộc | Một trong hai mươi ba điểm ở trên |
 | `policy_id`, `policy_version` | bắt buộc | Đi vào hợp đồng của run. Hãy tăng version mỗi khi hành vi, matcher, timeout hoặc fail mode thay đổi |
 | `matcher` | mọi tool | Glob tên tool (`*`, `?`), chỉ ở các điểm tool (`pre_tool_use`, `permission_request`, `post_tool_use`, `tool_execute`); một lần không khớp không bao giờ đến process này |
-| `timeout` | không có | Server chờ câu trả lời bao lâu; vắng thì chờ đến khi callback trả lời, run bị hủy hoặc kết nối kết thúc |
+| `timeout` | 30 giây ở `pre_tool_use` và `permission_request`, còn lại không có | Server chờ câu trả lời bao lâu; vắng ở hai cổng này thì là 30 giây, nên một cổng không bao giờ trả lời không thể giữ run mãi, và hook khi đó thất bại theo `fail_mode` của nó (một `permission_request` chờ con người tự đặt `timeout` dài hơn). Vắng ở điểm khác thì chờ đến khi callback trả lời, run bị hủy hoặc kết nối kết thúc. `tool_execute` không có mặc định: nó bọc lần chạy của chính tool |
 | `fail_mode` | `closed` ở `pre_tool_use` và `permission_request`, `open` ở các điểm còn lại | Điều xảy ra khi có exception, câu trả lời sai hoặc timeout: `closed` đưa ra câu trả lời chặn của điểm đó, `open` bỏ qua callback. `context_build` và `post_turn` không thể fail closed |
+
+Một callback bị lỗi (exception, hoặc panic trong hook viết bằng Rust), quá thời gian
+hoặc trả lời sai được xử lý theo `fail_mode` của nó; record và lý do của lời gọi bị chặn
+chỉ nêu `policy_id` của hook, không nêu điều hook đã nói. Giá trị mặc định, tức
+`HookPoint::default_fail_mode`:
+
+| Fail mode mặc định | Các điểm |
+|---|---|
+| `closed` (lời gọi hoặc hành động bị chặn) | `pre_tool_use`, `permission_request`, `tool_execute` |
+| `open` (callback bị bỏ qua, dữ liệu đi tiếp) | `user_prompt_submit`, `context_build`, `post_tool_use`, `before_provider_call`, `after_provider_call`, `stop`, `post_turn` và các điểm chỉ quan sát còn lại |
+
+**Một callback bảo vệ dữ liệu mặc định fail open.** Một callback che giấu hoặc lọc
+ở `user_prompt_submit`, `before_provider_call`, `context_build` hay `post_tool_use`
+để prompt, request, ngữ cảnh hoặc kết quả chưa lọc đi qua khi nó lỗi hoặc quá
+thời gian, trừ khi `fail_mode` là `closed`. Hãy đặt `fail_mode="closed"` cho mọi callback
+là lớp bảo vệ (trừ `context_build` và các điểm chỉ quan sát, không thể fail closed:
+đăng ký như vậy bị từ chối).
 
 Các callback ở cùng một điểm chạy theo thứ tự khai báo. Một lần rewrite ở
 `pre_tool_use` được đưa cho callback kế tiếp và được kiểm tra lại theo schema của

@@ -1,9 +1,7 @@
 use std::convert::Infallible;
 
 use futures::{StreamExt, stream};
-use linch_core::{
-    ContentBlock, ProviderError, ProviderEvent, StopReason, StreamError, Usage, assemble,
-};
+use linch_core::{ContentBlock, ProviderError, ProviderEvent, StopReason, Usage, assemble};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
@@ -273,15 +271,16 @@ async fn a_length_stop_keeps_the_calls_that_finished() {
 }
 
 #[tokio::test]
-async fn a_cut_off_call_without_a_length_stop_is_still_invalid() {
+async fn a_cut_off_call_without_a_length_stop_is_kept_marked() {
     let sse = chunk(json!({"delta": {"tool_calls": [call_piece(0, "c1", "{\"city\": \"Par")]}}))
         + &chunk(json!({"delta": {}, "finish_reason": "tool_calls"}))
         + "data: [DONE]\n\n";
-    let err = assemble(run_ok(&sse, 4096).await).unwrap_err();
-    assert!(
-        matches!(&err, StreamError::InvalidToolInput { id, .. } if id == "c1"),
-        "{err:?}"
-    );
+    let turn = assemble(run_ok(&sse, 4096).await).unwrap();
+    assert_eq!(turn.stop_reason, StopReason::ToolUse);
+    let call = turn.message.tool_uses().next().unwrap();
+    assert_eq!(call.id, "c1");
+    assert!(call.input.is_empty());
+    assert_eq!(call.raw_input.as_deref(), Some("{\"city\": \"Par"));
 }
 
 #[tokio::test]

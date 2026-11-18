@@ -1,6 +1,7 @@
 //! Policy vocabulary shared by permissions, hooks and the scheduler.
 
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -179,6 +180,10 @@ pub enum HookPoint {
     ToolExecute,
 }
 
+/// How long a gate that sets no timeout of its own is waited for; see
+/// [`HookPoint::default_timeout`].
+const GATE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// What happens when a callback errors or times out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -190,6 +195,19 @@ pub enum FailMode {
 }
 
 impl HookPoint {
+    /// Longest the chain waits for a hook that sets no timeout of its own.
+    /// A point that fails closed is a gate, and a gate that never answers
+    /// would hold the run for good, so `pre_tool_use` and
+    /// `permission_request` wait 30 seconds. `None` waits as long as the
+    /// hook takes: the open points, and `tool_execute`, which wraps the
+    /// tool's own run and has no timeout at all.
+    pub fn default_timeout(self) -> Option<Duration> {
+        match self {
+            Self::PreToolUse | Self::PermissionRequest => Some(GATE_TIMEOUT),
+            _ => None,
+        }
+    }
+
     /// Default failure handling: tool gates fail closed, the rest fail open,
     /// so a dead context source cannot stall every turn. The observe-only
     /// points (everything from `AgentStart` on) can only fail open: there is

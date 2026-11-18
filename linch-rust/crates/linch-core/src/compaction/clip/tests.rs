@@ -8,6 +8,7 @@ fn call(id: &str) -> Message {
         id: id.into(),
         name: "Read".into(),
         input,
+        raw_input: None,
     };
     Message::new(Role::Assistant, vec![ContentBlock::ToolUse(block)])
 }

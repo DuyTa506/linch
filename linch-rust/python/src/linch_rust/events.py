@@ -336,7 +336,9 @@ class ProviderRetryEvent:
     It waits `delay_ms` first. `retry` counts this model's retries in the
     turn, from 1. `error` is the failure in an `ErrorEvent`'s shape (`kind`,
     `message`, `retryable`, `status` for an HTTP status). The deltas the
-    failed call streamed are void: the next call answers from the start.
+    failed call streamed (`PartialAssistantEvent`s before this event) are
+    void: drop the partial text received so far, because the next call
+    answers from the start and streams the whole answer again.
     """
 
     type: ClassVar[str] = "provider_retry"
@@ -351,7 +353,9 @@ class ModelFallbackEvent:
     """The run gave up on `from_model` and calls `to_model` for the rest of the run.
 
     `error` is the failure that ended `from_model`'s calls, in an
-    `ErrorEvent`'s shape.
+    `ErrorEvent`'s shape. The deltas the failed call streamed are void, as
+    for a `ProviderRetryEvent`: drop the partial text received since the
+    last such event, and `to_model` answers from the start.
     """
 
     type: ClassVar[str] = "model_fallback"

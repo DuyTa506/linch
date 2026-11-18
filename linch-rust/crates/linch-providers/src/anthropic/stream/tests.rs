@@ -2,8 +2,8 @@ use std::convert::Infallible;
 
 use futures::{StreamExt, stream};
 use linch_core::{
-    ContentBlock, ProviderError, ProviderEvent, RedactedThinkingBlock, StopReason, StreamError,
-    ThinkingBlock, Usage, assemble,
+    ContentBlock, ProviderError, ProviderEvent, RedactedThinkingBlock, StopReason, ThinkingBlock,
+    Usage, assemble,
 };
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -282,13 +282,14 @@ async fn a_max_tokens_stop_keeps_the_calls_that_finished() {
 }
 
 #[tokio::test]
-async fn a_cut_off_call_without_a_max_tokens_stop_is_still_invalid() {
+async fn a_cut_off_call_without_a_max_tokens_stop_is_kept_marked() {
     let sse = tool_frames(&[tool_block(0, "t1", r#"{"city": "Par"#)], "tool_use");
-    let err = assemble(run_ok(&sse).await).unwrap_err();
-    assert!(
-        matches!(&err, StreamError::InvalidToolInput { id, .. } if id == "t1"),
-        "{err:?}"
-    );
+    let turn = assemble(run_ok(&sse).await).unwrap();
+    assert_eq!(turn.stop_reason, StopReason::ToolUse);
+    let call = turn.message.tool_uses().next().unwrap();
+    assert_eq!(call.id, "t1");
+    assert!(call.input.is_empty());
+    assert_eq!(call.raw_input.as_deref(), Some(r#"{"city": "Par"#));
 }
 
 #[tokio::test]

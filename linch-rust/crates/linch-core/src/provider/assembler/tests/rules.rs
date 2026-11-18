@@ -197,9 +197,11 @@ fn message_end_with_an_open_call_is_rejected() {
     ));
 }
 
+/// A call whose input is malformed is not a stream error: the block stays,
+/// marked with the model's text, so the run can tell the model.
 #[test]
-fn malformed_tool_input_is_rejected() {
-    let err = assemble([
+fn malformed_tool_input_is_kept_marked() {
+    let assembly = assemble([
         start("m"),
         ProviderEvent::ToolUseStart(ToolUseStartEvent {
             id: "c1".into(),
@@ -212,13 +214,28 @@ fn malformed_tool_input_is_rejected() {
         ProviderEvent::ToolUseEnd(ToolUseEndEvent { id: "c1".into() }),
         end(StopReason::ToolUse),
     ])
-    .unwrap_err();
-    assert!(matches!(err, StreamError::InvalidToolInput { id, .. } if id == "c1"));
+    .unwrap();
+    assert_eq!(assembly.stop_reason, StopReason::ToolUse);
+    let [call] = assembly.message.content.as_slice() else {
+        panic!("expected one block: {:?}", assembly.message);
+    };
+    let ContentBlock::ToolUse(call) = call else {
+        panic!("not a call: {call:?}");
+    };
+    assert_eq!((call.id.as_str(), call.name.as_str()), ("c1", "Read"));
+    assert!(call.input.is_empty());
+    assert_eq!(call.raw_input.as_deref(), Some("{not json"));
+    let told = call.input_error().unwrap();
+    assert!(
+        told.starts_with("invalid JSON arguments for Read: "),
+        "{told}"
+    );
+    assert!(told.ends_with("received: {not json"), "{told}");
 }
 
 #[test]
-fn non_object_tool_input_is_rejected() {
-    let err = assemble([
+fn non_object_tool_input_is_kept_marked() {
+    let assembly = assemble([
         start("m"),
         ProviderEvent::ToolUseStart(ToolUseStartEvent {
             id: "c1".into(),
@@ -229,10 +246,27 @@ fn non_object_tool_input_is_rejected() {
             json_delta: "[1,2,3]".into(),
         }),
         ProviderEvent::ToolUseEnd(ToolUseEndEvent { id: "c1".into() }),
-        end(StopReason::EndTurn),
+        end(StopReason::ToolUse),
     ])
-    .unwrap_err();
-    assert!(matches!(err, StreamError::NonObjectToolInput { id } if id == "c1"));
+    .unwrap();
+    let call = assembly.message.tool_uses().next().unwrap();
+    assert!(call.input.is_empty());
+    assert_eq!(call.raw_input.as_deref(), Some("[1,2,3]"));
+    let told = call.input_error().unwrap();
+    assert!(
+        told.contains("the arguments must be a JSON object"),
+        "{told}"
+    );
+}
+
+/// The model is shown the first 200 characters of what it wrote, on a
+/// character boundary.
+#[test]
+fn the_quoted_arguments_stop_at_200_characters() {
+    let raw = "é".repeat(300);
+    let call = ToolUseBlock::invalid("c1", "Read", raw);
+    let told = call.input_error().unwrap();
+    assert!(told.ends_with(&format!("{}...", "é".repeat(200))), "{told}");
 }
 
 /// A call with `input`, closed unless `input` is `None`.
@@ -290,15 +324,23 @@ fn a_max_tokens_stop_keeps_the_calls_that_finished() {
     assert_eq!(ids, ["c1"]);
 }
 
+/// A cut-off call without an output-limit stop is kept marked, like a
+/// malformed one, and counts as a call: a `tool_use` stop is right for it,
+/// and an `end_turn` stop is as inconsistent as with a valid call.
 #[test]
-fn a_broken_call_fails_any_other_stop() {
-    for stop in [StopReason::ToolUse, StopReason::EndTurn] {
-        let mut events = vec![start("m")];
-        events.extend(call("c1", Some(r#"{"path": "a"#)));
-        events.push(end(stop));
-        let err = assemble(events).unwrap_err();
-        assert!(matches!(&err, StreamError::InvalidToolInput { id, .. } if id == "c1"));
-    }
+fn a_broken_call_counts_as_a_call_for_any_other_stop() {
+    let mut events = vec![start("m")];
+    events.extend(call("c1", Some(r#"{"path": "a"#)));
+    events.push(end(StopReason::ToolUse));
+    let assembly = assemble(events).unwrap();
+    let kept = assembly.message.tool_uses().next().unwrap();
+    assert_eq!(kept.raw_input.as_deref(), Some(r#"{"path": "a"#));
+
+    let mut events = vec![start("m")];
+    events.extend(call("c1", Some(r#"{"path": "a"#)));
+    events.push(end(StopReason::EndTurn));
+    let err = assemble(events).unwrap_err();
+    assert!(matches!(&err, StreamError::CallsWithoutToolUse { .. }));
 }
 
 #[test]

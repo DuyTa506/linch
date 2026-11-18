@@ -55,6 +55,7 @@ fn use_block(id: &str, name: &str, input: JsonValue) -> ToolUseBlock {
         id: id.to_owned(),
         name: name.to_owned(),
         input: obj(input),
+        raw_input: None,
     }
 }
 
