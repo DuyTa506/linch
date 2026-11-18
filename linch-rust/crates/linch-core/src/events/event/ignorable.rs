@@ -36,6 +36,7 @@ pub(super) const KNOWN_EVENT_TYPES: &[&str] = &[
     "verification",
     "policy",
     "hook",
+    "cache_diagnostic",
     "error",
     "result",
     "model_call_delivery",

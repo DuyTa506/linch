@@ -224,6 +224,10 @@ pub(super) struct Runner {
     /// What the reliability policy counted of the run, read back from its
     /// durable log on a resume; `None` without a policy.
     pub(super) gates: Option<Gates>,
+    /// What the run keeps to say why the provider's prompt cache read what
+    /// it did (see `runner/cache.rs`); `None` unless the agent turned
+    /// `monitoring.cache_diagnostic` on, and then nothing is hashed.
+    pub(super) cache_watch: Option<crate::cache_diagnostic::CacheWatch>,
 }
 
 impl Runner {
@@ -244,6 +248,7 @@ impl Runner {
         let tool_choice = agent.spec.tool_choice.clone();
         let final_tool = agent.final_tool.clone();
         let gates = agent.gates.clone().map(Gates::new);
+        let cache_watch = (agent.cache_diagnostic).then(Default::default);
         let mut runner = Self {
             snapshot: agent.snapshot(),
             narrowed: false,
@@ -286,6 +291,7 @@ impl Runner {
             unpaired: None,
             retry_clock: Arc::default(),
             gates,
+            cache_watch,
         };
         runner.narrow();
         runner
@@ -538,6 +544,7 @@ impl Runner {
             held => held,
         };
         self.stage_context(&request, context);
+        self.cache_sending(&request);
         let call = ModelCall::prepare(&self.run.run_id, self.turn, attempt, &request.model);
         (self.summary_refusals, self.size_refused) = (0, false);
         self.stage_seen(Event::ModelCallDelivery(call.delivery().clone()));
@@ -592,6 +599,9 @@ impl Runner {
         }
         let model = served.as_deref().unwrap_or(&call_model);
         (self.provider_call_stop(self.turn, model, disposition, usage, duration_ms)).await;
+        if outcome.result.is_ok() && !empty {
+            self.cache_settled(usage);
+        }
         let failure = match outcome.result {
             // One terminal write: the paid receipt, usage, error and result.
             Ok(_) if empty => {

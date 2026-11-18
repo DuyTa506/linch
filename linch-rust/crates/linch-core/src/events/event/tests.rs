@@ -214,9 +214,14 @@ fn a_user_event_without_a_steer_id_keeps_its_wire_form() {
 fn persistence_classification_covers_every_kind() {
     use std::collections::HashSet;
 
-    let stream_only: HashSet<&str> = ["tool_progress", "partial_assistant", "hook"]
-        .into_iter()
-        .collect();
+    let stream_only: HashSet<&str> = [
+        "tool_progress",
+        "partial_assistant",
+        "hook",
+        "cache_diagnostic",
+    ]
+    .into_iter()
+    .collect();
     let journal_only: HashSet<&str> = [
         "model_call_delivery",
         "model_call_receipt",

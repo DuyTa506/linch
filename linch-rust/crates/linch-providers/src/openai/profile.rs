@@ -54,6 +54,10 @@ pub(crate) struct ChatProfile {
     pub streams_tool_arguments: bool,
     /// How the target caches a prompt prefix.
     pub prompt_cache: PromptCache,
+    /// The body field that carries a [`crate::CacheSalt`], when the target
+    /// has one: `cache_salt` (vLLM, since 0.9.0) or `prompt_cache_key`
+    /// (OpenAI). `None` for a target with no field, which gets no salt.
+    pub cache_isolation: Option<&'static str>,
     /// Whether [`ProviderRequest::stop_sequences`] go in `stop`.
     pub stop_sequences: bool,
     /// What the target's `GET /models` list gives per model.
@@ -99,6 +103,7 @@ pub(crate) static OPENAI: ChatProfile = ChatProfile {
     vision: Support::ModelDependent,
     streams_tool_arguments: true,
     prompt_cache: PromptCache::Automatic,
+    cache_isolation: Some("prompt_cache_key"),
     stop_sequences: true,
     models: ModelList {
         row: crate::models::OpenAiRow {

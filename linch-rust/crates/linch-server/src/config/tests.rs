@@ -331,3 +331,46 @@ fn every_tenant_of_a_server_claims_runs_under_one_opaque_server_id() {
         assert!(error.to_string().contains("server_id"), "{bad:?}: {error}");
     }
 }
+
+#[test]
+fn cache_isolation_needs_a_secret_of_enough_bytes_and_is_off_by_default() {
+    let text = |secret: serde_json::Value, isolated: bool| {
+        let mut config = json!({"http": "127.0.0.1:1",
+            "tenants": {"plain": {"tokens": [{"value": "tok-plain-inline-0001"}]},
+                        "acme": {"tokens": [{"value": "tok-acme-inline-0001"}],
+                                 "allow": {"cache_isolation": isolated}}}});
+        if !secret.is_null() {
+            config["cache_salt_secret"] = secret;
+        }
+        config.to_string()
+    };
+    // On without a secret: refused when the config loads.
+    let error = ServerConfig::from_json(&text(json!(null), true)).unwrap_err();
+    assert!(
+        matches!(&error, ConfigError::CacheIsolationNeedsSecret { tenant } if tenant == "acme"),
+        "{error}"
+    );
+    // Off: a secret alone changes nothing, and no tenant has a salt.
+    let off = ServerConfig::from_json(&text(json!({"value": "x".repeat(32)}), false)).unwrap();
+    let built = off.build(no_env).unwrap();
+    assert!(built.tenants.iter().all(|tenant| !tenant.cache_isolated()));
+    // A secret under the minimum is refused when the tenants are built, and
+    // the error never shows it.
+    let short = ServerConfig::from_json(&text(json!({"value": "short-secret"}), true)).unwrap();
+    let error = short.build(no_env).unwrap_err();
+    assert!(matches!(error, ConfigError::Access { .. }), "{error}");
+    assert!(!format!("{error} {error:?}").contains("short-secret"));
+    // An unset environment variable is named, not guessed.
+    let from_env = ServerConfig::from_json(&text(json!({"env": "CACHE_SECRET_X"}), true)).unwrap();
+    let error = from_env.build(no_env).unwrap_err();
+    assert!(
+        matches!(&error, ConfigError::CacheSecretEnv { var } if var == "CACHE_SECRET_X"),
+        "{error}"
+    );
+    // On with a long secret: only the isolated tenant has a salt.
+    let secret = |_: &str| Some("operator-secret-0123456789".to_owned());
+    let built = from_env.build(secret).unwrap();
+    for tenant in &built.tenants {
+        assert_eq!(tenant.cache_isolated(), tenant.name() == "acme");
+    }
+}

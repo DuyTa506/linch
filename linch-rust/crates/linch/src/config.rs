@@ -201,6 +201,34 @@ pub struct AgentConfig {
     /// process (a worker, a second server) count separately.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_provider_concurrency: Option<NonZeroU32>,
+    /// What the agent reports about its own runs beyond the events every run
+    /// has (see [`MonitoringConfig`]). Off when absent, which keeps it off
+    /// the wire; it is not part of the run contract.
+    #[serde(default, skip_serializing_if = "MonitoringConfig::is_default")]
+    pub monitoring: MonitoringConfig,
+}
+
+/// The `monitoring` section of an [`AgentConfig`]: switches for what an
+/// agent reports about its runs. Every switch is off when absent, and an
+/// agent that sets none sends, stores and emits exactly what it did without
+/// the section. None is part of the run contract.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MonitoringConfig {
+    /// Emit a stream-only `cache_diagnostic` event after each provider call
+    /// that reports its input tokens, against the run's previous call: why
+    /// the provider's prompt cache read what it did (the `CacheDiagnosticEvent`
+    /// of `linch_core`). It hashes each request, so a long conversation
+    /// costs one pass over it per call; only hashes are kept.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cache_diagnostic: bool,
+}
+
+impl MonitoringConfig {
+    /// Whether every switch is off.
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
 }
 
 impl AgentConfig {
@@ -416,6 +444,40 @@ impl ProviderConfig {
             | Self::SgLang { request, .. }
             | Self::LlamaCpp { request, .. } => Some(request),
             Self::Scripted { .. } => None,
+        }
+    }
+
+    /// The request settings of a live provider, to change; `None` for
+    /// `scripted`.
+    pub fn request_mut(&mut self) -> Option<&mut RequestConfig> {
+        match self {
+            Self::DeepSeek { request, .. }
+            | Self::OpenAiChat { request, .. }
+            | Self::OpenAiResponses { request, .. }
+            | Self::Anthropic { request, .. }
+            | Self::Gemini { request, .. }
+            | Self::Vllm { request, .. }
+            | Self::SgLang { request, .. }
+            | Self::LlamaCpp { request, .. } => Some(request),
+            Self::Scripted { .. } => None,
+        }
+    }
+
+    /// The body field this provider takes a `RequestConfig::cache_salt`
+    /// in, or `None` when its vendor has no field for one: `cache_salt` for
+    /// `vllm`, `prompt_cache_key` for `openai-chat` and `openai-responses`.
+    /// `deepseek`, `anthropic`, `gemini`, `sglang` and `llamacpp` have none,
+    /// and `scripted` makes no request.
+    pub fn cache_isolation_field(&self) -> Option<&'static str> {
+        match self {
+            Self::Vllm { .. } => Some("cache_salt"),
+            Self::OpenAiChat { .. } | Self::OpenAiResponses { .. } => Some("prompt_cache_key"),
+            Self::DeepSeek { .. }
+            | Self::Anthropic { .. }
+            | Self::Gemini { .. }
+            | Self::SgLang { .. }
+            | Self::LlamaCpp { .. }
+            | Self::Scripted { .. } => None,
         }
     }
 

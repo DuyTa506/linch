@@ -114,7 +114,7 @@ docs (`lib.rs:518-569`) and the codes in `crates/linch-rpc/src/error.rs:24-183`.
 | -32001 | `AGENT_NOT_FOUND` | `AgentNotFound` | No open agent has that handle |
 | -32002 | `RUN_BUSY` | `RunBusy` | The connection already drives that run, or `agent.close` named an agent with a run in progress |
 | -32003 | `UNAUTHENTICATED` | `Unauthenticated` | A socket's first message is not `connection.auth` with a known token; the server closes the connection |
-| -32004 | `NOT_ALLOWED` | `NotAllowed` | A tenant check refused; `data.kind` names it (the table in [Server](../usage/server.md#what-admission-refuses-and-why)), among them `run_bound` and `workflow_principal` |
+| -32004 | `NOT_ALLOWED` | `NotAllowed` | A tenant check refused; `data.kind` names it (the table in [Server](../usage/server.md#what-admission-refuses-and-why)), among them `run_bound`, `workflow_principal` and `cache_isolation` |
 | -32005 | `LIMIT_REACHED` | `LimitReached` | A cap is reached and nothing started; `data: {kind, max}`, `kind` one of `runs`, `agents`, `connections`, `logins`, `schedules`, `jobs`, `workflows`, `agent_calls_in_flight`, `journal_records` or `steers` (a run with 16 steers waiting), or `provider_calls`, a rate: at most `max` `provider.models` and `provider.model` calls per `per_seconds` (60) for the tenant |
 | -32010 | `BUILD_MISSING` | `OpenError` | `agent.open`: a required binding was not set |
 | -32011 | `BUILD_INVALID` | `OpenError` | `agent.open`: an invalid config, or a workspace, policy or tool error. Among them: `budget.max_cost_usd` on a model with no price (the primary or a `fallback_models` entry; the message names the model), `spec.call_timeout_ms` under 100, and `workflow.start` with a `max_cost_usd` for an agent with an unpriced model |

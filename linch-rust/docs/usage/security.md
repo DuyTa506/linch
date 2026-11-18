@@ -229,6 +229,144 @@ host tool of the same name, a hook that answers the call, or a cache hit
 counts too). Permissions, redaction and the [sandbox](./sandbox.md) are
 the guardrails.
 
+## Trust boundary
+
+The connection is the trust boundary, and the tenant is what it carries. The
+host authenticates its own users and asserts the principal a run acts for;
+linch does not authenticate users. The server checks one thing about a
+principal: its `tenant` must be the connection's tenant (`admit_principal`,
+`linch-rpc/src/access/admit.rs:216-224`). It does not check the `user` or the
+`roles`.
+
+What follows from that:
+
+- Any connection of a tenant can `resume`, `approve`, `answer`, `cancel` and
+  read the `events` of any run of that tenant, given the run id. `cancel` and
+  `events` take no principal at all (`linch-rpc/src/server/run.rs:91-126`,
+  `server/agents.rs:136-143`).
+- A continuation acts for the principal it names, instead of the run's own
+  ([Runs](./runs.md#acting-for-a-principal)). Approving a suspended run as a
+  different principal (an admin approving a user's run) is an intended flow.
+- A workflow differs: its journal refuses a claim that names another
+  principal than the one it was started for (`PrincipalMismatch`,
+  `linch-ext/src/workflow/conformance.rs:16`). A run has no such check.
+
+So the host must:
+
+- Map its own user identity to the principals it passes, and never let an end
+  user choose the `principal` or the `run_id` of a call to linch.
+- Authorize before calling linch: check that this user may touch this run,
+  then call. Keep run ids unguessable (a caller-chosen id such as
+  `order-42-reply` is guessable); the server does not stop a connection from
+  naming another run of its tenant.
+- Give each trust domain its own tenant. Two parties that must not see each
+  other's runs belong in two tenants, not two principals.
+
+## Untrusted content
+
+A tool result, an MCP result and a subagent's answer go back to the model as
+plain text. Only memory recall is fenced: it is wrapped in
+`<memory-data untrusted="true">` and its stored text is escaped
+(`linch-tools/src/memory_recall.rs:35`). Text that a web page, a file, an
+email or another system put into a tool result can therefore tell the model
+what to do (prompt injection), and the model may follow it.
+
+**What approval and permissions still stop**
+
+- An injected tool call is decided like any other: by the permission mode and
+  rules, per call, not by what the content says ([Permission
+  modes](#permission-modes)). A call that asks suspends the run.
+- Content cannot change the run's principal, permissions or hooks: they come
+  from the run's options, not from the transcript.
+- An MCP tool is treated as `exec` scope unless the server is configured with
+  `trust_annotations`, because a server's `readOnlyHint` is untrusted
+  (`linch-mcp/src/config.rs:152`, default `false` at `:173`). It asks before
+  it runs in `default` mode ([Tools](./tools.md#mcp-tools)).
+
+**What they do not stop**
+
+- Steering the model toward any tool the policy already lets run without
+  asking: read tools, `auto_allow`, an allow rule, `accept_edits` for edits
+  inside the project, and every call in `skip_dangerous`. That includes
+  exfiltration through an allowed tool (a read tool that fetches a URL built
+  from private data, a write tool that stores it where someone else reads it).
+- A `post_tool_use` hook sees the injected result but fails open by default:
+  one that crashes or times out lets the result through
+  ([Hooks](./agent.md#callbacks)).
+- A subagent's answer reaches its parent unlabelled, and the child runs with
+  the parent's permissions.
+- The kernel wraps its own feedback in `<system-reminder>` tags
+  (`linch-core/src/skills.rs:162`). Tool output is not escaped, so a result
+  can contain text that imitates such a wrapper. The kernel does not
+  neutralise it today. A host that needs it can filter or rewrite results in a
+  `post_tool_use` hook with `fail_mode: "closed"`.
+
+**Guidance for the host.** This is guidance, not a guarantee.
+
+- Give each agent the fewest tools that do its job. Do not give one agent
+  untrusted input, sensitive data and a way to communicate externally at the
+  same time without approval on the last step; if an agent needs all three,
+  require approval for the calls that write, execute or reach the network.
+- Require approval (a `default` mode, or an `ask` rule) for write, exec and
+  network tools that run on data from an untrusted source. Prefer `default` to
+  `skip_dangerous` there.
+- Set `fail_mode: "closed"` on every hook that guards data.
+- Keep secrets out of tool inputs: a tool call's input is never scrubbed by
+  [redaction](#redaction) and is captured by [telemetry](#telemetry-content-capture).
+  Give a tool its credential through its own configuration, not through the
+  model.
+
+## Overload behaviour
+
+What happens when a resource is full, from the code at the time of writing:
+
+| Resource | Default | When full | How long it waits | Error |
+|---|---|---|---|---|
+| Tenant `max_runs` | 16 (`linch-rpc/src/access/allowlists.rs:18`) | `run`, `resume` or `approve` is rejected; nothing starts | Not at all: `try_acquire_owned` answers at once (`access.rs:115-117`, `:291-299`) | `LimitReached` -32005, `kind: runs` |
+| Provider concurrency gate (`max_provider_concurrency`) | No cap | The call joins a first-in-first-out queue | Without a limit; only the run's cancel ends the wait (`linch-core/src/provider/gate.rs:87-92`). The queue has no length limit and sheds nothing | None |
+| Provider HTTP | Connect 30 s, read 300 s (`linch-providers/src/clients.rs:132-133`) | The call fails | The timeout; `request.timeout_ms` replaces the read one ([Providers](./providers.md)) | A provider error ([Failures and retries](./providers.md#failures-and-retries)) |
+| Postgres pool | 30 s to acquire a connection (`linch_postgres::ACQUIRE_TIMEOUT`) | The store call fails with `pool timed out after 30s: raise max_pool_connections or lower concurrent runs` | 30 s | `RunError` -32020 (-32024 when it ends a journal write) |
+| Run wall-clock | No deadline | The run goes on | Until `max_turns`, a budget or a cancel ends it | None |
+
+A run has no wall-clock deadline. Bounds are `max_turns` and the budget, and a
+tenant's server refuses an agent with neither (`run_bound`,
+[Server](./server.md#what-admission-refuses-and-why)). A run that waits at the gate waits against no
+clock, so a saturated provider can make queued runs wait for as long as the
+saturation lasts.
+
+Hosts should:
+
+- Set `max_provider_concurrency` (on the agent, or as the tenant's cap) to
+  what the provider key allows, so the queue is in front of the gate and not
+  in the provider's rate limiter.
+- Set `max_turns` and a budget on every agent.
+- Enforce a deadline from the host: cancel the run (`agent.cancel`) when it is
+  due; cancelling ends a wait at the gate too.
+- Queue work above `max_runs` on the host side, since the server rejects it.
+
+## Telemetry content capture
+
+Content is left out of traces by default. `linch-otel` records the prompt, the
+answers and tool input and results only when capture is on: set
+`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` (the switch is read
+by `capture_content_from_env`, `linch-otel/src/lib.rs:35-38`; the name is in
+`keys.rs:90-92`), or `RunObserver::capture_content` in a library host.
+
+When on, these attributes carry the content: `gen_ai.input.messages`,
+`gen_ai.output.messages`, `gen_ai.tool.call.arguments` and
+`gen_ai.tool.call.result` ([Observability](./observability.md#content-capture)).
+
+- `linch-otel` applies no redaction and no size cap to them.
+- [`spec.redaction`](#redaction) scrubs responses and tool results before they
+  are logged, so those attributes carry the scrubbed text when the host turned
+  redaction on. A tool call's input is never scrubbed, so
+  `gen_ai.tool.call.arguments` can carry a secret the model was given or
+  invented into the call, into your traces and whatever stores them.
+
+Keep capture off in production. When you need it, redact at the
+OpenTelemetry collector (a processor that drops or masks these attributes) and
+cap their size there, and treat the trace backend as holding user data.
+
 ## Related pages
 
 - [Tools](./tools.md): permission rules, approvals.
@@ -238,3 +376,5 @@ the guardrails.
 - [Structured output](./structured-output.md): the output schema and its retries.
 - [Events](./events.md): `verification`, `error`, `partial_assistant`, `tool_progress`.
 - [Server](./server.md): tenants and their allowlists.
+- [Runs](./runs.md#acting-for-a-principal): the principal a run acts for.
+- [Observability](./observability.md#content-capture): what telemetry captures.

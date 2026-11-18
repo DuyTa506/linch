@@ -31,6 +31,34 @@ Postgres is the durable backend. InMemory stores are for tests and development.
 Read-scoped tools can run in parallel. An input-aware `parallel` predicate also
 allows read-only subagent calls; write/exec tools with boolean flags stay serial.
 
+## linch-rust
+
+The [`linch-rust/`](linch-rust/) directory holds a Rust kernel with the same agent model
+as this package. It runs as `linch-server` over JSON-RPC, and the Python client
+`linch_rust` starts and drives it. It provides Postgres-durable runs, a worker for
+schedules and background jobs, workflows, hooks, MCP, and OpenTelemetry. It is an SDK
+to embed, not a ready-made agent product: your application owns the HTTP API, TLS, and
+metrics, and chooses how commands are isolated.
+
+The two are developed side by side. The Python package stays supported; the Rust path
+is the direction for production scale. Start with the
+[usage guide](linch-rust/docs/usage/README.md)
+([Tiếng Việt](linch-rust/docs/vi/usage/README.md)), the
+[quickstart](linch-rust/docs/usage/quickstart.md), or the
+[architecture index](linch-rust/docs/architecture/README.md):
+
+```sh
+pip install linch-rust              # the client and the linch-server binary
+pip install 'linch-rust[otel]'      # with OpenTelemetry spans and metrics
+linch-rust new my-agent             # a project that runs and tests offline
+linch-rust docs path                # where the installed docs are
+```
+
+Status: linch-rust is at 0.1 (latest release 0.1.1), so read its
+[changelog](linch-rust/CHANGELOG.md) before each upgrade. The Python-versus-Rust
+benchmark is still being finalized and is not published; the only measurements so far
+are the SDK's own [sizing numbers](linch-rust/docs/usage/embedding.md#sizing-what-was-measured).
+
 ## Install
 
 From a checkout:

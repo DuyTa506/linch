@@ -47,6 +47,7 @@ pub struct AgentBuilder {
     subagents: Option<Vec<SubagentDefinition>>,
     pricing: Option<Pricing>,
     gate: Option<ProviderGate>,
+    cache_diagnostic: bool,
     mailbox: Option<Arc<dyn Mailbox>>,
     workers: Option<Workers>,
     tool_search: Option<ToolSearch>,
@@ -71,6 +72,7 @@ impl AgentBuilder {
             subagents: None,
             pricing: None,
             gate: None,
+            cache_diagnostic: false,
             mailbox: None,
             workers: None,
             tool_search: None,
@@ -218,6 +220,17 @@ impl AgentBuilder {
     /// contract, so changing the cap never strands a suspended run.
     pub fn provider_gate(mut self, gate: ProviderGate) -> Self {
         self.gate = Some(gate);
+        self
+    }
+
+    /// Have every run of this agent compare each provider call with its
+    /// previous one and stream a `cache_diagnostic` event saying why the
+    /// provider's prompt cache read what it did. Observation only: the
+    /// requests, the stores and the durable events are what they were
+    /// without it, and it is not part of the contract. Off by default, and
+    /// then no request is hashed.
+    pub fn cache_diagnostic(mut self) -> Self {
+        self.cache_diagnostic = true;
         self
     }
 
@@ -516,6 +529,7 @@ impl AgentBuilder {
             child: false,
             pricing: self.pricing,
             gate: self.gate,
+            cache_diagnostic: self.cache_diagnostic,
             mailbox: self.mailbox,
             families: Default::default(),
             steering: Default::default(),

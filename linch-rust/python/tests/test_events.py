@@ -11,6 +11,7 @@ from typing import get_args
 import pytest
 
 from linch_rust import (
+    CacheDiagnosticEvent,
     ChildRunStatusEvent,
     CompactionEvent,
     Event,
@@ -75,6 +76,17 @@ def test_reliability_events_decode_to_their_classes() -> None:
 
     assert retried == ProviderRetryEvent(model="m", retry=2, delay_ms=2000, error=error)
     assert fallback == ModelFallbackEvent(from_model="m", to_model="n", error=error)
+
+
+def test_a_cache_diagnostic_decodes_with_its_counts_and_its_first_changed_message() -> None:
+    wire = {"type": "cache_diagnostic", "reason": "prefix_changed", "previous_cached": 2048}
+    wire |= {"cached": 512, "prompt_tokens": 4096, "first_changed_message": 3}
+    changed = decode_event(wire)
+    unchanged = decode_event({**wire, "reason": "none", "first_changed_message": None})
+
+    assert changed == CacheDiagnosticEvent("prefix_changed", 2048, 512, 4096, 3)
+    assert isinstance(unchanged, CacheDiagnosticEvent)
+    assert unchanged.reason == "none" and unchanged.first_changed_message is None
 
 
 def test_a_child_run_status_names_the_child_and_its_status() -> None:

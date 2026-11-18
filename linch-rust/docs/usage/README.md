@@ -62,7 +62,7 @@ Server ─────── one linch-server child process, or a connection to 
 | [Events](./events.md) | Every event type the client decodes, with its fields; sequence numbers and replay; usage and cost |
 | [Structured output](./structured-output.md) | A JSON Schema the final answer must satisfy: on the agent or one run, retries, callbacks, what each provider receives, `tool_choice` and the final tool |
 | [Memory](./memory.md) | Compaction and micro-compaction, a prompt longer than the context window, cut-off answers, file memory, built-in long-term memory, external memory through `context_build` |
-| [Security](./security.md) | Permission modes and auto-allow, redaction of responses, tool results and prompts, final-answer verifiers and their budget, tool order and completion gates |
+| [Security](./security.md) | Permission modes and auto-allow, redaction of responses, tool results and prompts, final-answer verifiers and their budget, tool order and completion gates, the trust boundary, untrusted content, overload behaviour, telemetry content capture |
 | [Stores](./stores.md) | Memory and Postgres stores, DSNs, schemas, migrations as a deploy step, namespaces, pools and the connection budget |
 | [Embedding](./embedding.md) | What the SDK does for your application and what your application must provide: health, metrics, TLS, backups, upgrades, signals, sizing |
 | [CLI](./cli.md) | `linch-rust new`, `linch-rust add tool`, `linch-rust docs path`, `linch-rust skill install` |

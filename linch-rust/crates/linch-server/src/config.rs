@@ -47,6 +47,15 @@ pub struct ServerConfig {
     /// tenant sees it.
     #[serde(default)]
     pub server_id: Option<String>,
+    /// The secret the tenants' prompt-cache salts are derived from, inline
+    /// or from the environment, at least [`linch_rpc::MIN_SECRET_BYTES`]
+    /// bytes. Required by a tenant whose `allow.cache_isolation` is on.
+    /// Keep it the same on every server and worker of the fleet and across
+    /// restarts: it is what makes one tenant's salt stable. Changing it
+    /// gives every tenant a new salt, which starts their provider-side
+    /// prompt caches cold.
+    #[serde(default)]
+    pub cache_salt_secret: Option<TokenSource>,
 }
 
 /// The `worker` section: where the worker's queue is and how it runs.
@@ -224,6 +233,15 @@ pub struct AllowConfig {
     /// Whether a config may set `task_ledger` (one task list shared by all
     /// the tenant's sessions, read on every request); off when absent.
     pub task_ledger: bool,
+    /// Whether the tenant's agents send a salt derived from the tenant's
+    /// name (HMAC under the config's `cache_salt_secret`) in the request
+    /// field their provider has for it (`cache_salt` for `vllm`,
+    /// `prompt_cache_key` for `openai-chat` and `openai-responses`), so a
+    /// provider that caches prompt prefixes does not share them with
+    /// another tenant on the same key. An agent on any other provider is
+    /// refused (`kind` `cache_isolation`). Off when absent; needs
+    /// `cache_salt_secret`.
+    pub cache_isolation: bool,
     /// Whether a config's provider may set `request` (body fields,
     /// headers, a timeout) and `chat`; off when absent. Key, cookie, proxy
     /// and forwarding headers stay refused.
@@ -345,6 +363,19 @@ pub enum ConfigError {
         /// The tenant.
         tenant: String,
     },
+    /// A tenant turns `allow.cache_isolation` on and the config has no
+    /// `cache_salt_secret` to derive its salt from.
+    #[error("tenant {tenant:?}: allow.cache_isolation needs the config's cache_salt_secret")]
+    CacheIsolationNeedsSecret {
+        /// The tenant.
+        tenant: String,
+    },
+    /// The environment variable of `cache_salt_secret` is unset.
+    #[error("environment variable {var} (cache_salt_secret) is unset")]
+    CacheSecretEnv {
+        /// The variable.
+        var: String,
+    },
     /// A `liveness` field is 0, which would end every connection at once
     /// or never check one.
     #[error("liveness.{field} is 0; set at least 1, or leave it out for the default")]
@@ -464,6 +495,10 @@ impl ServerConfig {
                 let tenant = name.clone();
                 return Err(ConfigError::MemoryNeedsCap { tenant });
             }
+            if allow.cache_isolation && config.cache_salt_secret.is_none() {
+                let tenant = name.clone();
+                return Err(ConfigError::CacheIsolationNeedsSecret { tenant });
+            }
         }
         Ok(config)
     }
@@ -497,12 +532,29 @@ impl ServerConfig {
         let mut tokens = Tokens::new();
         let mut tenants = Vec::new();
         let server_id = self.server_id.clone().unwrap_or_else(new_server_id);
+        let secret = match &self.cache_salt_secret {
+            None => None,
+            Some(TokenSource::Value(secret)) => Some(secret.clone()),
+            Some(TokenSource::Env(var)) => {
+                Some(env(var).ok_or_else(|| ConfigError::CacheSecretEnv { var: var.clone() })?)
+            }
+        };
         for (name, tenant) in &self.tenants {
             let access = |source| ConfigError::Access {
                 tenant: name.clone(),
                 source,
             };
-            let made = Tenant::new(name, tenant.allow.build().map_err(access)?).map_err(access)?;
+            let mut made =
+                Tenant::new(name, tenant.allow.build().map_err(access)?).map_err(access)?;
+            if tenant.allow.cache_isolation {
+                let Some(secret) = &secret else {
+                    let tenant = name.clone();
+                    return Err(ConfigError::CacheIsolationNeedsSecret { tenant });
+                };
+                made = made
+                    .with_cache_isolation(secret.as_bytes())
+                    .map_err(access)?;
+            }
             let built = Arc::new(made.with_server_id(&server_id));
             for source in &tenant.tokens {
                 let token = match source {
