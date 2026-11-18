@@ -35,7 +35,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use sqlx::migrate::{Migration, MigrationType, Migrator};
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use sqlx::postgres::{PgConnectOptions, PgConnection, PgPoolOptions};
 use sqlx::{Connection, Postgres, SqlSafeStr, Transaction};
 
 mod codec;
@@ -213,6 +213,8 @@ fn migrator() -> Migrator {
     ];
     Migrator {
         table_name: Cow::Borrowed(MIGRATIONS_TABLE),
+        // `migrate` takes its own per-schema lock; sqlx's is database-wide.
+        locking: false,
         ..Migrator::with_migrations(migrations)
     }
 }
@@ -220,7 +222,8 @@ fn migrator() -> Migrator {
 /// Create or upgrade the store tables in the pool's database.
 ///
 /// Safe to call on every start: applied migrations are skipped, and
-/// concurrent callers serialize on a Postgres advisory lock.
+/// concurrent callers serialize on a Postgres advisory lock scoped to the
+/// database and `search_path` schema, so schemas migrate independently.
 ///
 /// Args:
 ///     pool: Pool for the database (and `search_path` schema) to migrate.
@@ -232,5 +235,15 @@ fn migrator() -> Migrator {
 ///     MigrateError: If the database is unreachable, a migration fails, or
 ///         an applied migration differs from the embedded one.
 pub async fn migrate(pool: &PgPool) -> Result<(), MigrateError> {
-    migrator().run(pool).await
+    // The lock lives on a connection of its own, outside the pool, so a
+    // one-connection pool can still migrate; closing it (or dropping this
+    // future) releases the lock.
+    let mut lock = PgConnection::connect_with(&pool.connect_options()).await?;
+    sqlx::query(MIGRATE_LOCK).execute(&mut lock).await?;
+    let migrated = migrator().run(pool).await;
+    let _ = lock.close().await;
+    migrated
 }
+
+const MIGRATE_LOCK: &str = "SELECT pg_advisory_lock(hashtextextended(\
+    'linch_migrate:' || current_database() || ':' || coalesce(current_schema(), ''), 0))";
