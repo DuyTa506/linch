@@ -23,7 +23,8 @@ use async_trait::async_trait;
 use super::Outbox;
 use super::hooks::{event_emit, push_records};
 use crate::events::kinds::{
-    SkillCompletedEvent, SkillInvokedEvent, ToolCallEndEvent, ToolCallStartEvent, ToolProgressEvent,
+    SkillCompletedEvent, SkillInvokedEvent, ToolCallEndEvent, ToolCallStartEvent,
+    ToolProgressEvent, ToolRetryEvent,
 };
 use crate::events::{Envelope, Event, Persistence, WIRE_VERSION, now_ms};
 use crate::hooks::{Hooks, ToolUseStartRequest, ToolUseStopRequest};
@@ -31,7 +32,7 @@ use crate::ids::{RunId, SessionId};
 use crate::journal::{Journal, JournalError};
 use crate::json::JsonValue;
 use crate::loop_guard::Watch;
-use crate::scheduler::{CallOutcome, PlannedAction, PlannedCall, ToolSink};
+use crate::scheduler::{CallOutcome, PlannedAction, PlannedCall, Retrying, ToolSink};
 use crate::skills::{SKILL_TOOL, requested};
 use crate::tool::ToolProgress;
 
@@ -222,6 +223,26 @@ impl ToolSink for JournalSink<'_> {
         Ok(())
     }
 
+    /// A retry is a barrier of its own: its event is durable before the
+    /// wait and the next attempt, so a crash leaves a call that started and
+    /// has no end, which a resume reports as interrupted.
+    async fn tool_retrying(
+        &self,
+        call: &PlannedCall,
+        retry: &Retrying,
+    ) -> Result<(), JournalError> {
+        let event = Event::ToolRetry(ToolRetryEvent {
+            tool_use_id: call.tool_use_id.clone(),
+            tool_name: call.tool_name.clone(),
+            attempt: retry.attempt,
+            max_attempts: retry.max_attempts,
+            error_class: retry.class.clone(),
+            error: retry.error.clone(),
+            delay_ms: u64::try_from(retry.delay.as_millis()).unwrap_or(u64::MAX),
+        });
+        self.write(vec![event], true).await
+    }
+
     async fn tool_finished(
         &self,
         call: &PlannedCall,
@@ -252,6 +273,7 @@ impl ToolSink for JournalSink<'_> {
                 Err(error) => error.code.clone(),
                 Ok(_) => None,
             },
+            cache_hit: outcome.cache_hit,
         });
         let completed = skill_name(call).map(|name| {
             Event::SkillCompleted(SkillCompletedEvent {

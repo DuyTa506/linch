@@ -162,6 +162,7 @@ impl AgentInner {
             child: true,
             pricing: self.pricing.clone(),
             gate: self.gate.clone(),
+            tool_cache: None,
             mailbox: self.mailbox.clone(),
             families: Default::default(),
             releases: self.releases.clone(),

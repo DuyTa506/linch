@@ -34,6 +34,12 @@ pub const DEFAULT_MAX_AGENTS: usize = 16;
 /// key, so this bounds how fast one schedule spends it.
 pub const DEFAULT_MIN_SCHEDULE_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Bytes of cached tool results all of a tenant's namespaces may hold
+/// together unless its allowlists say otherwise: with Postgres stores the
+/// rows are the operator's database, with memory stores each agent's own
+/// store holds up to this much.
+pub const DEFAULT_TOOL_CACHE_BYTES: u64 = 64 * 1024 * 1024;
+
 /// What a tenant may ask for, built with the methods below. A new value
 /// allows the memory stores, the permission modes `default` and
 /// `accept_edits`, the live providers at their public endpoints, the
@@ -46,6 +52,9 @@ pub const DEFAULT_MIN_SCHEDULE_INTERVAL: Duration = Duration::from_secs(60);
 pub struct Allowlists {
     pub(super) scripted_provider: bool,
     pub(super) exec_tools: bool,
+    pub(super) tool_cache: bool,
+    pub(super) tool_cache_shared: bool,
+    pub(super) tool_cache_bytes: u64,
     pub(super) max_runs: usize,
     pub(super) max_agents: usize,
     pub(super) max_connections: usize,
@@ -222,6 +231,9 @@ impl Allowlists {
         Self {
             scripted_provider: false,
             exec_tools: false,
+            tool_cache: false,
+            tool_cache_shared: false,
+            tool_cache_bytes: DEFAULT_TOOL_CACHE_BYTES,
             max_runs: DEFAULT_MAX_RUNS,
             max_agents: DEFAULT_MAX_AGENTS,
             max_connections: DEFAULT_MAX_CONNECTIONS,
@@ -239,6 +251,35 @@ impl Allowlists {
             execution: vec![ExecutionConfig::Local {}],
             system_sections: Vec::new(),
         }
+    }
+
+    /// Whether a tenant's `spec.tool_cache` is allowed. Off by default: the
+    /// cache keeps results in the server's memory or its database, bounded
+    /// to 1024 entries a namespace, a one-hour ttl, 1 MiB a result and
+    /// [`Self::tool_cache_bytes`] for all the tenant's namespaces together.
+    /// A tenant's cache must also have `spec.redaction` over tool results,
+    /// since the cache stores what the tool returned after it.
+    pub fn tool_cache(mut self, allowed: bool) -> Self {
+        self.tool_cache = allowed;
+        self
+    }
+
+    /// Whether a tenant's `tool_cache` may share entries across the
+    /// sessions of its namespace (`scope: "namespace"`). Off by default: a
+    /// read tool may answer per session, and one session's result must not
+    /// reach another. Only matters with [`Self::tool_cache`].
+    pub fn tool_cache_shared(mut self, allowed: bool) -> Self {
+        self.tool_cache_shared = allowed;
+        self
+    }
+
+    /// Most bytes of cached results all of a tenant's namespaces may hold
+    /// together; [`DEFAULT_TOOL_CACHE_BYTES`] (64 MiB) when not set. The
+    /// store enforces it on every put by dropping the tenant's oldest
+    /// entries; a result is stored as JSON, so its length counts.
+    pub fn tool_cache_bytes(mut self, bytes: u64) -> Self {
+        self.tool_cache_bytes = bytes;
+        self
     }
 
     /// Whether the `scripted` provider is allowed (for tests and evals).

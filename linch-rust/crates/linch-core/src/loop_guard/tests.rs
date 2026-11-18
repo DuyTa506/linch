@@ -64,6 +64,7 @@ fn ended(tool: &str, done: bool) -> Event {
         canonical_output: None,
         metadata: Some(Box::new(metadata)),
         error_code: None,
+        cache_hit: false,
     })
 }
 

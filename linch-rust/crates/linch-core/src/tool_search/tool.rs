@@ -54,6 +54,12 @@ impl Tool for SearchTool {
         ToolScope::Read
     }
 
+    /// What a search finds is offered from the next request on, so a cache
+    /// hit would skip that.
+    fn cache_safe(&self) -> bool {
+        false
+    }
+
     fn always_load(&self) -> bool {
         true
     }

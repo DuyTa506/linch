@@ -46,9 +46,13 @@
 //! listener at least one token. Each token names its tenant: a token is given inline or as the
 //! name of an environment variable read at startup. Every `allow` list
 //! is empty when absent (it allows nothing), except `permission_modes`,
-//! which defaults to `default` and `accept_edits`; `scripted_provider`
-//! and `exec_tools` (`Bash`, `BashOutput` and `BashKill` for workspace
-//! agents) are off when absent;
+//! which defaults to `default` and `accept_edits`; `scripted_provider`,
+//! `exec_tools` (`Bash`, `BashOutput` and `BashKill` for workspace
+//! agents), `tool_cache` (`spec.tool_cache`, which also needs
+//! `spec.redaction` over tool results) and `tool_cache_shared` (its
+//! `scope: "namespace"`) are off when absent; `max_tool_cache_bytes`
+//! (64 MiB when absent) bounds the cached results of all the tenant's
+//! namespaces together;
 //! `max_runs`, `max_agents` and `max_connections`, the tenant's caps
 //! across all its connections, default to 16, 16 and 8;
 //! `max_pool_connections`, the largest `stores.max_connections` it may

@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 use linch::permissions::RuleDecision;
 use linch::verification::Check;
 use linch::{
-    AgentConfig, AgentSpec, ExecutionConfig, McpTransportConfig, PermissionMode, PermissionPolicy,
-    Principal, ProviderConfig, StoreConfig, SystemSection, ToolChoice,
+    AgentConfig, AgentSpec, ByteQuota, CacheScope, ExecutionConfig, McpTransportConfig,
+    PermissionMode, PermissionPolicy, Principal, ProviderConfig, StoreConfig, SystemSection,
+    ToolChoice,
 };
 use serde_json::json;
 
@@ -43,7 +44,7 @@ impl Tenant {
         }
         let allow = &self.allow;
         allow.admit_provider(&config.provider)?;
-        admit_guardrails(&config.spec)?;
+        admit_guardrails(&mut config.spec, allow, &self.name)?;
         allow.admit_provider_concurrency(&mut config.max_provider_concurrency)?;
         admit_system(&mut config.spec, &allow.system_sections)?;
         let mode = (config.permissions.as_ref()).map_or(PermissionMode::default(), |p| p.mode);
@@ -349,16 +350,93 @@ pub const MAX_PATTERN_BYTES: usize = 1024;
 /// and a session append on the server that no budget counts.
 pub const MAX_IDLE_TURNS: u32 = 25;
 
+/// Most attempts of one tool call a tenant's `tool_retry` may allow: each
+/// retry runs the tool again and writes an event on the server.
+pub const MAX_TOOL_ATTEMPTS: u32 = 5;
+
+/// Longest wait between two attempts a tenant's `tool_retry` may allow: a
+/// retrying call holds the run's place meanwhile.
+pub const MAX_TOOL_RETRY_DELAY_MS: u64 = 60_000;
+
+/// Most entries a tenant's `tool_cache` may keep for its namespace.
+pub const MAX_TOOL_CACHE_ENTRIES: u32 = 1_024;
+
+/// Longest a tenant's cached result may live, in milliseconds.
+pub const MAX_TOOL_CACHE_TTL_MS: u64 = 3_600_000;
+
+/// Largest result, as JSON bytes, a tenant's `tool_cache` may store.
+pub const MAX_TOOL_CACHE_VALUE_BYTES: u64 = 1_048_576;
+
 /// Refuse redaction rules and verifiers past [`MAX_GUARDRAILS`] or
-/// [`MAX_PATTERN_BYTES`], and a loop guard that allows more turns without
-/// a provider call than [`MAX_IDLE_TURNS`]. What the patterns match is the
-/// tenant's own business.
-fn admit_guardrails(spec: &AgentSpec) -> Result<(), ErrorObject> {
+/// [`MAX_PATTERN_BYTES`], a loop guard that allows more turns without
+/// a provider call than [`MAX_IDLE_TURNS`], and a tool retry past
+/// [`MAX_TOOL_ATTEMPTS`], [`MAX_TOOL_RETRY_DELAY_MS`] or [`MAX_GUARDRAILS`]
+/// names, and a `tool_cache` the tenant may not use or past its bounds.
+/// What the patterns match is the tenant's own business.
+///
+/// A `tool_cache` also needs `spec.redaction` over tool results (the cache
+/// stores what the tool returned after that redaction, in the server's
+/// memory or database), takes the session scope unless the tenant may share
+/// entries across sessions, and has its `quota` set to the tenant's name
+/// and the allowlist's byte cap, whatever the client sent: the cap bounds
+/// every namespace of the tenant together.
+fn admit_guardrails(
+    spec: &mut AgentSpec,
+    allow: &Allowlists,
+    tenant: &str,
+) -> Result<(), ErrorObject> {
+    let redacts_results = spec.redaction.as_ref().is_some_and(|r| r.tool_results);
+    if let Some(cache) = &mut spec.tool_cache {
+        if !allow.tool_cache {
+            let message = "tool_cache needs tool_cache in the tenant's allowlists";
+            return Err(refused("tool_cache", message.into()));
+        }
+        if !redacts_results {
+            let message = "tool_cache stores what a tool returned, so it needs spec.redaction \
+                           with tool_results on";
+            return Err(refused("tool_cache", message.into()));
+        }
+        if cache.scope == CacheScope::Namespace && !allow.tool_cache_shared {
+            let message = "tool_cache scope namespace shares results across sessions and needs \
+                           tool_cache_shared in the tenant's allowlists";
+            return Err(refused("tool_cache", message.into()));
+        }
+        cache.quota = Some(ByteQuota {
+            group: tenant.to_owned(),
+            max_bytes: allow.tool_cache_bytes,
+        });
+        if cache.max_entries > MAX_TOOL_CACHE_ENTRIES
+            || cache.ttl_ms > MAX_TOOL_CACHE_TTL_MS
+            || cache.max_value_bytes > MAX_TOOL_CACHE_VALUE_BYTES
+            || cache.tools.len() > MAX_GUARDRAILS
+        {
+            let message = format!(
+                "tool_cache allows at most {MAX_TOOL_CACHE_ENTRIES} entries, a ttl of \
+                 {MAX_TOOL_CACHE_TTL_MS} ms, {MAX_TOOL_CACHE_VALUE_BYTES} bytes a result and \
+                 {MAX_GUARDRAILS} tools"
+            );
+            return Err(refused("tool_cache", message));
+        }
+    }
     if spec.loop_guard.max_idle_turns > MAX_IDLE_TURNS {
         let message = format!("loop_guard.max_idle_turns may be at most {MAX_IDLE_TURNS}");
         return Err(refused("loop_guard", message));
     }
     admit_tool_choice(spec.tool_choice.as_ref(), spec)?;
+    if let Some(retry) = &spec.tool_retry {
+        let names = |list: &[String]| list.len() > MAX_GUARDRAILS;
+        if retry.max_attempts > MAX_TOOL_ATTEMPTS
+            || retry.max_delay_ms > MAX_TOOL_RETRY_DELAY_MS
+            || names(&retry.retry_on)
+            || retry.tools.as_deref().is_some_and(names)
+        {
+            let message = format!(
+                "tool_retry allows at most {MAX_TOOL_ATTEMPTS} attempts, a wait of \
+                 {MAX_TOOL_RETRY_DELAY_MS} ms and {MAX_GUARDRAILS} names per list"
+            );
+            return Err(refused("tool_retry", message));
+        }
+    }
     let too_long = |pattern: &str| pattern.len() > MAX_PATTERN_BYTES;
     if let Some(redaction) = &spec.redaction
         && (redaction.rules.len() > MAX_GUARDRAILS

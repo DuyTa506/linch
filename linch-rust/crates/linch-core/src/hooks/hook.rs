@@ -162,7 +162,10 @@ fn glob(pattern: &[u8], name: &[u8]) -> bool {
 pub(super) fn is_tool_point(point: HookPoint) -> bool {
     matches!(
         point,
-        HookPoint::PreToolUse | HookPoint::PermissionRequest | HookPoint::PostToolUse
+        HookPoint::PreToolUse
+            | HookPoint::PermissionRequest
+            | HookPoint::PostToolUse
+            | HookPoint::ToolExecute
     )
 }
 

@@ -18,6 +18,7 @@ use crate::skills::{Skill, SkillSet, SkillTool};
 use crate::store::{RunStore, SessionStore};
 use crate::structured::{FINAL_TOOL_FEATURE, FinalTool, OutputContract};
 use crate::subagents::{ContinueTool, Roster, StopTool, SubagentDefinition, SubagentTool, Workers};
+use crate::tool_cache::{InMemoryToolCache, ToolCacheHandle, ToolCacheStore};
 use crate::tool_search::{SearchTool, ToolSearch};
 use crate::usage::Usage;
 use crate::verification::Verifiers;
@@ -45,6 +46,7 @@ pub struct AgentBuilder {
     mailbox: Option<Arc<dyn Mailbox>>,
     workers: Option<Workers>,
     tool_search: Option<ToolSearch>,
+    tool_cache: Option<Arc<dyn ToolCacheStore>>,
 }
 
 impl AgentBuilder {
@@ -68,6 +70,7 @@ impl AgentBuilder {
             mailbox: None,
             workers: None,
             tool_search: None,
+            tool_cache: None,
         }
     }
 
@@ -214,6 +217,16 @@ impl AgentBuilder {
         self
     }
 
+    /// Where the agent keeps cached tool results (see
+    /// [`crate::tool_cache`]). Only a spec with `tool_cache` uses it, and
+    /// without one it gets an in-memory store of its own. Agents of
+    /// different namespaces may share a store: the namespace is part of
+    /// every key.
+    pub fn tool_cache_store(mut self, store: Arc<dyn ToolCacheStore>) -> Self {
+        self.tool_cache = Some(store);
+        self
+    }
+
     /// Give the agent a mailbox for peer messages (see
     /// [`crate::coordination`]).
     ///
@@ -237,7 +250,7 @@ impl AgentBuilder {
     ///         cannot run, the
     ///         compaction, budget or
     ///         provider retry settings cannot run, the loop guard allows no
-    ///         turn without a provider call, a fallback model is blank
+    ///         turn without a provider call, the tool retry or tool cache policy cannot run, a fallback model is blank
     ///         or repeats a model, a built-in tool's name is taken, the
     ///         final tool is not registered (or, made from the output
     ///         schema, its name is taken or unusable), the tool choice names
@@ -271,6 +284,12 @@ impl AgentBuilder {
             return Err(BuildError::Invalid(problem.into()));
         }
         if let Some(problem) = self.spec.loop_guard.problem() {
+            return Err(BuildError::Invalid(problem.into()));
+        }
+        if let Some(problem) = self.spec.tool_retry.as_ref().and_then(|r| r.problem()) {
+            return Err(BuildError::Invalid(problem.into()));
+        }
+        if let Some(problem) = self.spec.tool_cache.as_ref().and_then(|c| c.problem()) {
             return Err(BuildError::Invalid(problem.into()));
         }
         if let Some(problem) = self.spec.provider_retry.problem() {
@@ -369,6 +388,20 @@ impl AgentBuilder {
         }
         let built_tools = self.tools.snapshot();
         let registered = |name: &str| built_tools.resolve(name).is_some();
+        // A hit skips the tool's run, so one whose run keeps session state
+        // (`Read`'s record of what the session saw) cannot be cached. A name
+        // that is not registered yet may be later; the scheduler checks again.
+        for name in self.spec.tool_cache.iter().flat_map(|cache| &cache.tools) {
+            if built_tools
+                .resolve(name)
+                .is_some_and(|tool| !tool.tool().cache_safe())
+            {
+                return Err(BuildError::Invalid(format!(
+                    "tool_cache.tools names {name:?}, whose run keeps session state that a \
+                     cache hit would skip; leave it out"
+                )));
+            }
+        }
         let native = provider.native_output_schema();
         let named = self.spec.final_tool_name.as_deref();
         let final_tool = FinalTool::of(named, output.as_deref(), native);
@@ -396,6 +429,10 @@ impl AgentBuilder {
         }
         let built_hooks = self.hooks.policy_digest();
         let tools = built_tools.contract_tools();
+        let tool_cache = self.spec.tool_cache.clone().map(|config| {
+            let store = (self.tool_cache).unwrap_or_else(|| Arc::new(InMemoryToolCache::new()));
+            ToolCacheHandle::new(config, store, namespace.clone())
+        });
         let contract = spec::contract_digest(&self.spec, &tools, built_hooks, &features)?;
         let layout = crate::system::layout(&self.spec);
         let system = layout.blocks;
@@ -423,6 +460,7 @@ impl AgentBuilder {
             skills: skill_versions,
             subagents,
             tool_search: self.tool_search,
+            tool_cache,
             workers,
             worker_registry: Default::default(),
             child: false,

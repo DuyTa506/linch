@@ -28,6 +28,25 @@ _JSON_TYPES: dict[Any, str] = {
 }
 
 
+class ToolError(Exception):
+    """Raise it from a host tool to fail the call with an error class.
+
+    The model reads the message. `code` is the error's machine-readable
+    class, which `spec.tool_retry` matches against its `retry_on` (raise
+    `ToolError("busy", code="transient")` from an `idempotent` tool to have
+    the call retried) and which reaches the call's
+    `ToolCallEndEvent.error_code`. Any other exception fails the call with
+    the code `host_tool_error`.
+
+    Attributes:
+        code: The error class, a short string such as `transient`.
+    """
+
+    def __init__(self, message: str, code: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 @dataclass(frozen=True)
 class ToolOutput:
     """What a host tool returns to attach metadata to its value.
@@ -97,6 +116,7 @@ class HostTool:
     fn: Callable[..., Awaitable[Any]]
     context_param: str | None = None
     polls: bool = False
+    idempotent: bool = False
 
     def spec(self) -> dict[str, Any]:
         """The declaration as `agent.open` takes it in `tools`."""
@@ -110,6 +130,8 @@ class HostTool:
             spec["timeout_ms"] = self.timeout_ms
         if self.polls:
             spec["polls"] = True
+        if self.idempotent:
+            spec["idempotent"] = True
         return spec
 
 
@@ -121,6 +143,7 @@ def tool(
     input_schema: Mapping[str, Any] | None = None,
     timeout: float | None = None,
     polls: bool = False,
+    idempotent: bool = False,
 ) -> Callable[[ToolFn], HostTool]:
     """Declare a function as a host tool; a plain function runs in a worker thread.
 
@@ -148,6 +171,12 @@ def tool(
             the run at the third. Return `ToolOutput(..., metadata=
             {"poll_done": True})` once the thing is done, so reading it
             again is a repeat. False when absent.
+        idempotent: Whether running a call again after a failure is safe: it
+            has no effect beyond its result, or the same effect twice is
+            the same. The agent's `spec.tool_retry` retries only a tool that
+            says so, and only when it fails with an error whose `code` the
+            policy lists (see `ToolRetry`): raise `ToolError` with that
+            class. Off by default.
 
     Returns:
         A decorator that turns the function into a `HostTool`.
@@ -175,6 +204,7 @@ def tool(
             context_param=next(
                 (param.name for param in _parameters(fn) if _takes_context(param)), None
             ),
+            idempotent=idempotent,
         )
 
     return wrap

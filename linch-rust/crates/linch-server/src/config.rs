@@ -127,6 +127,21 @@ pub struct AllowConfig {
     /// its execution backend (unconfined, as the server's user, with
     /// `local`), with `BashOutput` and `BashKill`; off when absent.
     pub exec_tools: bool,
+    /// Whether a config may set `spec.tool_cache`, which keeps tool results
+    /// in the server's memory or database, and so only with
+    /// `spec.redaction` over tool results; off when absent. The cache
+    /// serves a result to the session that stored it unless
+    /// `tool_cache_shared` allows `scope: "namespace"`, and every
+    /// namespace of the tenant together holds at most
+    /// `max_tool_cache_bytes`.
+    pub tool_cache: bool,
+    /// Whether a tenant's `tool_cache` may share results across the
+    /// sessions of its namespace (`scope: "namespace"`); off when absent.
+    pub tool_cache_shared: bool,
+    /// Bytes of cached results all the tenant's namespaces may hold
+    /// together, at least 1; [`linch_rpc::DEFAULT_TOOL_CACHE_BYTES`]
+    /// (64 MiB) when absent.
+    pub max_tool_cache_bytes: Option<u64>,
     /// Runs the tenant's connections may drive at once, together, at
     /// least 1; [`linch_rpc::DEFAULT_MAX_RUNS`] when absent.
     pub max_runs: Option<usize>,
@@ -260,6 +275,10 @@ impl ServerConfig {
                     "max_queued_jobs",
                     allow.max_queued_jobs.map(|max| max as usize),
                 ),
+                (
+                    "max_tool_cache_bytes",
+                    allow.max_tool_cache_bytes.map(|max| max as usize),
+                ),
             ];
             if let Some((field, _)) = caps.into_iter().find(|(_, cap)| *cap == Some(0)) {
                 let tenant = name.clone();
@@ -343,6 +362,11 @@ impl AllowConfig {
         let mut allow = Allowlists::new()
             .scripted_provider(self.scripted_provider)
             .exec_tools(self.exec_tools)
+            .tool_cache(self.tool_cache)
+            .tool_cache_shared(self.tool_cache_shared)
+            .tool_cache_bytes(
+                (self.max_tool_cache_bytes).unwrap_or(linch_rpc::DEFAULT_TOOL_CACHE_BYTES),
+            )
             .max_runs(self.max_runs.unwrap_or(linch_rpc::DEFAULT_MAX_RUNS))
             .max_connections((self.max_connections).unwrap_or(linch_rpc::DEFAULT_MAX_CONNECTIONS))
             .max_agents(self.max_agents.unwrap_or(linch_rpc::DEFAULT_MAX_AGENTS))

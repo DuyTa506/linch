@@ -2,10 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::canonical::to_canonical_string;
 use crate::ids::{RunId, SessionId};
-use crate::json::JsonObject;
+use crate::json::{JsonObject, JsonValue};
 use crate::policy::{HookPoint, PermissionDecision, Principal};
-use crate::tool::{ToolOutputError, ToolResult};
+use crate::tool::{ToolOutput, ToolOutputError, ToolResult};
 
 use super::chain::{ChainResult, HookChain, Step};
 use super::hook::{Point, sealed::Sealed};
@@ -288,6 +289,56 @@ pub enum PostToolUseResponse {
         /// The new result.
         result: ToolResult,
     },
+    /// Change part of the result: its content, its error flag, or both.
+    /// Later hooks see the change. The result's metadata and error code
+    /// stay.
+    Mutate {
+        /// The new content: the output's value, or the error's message
+        /// (a string as it is, any other value as compact canonical JSON).
+        /// `None` keeps the content.
+        content: Option<JsonValue>,
+        /// Whether the result is an error: `Some(true)` turns an output
+        /// into an error carrying its content as the message, `Some(false)`
+        /// turns an error into an output carrying its message as a string
+        /// value. `None` keeps the flag.
+        is_error: Option<bool>,
+    },
+}
+
+/// The result after a [`PostToolUseResponse::Mutate`].
+fn mutated(result: ToolResult, content: Option<JsonValue>, is_error: Option<bool>) -> ToolResult {
+    let as_error = is_error.unwrap_or(result.is_err());
+    match (result, as_error) {
+        (Ok(mut output), false) => {
+            if let Some(content) = content {
+                output.value = content;
+            }
+            Ok(output)
+        }
+        (Ok(output), true) => Err(ToolOutputError {
+            message: text(content.as_ref().unwrap_or(&output.value)),
+            code: None,
+            details: None,
+        }),
+        (Err(mut error), true) => {
+            if let Some(content) = content {
+                error.message = text(&content);
+            }
+            Err(error)
+        }
+        (Err(error), false) => Ok(ToolOutput::new(
+            content.unwrap_or(JsonValue::String(error.message)),
+        )),
+    }
+}
+
+/// A value as model-facing text: a string as it is, anything else as
+/// compact canonical JSON (or its plain JSON when too deep to encode).
+fn text(value: &JsonValue) -> String {
+    match value {
+        JsonValue::String(text) => text.clone(),
+        value => to_canonical_string(value).unwrap_or_else(|_| value.to_string()),
+    }
 }
 
 impl Sealed for PostToolUse {}
@@ -305,6 +356,7 @@ impl Point for PostToolUse {
         match response {
             PostToolUseResponse::Continue => "continue",
             PostToolUseResponse::Replace { .. } => "replace",
+            PostToolUseResponse::Mutate { .. } => "mutate",
         }
     }
 }
@@ -320,6 +372,9 @@ impl HookChain<PostToolUse> {
             match entry.invoke(&request, &mut records).await {
                 Step::Skip | Step::Answer(PostToolUseResponse::Continue) => {}
                 Step::Answer(PostToolUseResponse::Replace { result }) => request.result = result,
+                Step::Answer(PostToolUseResponse::Mutate { content, is_error }) => {
+                    request.result = mutated(request.result, content, is_error);
+                }
                 Step::Closed(reason) => {
                     let message = format!("{reason}; the tool result was withheld");
                     return ChainResult {
@@ -333,5 +388,50 @@ impl HookChain<PostToolUse> {
             outcome: request.result,
             records,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn ok(value: JsonValue) -> ToolResult {
+        let mut output = ToolOutput::new(value);
+        output.metadata.insert("k".into(), json!(1));
+        Ok(output)
+    }
+
+    #[test]
+    fn mutate_changes_the_content_and_keeps_the_rest() {
+        let result = mutated(ok(json!("a")), Some(json!("b")), None).unwrap();
+        assert_eq!(result.value, json!("b"));
+        assert_eq!(result.metadata.get("k"), Some(&json!(1)));
+        let kept = mutated(ok(json!("a")), None, Some(false)).unwrap();
+        assert_eq!(kept.value, json!("a"));
+        let mut error = ToolOutputError::new("bad");
+        error.code = Some("E1".into());
+        let changed = mutated(Err(error), Some(json!({"b": 1})), None).unwrap_err();
+        assert_eq!(changed.message, r#"{"b":1}"#);
+        assert_eq!(changed.code.as_deref(), Some("E1"));
+    }
+
+    #[test]
+    fn mutate_flips_the_error_flag_both_ways() {
+        let error = mutated(ok(json!("a")), None, Some(true)).unwrap_err();
+        assert_eq!(error.message, "a");
+        let error = mutated(ok(json!("a")), Some(json!("blocked")), Some(true)).unwrap_err();
+        assert_eq!(error.message, "blocked");
+        let output = mutated(Err(ToolOutputError::new("bad")), None, Some(false)).unwrap();
+        assert_eq!(output.value, json!("bad"));
+        let output = mutated(
+            Err(ToolOutputError::new("bad")),
+            Some(json!(7)),
+            Some(false),
+        );
+        assert_eq!(output.unwrap().value, json!(7));
+        let same = mutated(Err(ToolOutputError::new("bad")), None, None);
+        assert_eq!(same, Err(ToolOutputError::new("bad")));
     }
 }

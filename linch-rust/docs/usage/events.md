@@ -257,6 +257,7 @@ A tool call finished.
 | `canonical_output` | The structured value, for tools that declare an output schema; `None` otherwise |
 | `metadata` | Details for the host only, never shown to the model: what a host tool returned in [`ToolOutput.metadata`](./tools.md#metadata-for-the-host), or where an offloaded result went; `None` for an error or a tool that set none |
 | `error_code` | A failed call's machine-readable code (`invalid_input`, `not_found`, ...), when its tool gave one; `None` otherwise |
+| `cache_hit` | Whether [`spec.tool_cache`](./tools.md#tool_cache) served the result: the tool did not run, and the call's `tool_call_start` is written with this event, not before it. `False` otherwise |
 | `tool_use_id` | Property: `result["tool_use_id"]` |
 | `is_error` | Property: whether the result is a tool error |
 
@@ -317,6 +318,15 @@ tripped: `reason` (`max_turns`, `repeated_tool_call`, `repeated_failures` or
 (limit: 3).`) and
 `action` (`stop`). An `error` event (`TurnLimitError` or `LoopGuardError`)
 and a `result` of subtype `error` follow.
+
+### `ToolRetryEvent` (`tool_retry`)
+
+A tool attempt failed with an error [`spec.tool_retry`](./tools.md#tool_retry)
+retries, and the call runs again after a wait: `tool_use_id`, `tool_name`,
+`attempt` (the one about to run, from 2), `max_attempts`, `error_class` (the
+error's `code`, or `timeout`), `error` (the failed attempt's message, run
+through `spec.redaction` when it covers tool results and then cut to 512
+bytes) and `delay_ms`. It is durable before the wait.
 
 ### `ProviderRetryEvent` (`provider_retry`)
 

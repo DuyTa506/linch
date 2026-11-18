@@ -433,6 +433,95 @@ class ContextBudget(TypedDict, total=False):
     pinned: Sequence[str]
 
 
+class ToolRetry(TypedDict, total=False):
+    """When a failed tool call runs again, as `spec.tool_retry`.
+
+    Off when absent. A call is retried only when its tool declares itself
+    idempotent (`tool(idempotent=True)` for a host tool; the built-in read
+    tools do), the attempt failed with an error whose `code` is in
+    `retry_on` (the class the tool reports; `timeout` stands for a call
+    that ran past the call timeout), and attempts are left. A tool that is
+    not idempotent is never run twice, whatever `tools` lists. Each retry
+    is durable before it runs: a `ToolRetryEvent` is written first, and a
+    crash leaves the call interrupted, never repeated. A call's retries
+    stop together once five minutes have passed since its first attempt,
+    and the event's `error` is redacted (with `spec.redaction`) and cut to
+    512 bytes. A timed-out host tool call is cancelled with a notification
+    the client does not acknowledge, so the next attempt may start while
+    the handler is still winding down: an idempotent host tool must
+    tolerate two overlapping calls. A remote tenant may ask for at most 5
+    attempts and a 60 s wait.
+
+    Attributes:
+        max_attempts: Most attempts of one call, the first included; at
+            least 2; 3 when absent.
+        base_delay_ms: Wait before the second attempt, doubled each retry;
+            200 when absent.
+        max_delay_ms: Longest wait, at least `base_delay_ms`; 5000 when
+            absent.
+        retry_on: Error classes retried; `["transient"]` when absent.
+        tools: Names that may be retried, narrowing the idempotent tools;
+            every idempotent tool when absent.
+    """
+
+    max_attempts: int
+    base_delay_ms: int
+    max_delay_ms: int
+    retry_on: list[str]
+    tools: list[str]
+
+
+class ToolCache(TypedDict, total=False):
+    """Which read tools' results are reused, as `spec.tool_cache`.
+
+    Off when absent. A call of a tool named in `tools` with the same
+    canonical input, in the same agent namespace and session, is served
+    from the cache while its entry lives: permission and the
+    `pre_tool_use` and `post_tool_use` hooks still run, and the call's
+    `ToolCallEndEvent` has `cache_hit` set. `tool_execute` layers do not
+    run on a hit, so a layer that must see every result belongs in
+    `post_tool_use`. Only the tool's own successful result is stored,
+    after the output schema check and redaction and before
+    `post_tool_use`: without `spec.redaction` over tool results it is
+    stored as the tool returned it. A result a `tool_execute` layer
+    vetoed or replaced is never stored. A write or exec tool's call clears
+    the namespace, and a read that began before the clear never stores its
+    result. The first call that starts background work (`Bash` with
+    `run_in_background`, a background subagent) ends caching for the
+    agent. A tool that keeps session state, such as `Read` (which records
+    what the session saw so `Edit` may follow), cannot be named. The key
+    has no tool version: after a tool changes, old entries live until
+    their ttl. With Postgres stores the cache is a table shared by the
+    namespace's servers; otherwise it lives in the agent. A remote tenant
+    may use it only when its server allows, with redaction over tool
+    results, and within a byte cap for all its namespaces together.
+
+    Attributes:
+        tools: Names of the cacheable tools; required, never empty.
+        ttl_ms: How long an entry lives; 300000 when absent.
+        max_entries: Most entries of the namespace; the oldest go first;
+            256 when absent.
+        max_value_bytes: Results whose JSON is larger are not stored;
+            100000 when absent.
+        invalidate_on_write: Whether a write or exec tool's call clears the
+            namespace's entries, before it starts and after it ends; true
+            when absent.
+        scope: `"session"` (the default): an entry serves only the session
+            that stored it, since a read tool may answer per session.
+            `"namespace"`: every session of the namespace shares entries,
+            your promise that the tool answers the same for the same input
+            whoever asks; a remote tenant needs its server's
+            `tool_cache_shared`.
+    """
+
+    tools: list[str]
+    ttl_ms: int
+    max_entries: int
+    max_value_bytes: int
+    invalidate_on_write: bool
+    scope: Literal["session", "namespace"]
+
+
 class DeepAgentProfile(TypedDict):
     """A deep agent profile written out in full; every key is required.
 
@@ -724,8 +813,9 @@ class AgentConfig(TypedDict, total=False):
             registered tool whose call ends the run, its input the answer), a
             `redaction` (see `Redaction`), a `verification` (see
             `Verification`), a `loop_guard` (see `LoopGuard`), `system`
-            sections (see `System`) and a `context_budget` (see
-            `ContextBudget`) go here too.
+            sections (see `System`), a `context_budget` (see
+            `ContextBudget`), a `tool_retry` (see `ToolRetry`) and a
+            `tool_cache` (see `ToolCache`) go here too.
         provider: The model provider chosen by `id` (`deepseek`,
             `openai-chat`, `openai-responses`, `anthropic`, `gemini`,
             `vllm`, `sglang`, `llamacpp`, or `scripted` with its `turns`),

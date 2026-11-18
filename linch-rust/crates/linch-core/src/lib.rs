@@ -48,6 +48,8 @@ mod structured;
 pub mod subagents;
 pub mod system;
 pub mod tool;
+pub mod tool_cache;
+pub mod tool_retry;
 pub mod tool_search;
 pub mod truncation;
 pub mod usage;
@@ -99,7 +101,7 @@ pub use reliability::ProviderRetry;
 pub use run::{Checkpoint, Ending, Phase, RunStatus, StopReason, ToolDecisionRecord};
 pub use runner::RunStream;
 pub use scheduler::{
-    BatchPlan, CallOutcome, ExecuteOptions, PlannedAction, PlannedCall, RecordedApproval,
+    BatchPlan, CallOutcome, ExecuteOptions, PlannedAction, PlannedCall, RecordedApproval, Retrying,
     RunIdentity, ToolSink,
 };
 pub use session_log::{LogEntry, MessageEntry, PrefixEntry, ProjectionEntry, SessionLog};
@@ -114,6 +116,11 @@ pub use system::{SystemConfig, SystemSection};
 pub use tool::{
     Tool, ToolContext, ToolOutput, ToolOutputError, ToolProgress, ToolResult, ToolScope,
 };
+pub use tool_cache::{
+    ByteQuota, CacheScope, InMemoryToolCache, Lookup, PutLimits, ToolCache, ToolCacheError,
+    ToolCacheHandle, ToolCacheStore,
+};
+pub use tool_retry::ToolRetry;
 pub use tool_search::ToolSearch;
 pub use truncation::TruncationRecovery;
 pub use usage::Usage;

@@ -58,6 +58,15 @@ pub struct ToolCallEndEvent {
     /// `post_tool_use`; `None` for a success or an error without a code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
+    /// Whether `spec.tool_cache` served the result: the tool did not run,
+    /// and the call's start is written with this event, not before it.
+    /// Absent on the wire when false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cache_hit: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Decode a present `canonical_output` field as `Some`, including when its
@@ -87,6 +96,31 @@ impl ToolCallEndEvent {
     pub fn is_error(&self) -> bool {
         self.result.is_error
     }
+}
+
+/// A tool attempt failed with an error `spec.tool_retry` retries, so the
+/// call runs again.
+///
+/// Durable before the wait and the next attempt: a crash after it leaves
+/// the call with a start and attempts but no end, which a resumed run
+/// reports as interrupted and does not run again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolRetryEvent {
+    /// Identifier of the tool call.
+    pub tool_use_id: String,
+    /// Name of the tool being retried.
+    pub tool_name: String,
+    /// The attempt about to run, from 2.
+    pub attempt: u32,
+    /// Most attempts the policy allows.
+    pub max_attempts: u32,
+    /// The failure's class: the error's code, or `timeout`.
+    pub error_class: String,
+    /// The failed attempt's error message.
+    pub error: String,
+    /// How long the call waits before the attempt.
+    pub delay_ms: u64,
 }
 
 /// Transient progress reported by an in-flight tool invocation.
@@ -143,6 +177,7 @@ mod tests {
             canonical_output: None,
             metadata: None,
             error_code: None,
+            cache_hit: false,
         };
         assert_eq!(end.tool_use_id(), "c1");
         assert!(!end.is_error());
@@ -164,6 +199,7 @@ mod tests {
             canonical_output,
             metadata: None,
             error_code: None,
+            cache_hit: false,
         }
     }
 

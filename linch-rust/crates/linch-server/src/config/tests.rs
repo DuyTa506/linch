@@ -211,3 +211,26 @@ fn a_tenant_may_have_system_sections_of_the_operator() {
     let config = ServerConfig::from_json(&blank).unwrap();
     assert!(config.build(no_env).is_err());
 }
+
+#[test]
+fn a_tenant_is_given_the_tool_cache_and_its_bounds_by_the_config() {
+    let text = |allow: serde_json::Value| {
+        json!({"http": "127.0.0.1:1",
+               "tenants": {"acme": {"tokens": [{"value": "tok-acme-inline-0001"}],
+                                    "allow": allow}}})
+        .to_string()
+    };
+    let open = ServerConfig::from_json(&text(json!({"tool_cache": true,
+        "tool_cache_shared": true, "max_tool_cache_bytes": 4096})))
+    .unwrap();
+    let allow = &open.tenants["acme"].allow;
+    assert!(allow.tool_cache && allow.tool_cache_shared);
+    assert_eq!(allow.max_tool_cache_bytes, Some(4096));
+    assert!(open.build(no_env).is_ok());
+    let closed = ServerConfig::from_json(&text(json!({}))).unwrap();
+    let allow = &closed.tenants["acme"].allow;
+    assert!(!allow.tool_cache && !allow.tool_cache_shared);
+    assert_eq!(allow.max_tool_cache_bytes, None);
+    let zero = ServerConfig::from_json(&text(json!({"max_tool_cache_bytes": 0})));
+    assert!(matches!(zero, Err(ConfigError::ZeroCap { .. })));
+}

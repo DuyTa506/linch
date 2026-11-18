@@ -86,6 +86,7 @@ async fn tool_turn(
             canonical_output: None,
             metadata: None,
             error_code: None,
+            cache_hit: false,
         }));
         journal.flush().await?;
         results.push(ContentBlock::ToolResult(result));

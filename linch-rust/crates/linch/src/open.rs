@@ -13,7 +13,7 @@ use linch_core::{
     SessionStore, TaskStore, Tool, ToolRegistry,
 };
 use linch_mcp::McpServer;
-use linch_postgres::{PgMailbox, PgRunStore, PgSessionStore};
+use linch_postgres::{PgMailbox, PgRunStore, PgSessionStore, PgToolCache};
 use linch_providers::{
     Anthropic, AnthropicOptions, ApiKey, DeepSeek, DeepSeekOptions, Gemini, GeminiOptions,
     OpenAiChat, OpenAiChatOptions, OpenAiResponses, ReasoningSummary, ResponsesOptions, Server,
@@ -193,6 +193,7 @@ impl AgentConfig {
         let registry = Arc::clone(&tools);
         let forget = files.forget();
         let unread = Arc::clone(&reads);
+        let caches = self.spec.tool_cache.is_some();
         let mut builder = AgentBuilder::new(files.teach(self.spec))
             .provider(provider)
             .tools(tools)
@@ -227,6 +228,11 @@ impl AgentConfig {
         }
         if let Some(mailbox) = mailbox {
             builder = builder.mailbox(mailbox);
+        }
+        // Postgres stores keep cached tool results in a table shared by the
+        // namespace's servers; memory stores leave the builder's own.
+        if let (Some(pool), true) = (pg, caches) {
+            builder = builder.tool_cache_store(Arc::new(PgToolCache::new(pool.clone())));
         }
         if let Some(search) = self.tool_search {
             builder = builder.tool_search(search);

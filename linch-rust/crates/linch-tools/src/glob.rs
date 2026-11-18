@@ -61,6 +61,11 @@ impl Tool for Glob {
         ToolScope::Read
     }
 
+    /// A read has no effect, so a failed call may run again.
+    fn idempotent(&self) -> bool {
+        true
+    }
+
     fn summarize(&self, input: &JsonObject) -> String {
         let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
         format!("Glob {pattern}")

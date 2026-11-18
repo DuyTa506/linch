@@ -163,7 +163,9 @@ host reads: {'source': 'crm', 'cache': 'hit'}
 ```
 
 Lỗi tool không mang metadata. Một callback `post_tool_use` thay thế kết quả sẽ
-khiến event mang metadata của kết quả thay thế.
+khiến event mang metadata của kết quả thay thế; một callback
+trả lời `mutate` giữ nguyên metadata và mã lỗi của kết quả và chỉ đổi
+giá trị hoặc cờ lỗi của nó.
 
 ### Tool đang phục vụ lời gọi nào
 
@@ -809,6 +811,136 @@ Một HTTP server có dạng `{"type": "http", "url": "http://127.0.0.1:8000/mcp
 mở đi vào hợp đồng của run; tool mà nó thêm sau đó thì không. Mọi trường và giá
 trị mặc định nằm ở [Config của agent](./agent.md#mcp_servers); việc kết nối lại,
 hủy và các giới hạn nằm ở [trang MCP của kiến trúc](../architecture/mcp.md).
+
+## Retry và cache
+
+Hai trường của spec giúp công việc tool lặp lại rẻ hơn hoặc an toàn hơn. Cả hai đều tắt
+khi không được đặt, và một agent không đặt cái nào thì giữ nguyên hợp đồng của run.
+
+### `tool_retry`
+
+Một host tool thất bại với lỗi tạm thời có thể chạy lại, nhưng chỉ khi việc đó an toàn.
+Một lời gọi được retry khi tất cả các điều sau đều đúng:
+
+- `spec.tool_retry` được đặt;
+- tool tự khai báo là **idempotent** (`@tool(idempotent=True)`; các tool tích hợp sẵn
+  `Read`, `Grep` và `Glob` thì có): chạy hai lần không có tác dụng nào ngoài kết quả của
+  nó. Một tool không khai báo thì không bao giờ chạy hai lần, dù policy nói gì;
+- thất bại là một kết quả lỗi có `code` nằm trong `retry_on`. Một host tool
+  đặt nó bằng `raise ToolError("busy", code="transient")`; một mục `timeout`
+  cũng retry một lời gọi chạy quá `call_timeout_ms`. Một panic, một
+  output vi phạm schema của tool và một lỗi không có mã thì không được retry;
+- còn lần thử.
+
+```python
+config["spec"] = {
+    "model": "deepseek-flash",
+    "tool_retry": {"max_attempts": 3, "base_delay_ms": 200, "retry_on": ["transient"]},
+}
+```
+
+| Trường | Mặc định | Điều khiển gì |
+|---|---|---|
+| `max_attempts` | 3 | Số lần thử của một lời gọi, kể cả lần đầu; tối thiểu 2 |
+| `base_delay_ms` | 200 | Thời gian chờ trước lần thử thứ hai; mỗi lần retry chờ gấp đôi, đến `max_delay_ms` |
+| `max_delay_ms` | 5000 | Thời gian chờ dài nhất; tối thiểu `base_delay_ms` |
+| `retry_on` | `["transient"]` | Các lớp lỗi được retry: `code` của một lỗi tool, hoặc `timeout` |
+| `tools` | mọi tool idempotent | Thu hẹp các tool có thể được retry |
+
+Mỗi lần retry ghi một [event `tool_retry`](./events.md#toolretryevent-tool_retry)
+và flush nó trước khi chờ và trước lần thử kế tiếp. Một lần crash sau đó để lại
+lời gọi có một start và các lần thử nhưng không có end, và một run được resume báo nó là
+bị gián đoạn và không chạy lại, nên một lần retry không bao giờ nhân đôi một tác dụng
+qua một lần khởi động lại. Kiểm tra permission và các callback `pre_tool_use` chạy
+một lần cho mỗi lời gọi; một callback `tool_execute` chạy một lần cho mỗi lần thử.
+
+Có ba giới hạn. `error` của event là thông điệp của lần thử thất bại, đã qua
+`spec.redaction` (khi nó bao phủ kết quả tool) rồi cắt còn 512 byte, vì event được lưu và
+stream trước khi bất kỳ callback `post_tool_use` nào thấy lỗi. Các lần retry của một lời gọi
+dừng cùng nhau khi đã qua năm phút kể từ lúc lần thử đầu bắt đầu (mỗi lần thử vẫn có
+`call_timeout_ms` riêng), và một khoảng chờ bị cắt còn đúng phần thời gian còn lại. Cuối
+cùng, một host tool hết thời gian bị hủy bằng một notification mà client không bao giờ
+xác nhận, nên lần thử kế tiếp có thể bắt đầu khi handler cũ vẫn đang kết thúc: một host
+tool bạn khai báo `idempotent` phải chịu được hai lời gọi chồng lên nhau.
+
+### `tool_cache`
+
+`spec.tool_cache` dùng lại kết quả của một tool read cho một lời gọi giống hệt.
+Bắt buộc phải nêu tên các tool: Linch không thể phân biệt một tool tất định với một
+tool hay thay đổi, và việc nêu tên một tool là lời hứa của bạn rằng nó trả lời như nhau
+với cùng một input.
+
+```python
+config["spec"] = {
+    "model": "deepseek-flash",
+    "tool_cache": {"tools": ["lookup"], "ttl_ms": 60_000},
+}
+```
+
+| Trường | Mặc định | Điều khiển gì |
+|---|---|---|
+| `tools` | bắt buộc | Các tool có thể cache. Một tool không phải scope `read`, có polling hoặc hỏi người dùng thì không bao giờ được cache, kể cả khi được liệt kê |
+| `ttl_ms` | 300000 | Một mục sống bao lâu |
+| `max_entries` | 256 | Số mục giữ cho namespace; mục cũ nhất đi trước |
+| `max_value_bytes` | 100000 | Một kết quả có JSON lớn hơn thì không được lưu |
+| `invalidate_on_write` | `True` | Có hay không việc một lời gọi tool `write` hoặc `exec` xóa các mục của namespace, trước khi nó bắt đầu và sau khi nó kết thúc |
+| `scope` | `"session"` | `"session"`: một mục chỉ phục vụ session đã lưu nó. `"namespace"`: mọi session của namespace dùng chung các mục |
+
+**Khóa là gì.** `namespace` của agent, session (với `scope` mặc định), tên tool và input
+chuẩn hóa. Một tool read có thể trả lời theo từng session (file riêng của session, home của
+shell), nên mặc định một session không bao giờ nhận kết quả của session khác;
+`scope: "namespace"` chia sẻ các mục và là lời hứa của bạn rằng tool trả lời như nhau cho
+mọi người. Các mục không bao giờ lan sang namespace khác. Một lời gọi write hoặc exec xóa
+cả namespace, mục của mọi session, và `max_entries` đếm cả namespace. Registry tool không
+có phiên bản hay digest của tool, nên khóa cũng không có: khi hành vi của một tool thay
+đổi, các mục cũ sống đến hết `ttl_ms`. Với store Postgres, các mục nằm trong một bảng
+(dùng chung cho mọi server của namespace, sống qua các lần khởi động lại); với store
+memory chúng nằm trong agent.
+
+**Điều gì không bao giờ được cache.** Một tool không phải scope `read`, có polling hoặc hỏi
+người dùng, và một tool mà lần chạy giữ trạng thái cho session: `Read` có sẵn ghi lại điều
+session đã thấy để `Edit` và `Write` có thể theo sau, và một lần hit sẽ bỏ qua việc đó;
+`Skill` và `tool_search` thay đổi những gì session được cung cấp, nên một lần hit cũng bỏ qua điều đó.
+Nêu một tool như vậy trong `tools` bị từ chối khi agent mở. Hãy cache `Grep`, `Glob` và
+các host tool của bạn.
+
+**Một lần hit không bao giờ bỏ qua một kiểm tra, và chỉ bỏ qua lần chạy của tool.** Lời gọi
+đã qua xác thực, các callback `pre_tool_use` và permission, nên một lời gọi bị từ chối
+hoặc bị chặn không bao giờ chạm tới cache. Một lần hit sau đó chỉ thay thế lần chạy của
+chính tool: `post_tool_use`, redaction và output schema chạy trên nó như trên một kết quả
+mới. Các layer `tool_execute` bao quanh lần chạy của tool, nên chúng **không** chạy khi
+hit: một layer phải thấy mọi kết quả, như một bộ lọc nội dung fail-closed, thì thuộc về
+`post_tool_use`. `tool_call_end` của nó có `cache_hit: true`, và `tool_call_start` của nó
+được ghi cùng với end đó, không phải trước nó, vì không có gì chạy.
+
+**Thứ được lưu.** Kết quả thành công do chính tool trả về, sau khi kiểm tra output schema và
+`spec.redaction` trên kết quả tool, trước `post_tool_use`, không bao giờ là một lỗi. Nếu có
+layer `tool_execute`, một kết quả chỉ được lưu khi các layer trả nó về nguyên vẹn: một veto
+hay một thay thế không bao giờ được cache, nên một lần hit không bao giờ phục vụ đầu ra mà
+một layer đã che. **Không có `spec.redaction` bao phủ kết quả tool thì kết quả được lưu đúng
+như tool trả về**, kể cả bí mật, trong memory của agent hoặc bảng Postgres; hãy cấu hình
+redaction trước khi cache một tool có thể trả về bí mật.
+
+**Ghi, race và việc chạy nền.** Một lời gọi `write` hoặc `exec` xóa namespace trước khi nó
+bắt đầu và sau khi nó kết thúc. Mỗi namespace có một epoch mà mỗi lần xóa tăng lên, và một
+lần lookup nhớ nó: một lần đọc bắt đầu trước một lần ghi không thể lưu câu trả lời trước
+khi ghi của nó sau lần xóa của lần ghi. Lời gọi đầu tiên của một tool khởi động công việc
+sống lâu hơn lời gọi (`Bash` với `run_in_background`, một subagent chạy nền) chấm dứt việc
+cache cho agent cho đến khi nó đóng, vì không có gì cho biết khi nào công việc đó đổi câu
+trả lời của một tool read. Các server khác dùng chung bảng Postgres không thấy lần khởi
+động đó, nên hãy để `tool_cache` tắt trên agent chạy việc nền trong một workspace mà các
+server khác cache.
+
+**Lỗi store.** Mỗi lời gọi store bị cắt sau 2 giây, và một lỗi hay một lần hết thời gian là
+một miss: model không bao giờ thấy nó. Việc hủy run cũng cắt ngắn một lần lookup. Một lần
+xóa thất bại hoặc hết thời gian có thể để lại mục cũ, nên việc cache chấm dứt cho agent.
+Lần xóa sau một lần ghi không bị hủy cắt, vì lần ghi có thể đã đổi trạng thái; nó vẫn bị
+giới hạn bởi 2 giây.
+
+**Giới hạn.** Các mục bị giới hạn theo namespace (`max_entries`, `max_value_bytes`). Một
+lần put Postgres cũng xóa một lô có giới hạn các hàng hết hạn của bất kỳ namespace nào, nên
+một namespace không ai dùng lại không giữ hàng của nó mãi. Một tenant từ xa còn bị giới hạn
+thêm: xem [Server](./server.md#những-gì-admission-từ-chối-và-lý-do).
 
 ## Các trang liên quan
 

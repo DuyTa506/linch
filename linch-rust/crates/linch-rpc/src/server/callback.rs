@@ -5,6 +5,7 @@
 
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -12,18 +13,18 @@ use linch::hooks::{
     AfterProviderCall, AfterProviderCallRequest, AfterProviderCallResponse, AgentStart,
     AgentStartRequest, AgentStop, AgentStopRequest, ApprovalRequest, BeforeProviderCall,
     BeforeProviderCallRequest, BeforeProviderCallResponse, ContextBuild, ContextBuildRequest,
-    ContextBuildResponse, EventEmit, EventEmitRequest, PermissionRequest, PostCompact,
+    ContextBuildResponse, EventEmit, EventEmitRequest, Next, PermissionRequest, PostCompact,
     PostCompactRequest, PostToolUse, PostToolUseFailure, PostToolUseFailureRequest,
     PostToolUseRequest, PostToolUseResponse, PostTurn, PostTurnRequest, PreCompact,
     PreCompactRequest, PreToolUse, PreToolUseRequest, PreToolUseResponse, ProviderCallStart,
     ProviderCallStartRequest, ProviderCallStop, ProviderCallStopRequest, Stop, StopRequest,
-    StopResponse, SubagentStart, SubagentStartRequest, SubagentStop, SubagentStopRequest,
-    ToolUseStart, ToolUseStartRequest, ToolUseStop, ToolUseStopRequest, TurnStart,
+    StopResponse, SubagentStart, SubagentStartRequest, SubagentStop, SubagentStopRequest, ToolCall,
+    ToolMiddleware, ToolUseStart, ToolUseStartRequest, ToolUseStop, ToolUseStopRequest, TurnStart,
     TurnStartRequest, UserPromptRequest, UserPromptResponse, UserPromptSubmit,
 };
 use linch::{
     CallbackError, FailMode, Hook, HookChain, HookError, HookPoint, Hooks, JsonValue, Point,
-    ToolMatcher,
+    ToolMatcher, ToolOutputError, ToolResult,
 };
 use serde::de::DeserializeOwned;
 use serde_json::json;
@@ -33,7 +34,7 @@ use crate::error::{ErrorObject, invalid_params};
 use crate::protocol::{
     AfterProviderCallAnswer, BeforeProviderCallAnswer, CallbackSpec, ContextBuildAnswer,
     HookCallParams, ObserveAnswer, PostToolUseAnswer, PostTurnAnswer, PreToolUseAnswer, StopAnswer,
-    UserPromptAnswer, WireToolResult, method,
+    ToolExecuteAnswer, UserPromptAnswer, WireToolResult, method,
 };
 
 /// The hook chains holding one [`RpcHook`] per declaration, in order.
@@ -91,6 +92,15 @@ fn register(hooks: &Hooks, spec: CallbackSpec, agent: &str, peer: &Peer) -> Resu
         HookPoint::SubagentStart => add(&hooks.subagent_start, common),
         HookPoint::SubagentStop => add(&hooks.subagent_stop, common),
         HookPoint::EventEmit => add(&hooks.event_emit, common),
+        HookPoint::ToolExecute => {
+            let middleware = RpcMiddleware {
+                common,
+                tokens: AtomicU64::new(0),
+            };
+            // The pipeline lives as long as the agent; the handle is not needed.
+            let _ = hooks.tool_execute.register(Arc::new(middleware))?;
+            Ok(())
+        }
     }
 }
 
@@ -162,6 +172,110 @@ impl<P: Wire> Hook<P> for RpcHook<P> {
     }
 }
 
+/// A `tool_execute` callback: a layer of the tool waterfall whose
+/// `next` is the client's answer. `before` asks whether to run what is
+/// inside; with `after`, a second call hands over the result.
+struct RpcMiddleware {
+    common: Common,
+    /// Pairs a `before` call with its `after`: one token per attempt.
+    tokens: AtomicU64,
+}
+
+impl RpcMiddleware {
+    fn fail_mode(&self) -> FailMode {
+        (self.common.fail_mode).unwrap_or_else(|| HookPoint::ToolExecute.default_fail_mode())
+    }
+
+    /// One `hook.call` of the point, with its timeout, decoded.
+    async fn ask(
+        &self,
+        call: &ToolCall,
+        phase: &str,
+        token: u64,
+        result: Option<&ToolResult>,
+    ) -> Result<ToolExecuteAnswer, CallbackError> {
+        let mut request = json!({"session_id": call.session_id, "run_id": call.run_id,
+            "tool_use_id": call.tool_use_id, "tool_name": call.tool_name,
+            "input": call.input, "attempt": call.attempt, "phase": phase, "token": token});
+        if let Some(result) = result {
+            request["result"] = json!(WireToolResult::from(result));
+        }
+        let params = HookCallParams {
+            agent: self.common.agent.clone(),
+            point: HookPoint::ToolExecute,
+            policy_id: self.common.policy_id.clone(),
+            request,
+        };
+        let params = match serde_json::to_value(params) {
+            Ok(JsonValue::Object(params)) => params,
+            other => unreachable!("hook.call params encode as an object, got {other:?}"),
+        };
+        let asking = self.common.peer.call(method::HOOK_CALL, params, None, None);
+        let answer = match self.common.timeout {
+            Some(limit) => tokio::time::timeout(limit, asking)
+                .await
+                .map_err(|_| "timed out")??,
+            None => asking.await?,
+        };
+        serde_json::from_value(answer)
+            .map_err(|error| format!("malformed hook answer: {error}").into())
+    }
+
+    /// The result a failed callback leaves: `None` to go on (fail open).
+    fn failed(&self, what: &str) -> Option<ToolResult> {
+        match self.fail_mode() {
+            FailMode::Open => None,
+            FailMode::Closed => Some(Err(ToolOutputError::new(format!(
+                "hook `{}` {what}",
+                self.common.policy_id
+            )))),
+        }
+    }
+}
+
+#[async_trait]
+impl ToolMiddleware for RpcMiddleware {
+    fn policy_id(&self) -> &str {
+        &self.common.policy_id
+    }
+
+    fn policy_version(&self) -> u32 {
+        self.common.policy_version
+    }
+
+    fn matcher(&self) -> Option<ToolMatcher> {
+        self.common.matcher.clone()
+    }
+
+    async fn call(&self, call: &ToolCall, next: Next<'_>) -> ToolResult {
+        let token = self.tokens.fetch_add(1, Ordering::Relaxed);
+        let after = match self.ask(call, "before", token, None).await {
+            Ok(ToolExecuteAnswer::Next { after }) => after,
+            Ok(ToolExecuteAnswer::Veto { result }) => return result.into(),
+            Ok(_) | Err(_) => match self.failed("failed") {
+                Some(refused) => return refused,
+                None => false,
+            },
+        };
+        let result = next.run().await;
+        if !after {
+            return result;
+        }
+        match self.ask(call, "after", token, Some(&result)).await {
+            Ok(ToolExecuteAnswer::Continue {}) => result,
+            Ok(ToolExecuteAnswer::Replace { result }) => result.into(),
+            // A closed failure withholds the result, as at `post_tool_use`.
+            Ok(_) | Err(_) => match self.failed("failed") {
+                Some(_) => Err(ToolOutputError::new(format!(
+                    "hook `{}` failed; the tool result was withheld",
+                    self.common.policy_id
+                ))),
+                None => result,
+            },
+        }
+    }
+}
+
 /// A point's request and answer on the wire.
 trait Wire: Point {
     /// The occurrence, as `hook.call`'s `request` member.
@@ -225,6 +339,9 @@ impl Wire for PostToolUse {
             PostToolUseAnswer::Replace { result } => PostToolUseResponse::Replace {
                 result: result.into(),
             },
+            PostToolUseAnswer::Mutate { content, is_error } => {
+                PostToolUseResponse::Mutate { content, is_error }
+            }
         })
     }
 }

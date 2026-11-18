@@ -141,6 +141,62 @@ chúng:
    theo `output_schema` của tool, rồi chuỗi `post_tool_use` chạy trên kết quả.
    Một tool bị panic nhận một kết quả lỗi nêu tên panic đó.
 
+### Một lời gọi, theo thứ tự
+
+`Runner::call` (`scheduler/execute.rs`) đưa một lời gọi `Run` đã được lên kế hoạch
+qua các bước này. Mỗi bước vắng mặt, và không tốn gì, khi trường của nó không được đặt:
+
+1. **Tra cache** (`spec.tool_cache`). Một tool phạm vi read, không `polls`,
+   không `asks_user`, có `Tool::cache_safe` mà policy nêu tên sẽ tra khóa
+   `[session?, tool_name, input]` trong namespace của agent (`tool_cache.rs`,
+   `cache_key`; session nằm trong khóa trừ khi `scope` là `namespace`). Lần tra trả về
+   mục và epoch của namespace. Một mục còn sống trở thành kết quả: không có durable
+   start trước nó, không chạy tool, `cache_hit` nằm trên `tool_call_end`; start và end
+   được ghi cùng nhau, như với mọi lời gọi không chạy gì. Mỗi lời gọi store bị giới hạn
+   bởi `STORE_TIMEOUT` (2 s) và việc hủy run; một lỗi hay một lần hết thời gian là miss.
+   Sau lời gọi `Tool::launches_background` đầu tiên của agent, hoặc một lần xóa thất bại,
+   `slot_of` không trả về gì và cache tắt cho agent.
+2. **Invalidate.** Một tool write hoặc exec xóa namespace trước, khi
+   `invalidate_on_write` được đặt, trước `tool_starting`, để một lần crash trong lúc
+   tác dụng diễn ra không thể để lại một mục từ trước nó. Một lần xóa tăng epoch của
+   namespace. Việc hủy trong lúc xóa này dừng lời gọi trước khi nó bắt đầu.
+3. **`tool_starting`**, rào chắn bền vững. Từ đây một lần crash để lại một lời
+   gọi bị gián đoạn mà một lần resume không bao giờ chạy lại.
+4. **Các lần thử** (`invoke`). Mỗi lần thử là phần thân tool được bọc bởi waterfall
+   `tool_execute` (`hooks/execute.rs`, `ToolPipeline`) khi có một
+   layer được đăng ký, và bởi timeout của lời gọi. Một lỗi mà
+   `spec.tool_retry` bao phủ (`tool_retry.rs`: tool là `Tool::idempotent`,
+   `code` của lỗi hoặc `timeout` có trong danh sách, còn lần thử) đi tới
+   `ToolSink::tool_retrying`, nơi ghi và flush một event `tool_retry`,
+   rồi chờ (`base_delay_ms` nhân đôi đến `max_delay_ms`, cắt còn phần còn lại của
+   `RETRY_BUDGET`, 5 phút retry cho cả run, mọi lời gọi cộng lại, và về 0 khi resume; hết thì không retry) và chạy lại.
+   `error` của event đi qua redactor, rồi bị cắt còn `ERROR_BYTES`. Một host tool hết
+   thời gian bị bỏ bằng `$/cancelRequest`, vốn không có xác nhận trong giao thức, nên
+   một lần retry có thể chồng lên handler cũ.
+5. **`finish`.** Output schema, redaction, rồi, khi tool vừa chạy, kết quả của nó được
+   lưu vào cache (`put` có điều kiện theo epoch mà lần tra trả về, nên một lần xóa kể từ
+   lần tra sẽ từ chối nó) sau kiểm tra schema và redaction, trước `post_tool_use`; các
+   hook chạy lại ở mỗi lần hit. Khi có layer `tool_execute`, `body` ghi lại kết quả của
+   chính tool cho mỗi lần thử (`Raw`) và kết quả chỉ được lưu nếu các layer trả nó
+   nguyên vẹn (`untouched`): một veto hay `Replace` không bao giờ được cache, và một
+   lần hit không chạy các layer. Không có `spec.redaction` bao phủ kết quả tool thì
+   thứ được lưu là chưa che; tenant bị từ chối nếu thiếu nó. Rồi đến
+   `post_tool_use`. Một câu trả lời `Mutate` đổi giá trị hoặc cờ lỗi và giữ nguyên
+   metadata và mã lỗi; `content` của nó không được là `null` (một câu trả lời xấu, vì
+   nó sẽ đọc như vắng mặt).
+6. **Invalidate lần nữa** sau một lời gọi write hoặc exec (không bị việc hủy cắt ngắn:
+   lần ghi có thể đã đổi trạng thái, và lời gọi bị giới hạn bởi `STORE_TIMEOUT`), rồi
+   `tool_finished`.
+
+Waterfall `tool_execute` là bản đối ứng bằng Rust của `tools/execute` trong Python:
+một `ToolMiddleware` nhận lời gọi và một `Next`, await
+`next.run()` để chạy phần bên trong, và trả về kết quả. Không await nó thì
+phủ quyết lời gọi. Layer được đăng ký đầu tiên là ngoài cùng; một layer không thể
+đổi input, thứ mà permission đã kiểm tra (hãy viết lại nó trong
+`pre_tool_use`). Việc đăng ký trả về một `Registration`, và khi không có layer nào
+thì scheduler gọi tool trực tiếp, nên đường đi chính là đường mà một run không có nó
+vẫn luôn có.
+
 ### Chỉ công việc đọc mới chạy song song
 
 `execute` duyệt các lời gọi theo thứ tự và gom chúng thành nhóm

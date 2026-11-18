@@ -36,6 +36,7 @@ use crate::scheduler::{RecordedApproval, RunIdentity};
 use crate::session_log::{LogEntry, SessionLog};
 use crate::skills;
 use crate::structured::{FinalTool, OutputContract};
+use crate::tool_retry::RetryClock;
 use crate::usage::Usage;
 
 /// What the run does next.
@@ -189,6 +190,9 @@ pub(super) struct Runner {
     /// none of its calls answered yet: feedback for the model and every
     /// terminal pair them first.
     pub(super) unpaired: Option<Unanswered>,
+    /// What the run spent retrying tool calls (see
+    /// [`crate::tool_retry::RETRY_BUDGET`]); a resumed run starts at zero.
+    pub(super) retry_clock: Arc<RetryClock>,
 }
 
 impl Runner {
@@ -241,6 +245,7 @@ impl Runner {
             tool_choice,
             final_tool,
             unpaired: None,
+            retry_clock: Arc::default(),
         };
         runner.narrow();
         runner

@@ -54,6 +54,11 @@ pub struct HostToolSpec {
     /// Default false, and then not sent.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub polls: bool,
+    /// Whether running a call again after it failed is safe: it has no
+    /// effect beyond its result, or the same effect twice is the same.
+    /// `spec.tool_retry` retries only a tool that says so. Off when absent.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub idempotent: bool,
 }
 
 impl Serialize for OpenParams {

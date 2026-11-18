@@ -32,6 +32,7 @@ fn end(id: &str, tool: &str, text: &str, is_error: bool, duration_ms: u64) -> Ev
         canonical_output: None,
         metadata: None,
         error_code: None,
+        cache_hit: false,
     })
 }
 

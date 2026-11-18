@@ -164,19 +164,21 @@
 //! handle lives until `agent.close` or the end of its connection.
 //!
 //! Each of `tools` ([`HostToolSpec`](protocol::HostToolSpec)) is
-//! `{name, description, input_schema, scope, timeout_ms?}`. `scope` is
+//! `{name, description, input_schema, scope, timeout_ms?, idempotent?}`. `scope` is
 //! required: `read`, `write` or `exec`. It decides approval like any tool's
 //! (in mode `default`, `write` and `exec` calls ask), and only `read` calls
-//! run in parallel. `timeout_ms` defaults to 300 000. A host tool is run
-//! with `tool.call` on the connection that opened the agent.
+//! run in parallel. `timeout_ms` defaults to 300 000. `idempotent` (default
+//! false) says a repeat has no effect beyond its result: only such a tool is
+//! retried by `spec.tool_retry`. A host tool is run with `tool.call` on the
+//! connection that opened the agent.
 //!
 //! Each of `callbacks` ([`CallbackSpec`](protocol::CallbackSpec)) is
 //! `{point, policy_id, policy_version, matcher?, timeout_ms?, fail_mode?}`
 //! and is answered with `hook.call`. `point` is one of `user_prompt_submit`,
 //! `context_build`, `pre_tool_use`, `permission_request`, `post_tool_use`,
-//! `stop`, `post_turn`; callbacks at one point run in declaration order.
-//! `matcher` is a list of tool-name globs (`*`, `?`), allowed only at the
-//! three tool points; it is evaluated in the server, so an occurrence it
+//! `stop`, `post_turn`, `tool_execute`; callbacks at one point run in declaration
+//! order. `matcher` is a list of tool-name globs (`*`, `?`), allowed only at
+//! the four tool points; it is evaluated in the server, so an occurrence it
 //! rejects never crosses the connection. `timeout_ms` defaults to 30 000. A
 //! callback that errors, answers badly or times out is handled by its
 //! `fail_mode`: `closed` turns it into the point's blocking answer (the
@@ -355,7 +357,8 @@
 //! model sees and `metadata` is for the host only (the call's
 //! `tool_call_end` event carries it). An error object is a
 //! tool error the model reads: its `message` is shown and its `data` kept
-//! as details. Every way a call can fail without a result has a code in
+//! as details; when `data.code` is a string it is the error's `code`, the
+//! class `spec.tool_retry` matches. Every way a call can fail without a result has a code in
 //! [`tool_code`](protocol::tool_code).
 //!
 //! **`hook.call`** `{agent, point, policy_id, request}`
@@ -370,13 +373,28 @@
 //! |---|---|---|
 //! | `pre_tool_use` | `tool_use_id, tool_name, input` | `{"action": "continue"}`, `{"action": "rewrite", "input"}`, `{"action": "block", "reason"}`, `{"action": "resolve", "result"}` |
 //! | `permission_request` | `tool_use_id, tool_name, input, reason?, principal?` | `{"decision": "allow"}`, `{"decision": "deny", "reason"}` |
-//! | `post_tool_use` | `tool_use_id, tool_name, input, result` | `{"action": "continue"}`, `{"action": "replace", "result"}` |
+//! | `post_tool_use` | `tool_use_id, tool_name, input, result` | `{"action": "continue"}`, `{"action": "replace", "result"}`, `{"action": "mutate", "content"?, "is_error"?}` |
+//! | `tool_execute` | `tool_use_id, tool_name, input, attempt, phase, token, result?` | `phase` `before`: `{"action": "next", "after"?}` or `{"action": "veto", "result"}`; `phase` `after`: `{"action": "continue"}` or `{"action": "replace", "result"}` |
 //! | `user_prompt_submit` | `content` (content blocks) | `{"action": "continue"}`, `{"action": "rewrite", "content"}`, `{"action": "block", "reason"}` |
 //! | `context_build` | `messages` (the provider view) | `{"blocks"?: [{"text"}], "metadata"?: {..}}`; `metadata` lands on the call's `context_build` event, a later callback's key winning; the blocks count against `spec.context_budget` when set, by the callback's `policy_id`, and the event's `budget` reports what was dropped |
 //! | `before_provider_call` | `turn, request` (the provider request about to be sent) | `{"action": "continue"}`, `{"action": "rewrite", "request"}`, `{"action": "force_continue", "feedback"}`, `{"action": "block", "reason"}` |
 //! | `after_provider_call` | `turn, assembly` (the response just assembled) | `{"action": "continue"}`, `{"action": "rewrite", "assembly"}`, `{"action": "retry", "feedback"}` (or `"force_continue"`), `{"action": "block", "reason"}` |
 //! | `stop` | `text`, `structured_output` (only with an output schema: `text` parsed and checked) | `{"action": "allow"}`, `{"action": "continue", "feedback"}` (or `"force_continue"`), `{"action": "retry", "feedback"}`, `{"action": "rewrite", "text"}`, `{"action": "block", "reason"}` |
 //! | `post_turn` | `turn, stop_reason` | `{}` |
+//!
+//! `post_tool_use` `mutate` changes the result's `content` (the output's
+//! value, or the error's message), its `is_error` flag, or both, and keeps
+//! the rest (metadata, error code). `tool_execute` is Python's
+//! `tools/execute` waterfall: a layer wraps one attempt of one call, the
+//! first declared outermost. The `before` call asks whether to run what is
+//! inside (`next`) or to veto with a result (`veto`, Python's listener that
+//! does not call `next()`); `next` with `after: true` makes the server call
+//! again with `phase: "after"`, the same `token` and the `result`, so the
+//! layer can keep or replace it. A callback that answers `next` without
+//! `after` costs one call. It runs after permission and the tool's durable
+//! start, never for a call that was refused, blocked or is waiting for
+//! approval. It fails closed by default: the call gets an error and the
+//! tool does not run (or its result is withheld).
 //!
 //! A `before_provider_call` `force_continue` skips the call and sends
 //! `feedback` to the model before another turn, bounded by `max_turns`
@@ -501,8 +519,8 @@ mod server;
 
 pub use access::{
     Access, AccessError, Allowlists, ConnectionPlace, DEFAULT_MAX_AGENTS, DEFAULT_MAX_CONNECTIONS,
-    DEFAULT_MAX_RUNS, DEFAULT_MIN_SCHEDULE_INTERVAL, MAX_PENDING_LOGINS, McpCommand, Tenant,
-    Tokens,
+    DEFAULT_MAX_RUNS, DEFAULT_MIN_SCHEDULE_INTERVAL, DEFAULT_TOOL_CACHE_BYTES, MAX_PENDING_LOGINS,
+    McpCommand, Tenant, Tokens,
 };
 pub use background::BackgroundAgents;
 pub use client::{Client, ClientError, NOTIFICATION_CAPACITY, Notifications, RequestHandler};

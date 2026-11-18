@@ -280,6 +280,33 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Whether running a call again after it failed is safe: it has no
+    /// effect beyond its result, or the same effect twice is the same.
+    /// `spec.tool_retry` retries only a tool that says yes, whatever the
+    /// policy lists (see [`crate::tool_retry`]). The default is no.
+    fn idempotent(&self) -> bool {
+        false
+    }
+
+    /// Whether `spec.tool_cache` may serve this tool's results instead of
+    /// running it: false for a tool whose run changes state the session
+    /// keeps (as `Read` records what the session saw, so `Edit` may
+    /// follow), since a hit would skip that effect. Naming such a tool in
+    /// `spec.tool_cache.tools` is refused at build. The default is yes.
+    fn cache_safe(&self) -> bool {
+        true
+    }
+
+    /// Whether this call starts work that outlives it (`Bash` with
+    /// `run_in_background`, a background subagent), which may change what
+    /// a read tool answers at any later time. `spec.tool_cache` stops
+    /// caching for the agent at the first such call (see
+    /// [`crate::tool_cache`]). The default is no.
+    fn launches_background(&self, input: &JsonObject) -> bool {
+        let _ = input;
+        false
+    }
+
     /// One-line summary of a call for events and approval prompts.
     fn summarize(&self, input: &JsonObject) -> String {
         let _ = input;

@@ -387,6 +387,7 @@ pub(super) async fn continue_run(
                     canonical_output: None,
                     metadata: None,
                     error_code: None,
+                    cache_hit: false,
                 }));
                 *call = ToolRecovery::Done(result);
             }

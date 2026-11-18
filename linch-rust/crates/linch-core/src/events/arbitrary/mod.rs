@@ -211,6 +211,9 @@ pub(super) fn event(depth_budget: u32) -> BoxedStrategy<Event> {
         accounting::tool_call_end_event()
             .prop_map(Event::ToolCallEnd)
             .boxed(),
+        builders::tool_retry_event()
+            .prop_map(Event::ToolRetry)
+            .boxed(),
         builders::tool_progress_event()
             .prop_map(Event::ToolProgress)
             .boxed(),

@@ -71,6 +71,10 @@ impl Tool for HostTool {
         self.spec.polls
     }
 
+    fn idempotent(&self) -> bool {
+        self.spec.idempotent
+    }
+
     async fn execute(&self, input: JsonObject, ctx: ToolContext) -> ToolResult {
         let params = ToolCallParams {
             agent: self.agent.clone(),
@@ -102,7 +106,10 @@ impl Tool for HostTool {
             }),
             Err(CallError::Rpc(error)) => Err(ToolOutputError {
                 message: error.message,
-                code: Some(tool_code::TOOL_ERROR.into()),
+                // The client names the error's class in `data.code`, which
+                // `spec.tool_retry` matches; any other error is a plain
+                // host tool error.
+                code: Some(client_code(error.data.as_ref())),
                 details: error.data,
             }),
             Err(CallError::Protocol(reason)) => {
@@ -124,6 +131,16 @@ impl Tool for HostTool {
             )),
         }
     }
+}
+
+/// The class a client gave its error in `data.code`: a non-blank string of
+/// at most 64 bytes. Any other error is [`tool_code::TOOL_ERROR`].
+fn client_code(data: Option<&JsonValue>) -> String {
+    (data.and_then(|data| data.get("code")))
+        .and_then(JsonValue::as_str)
+        .filter(|code| !code.trim().is_empty() && code.len() <= 64)
+        .unwrap_or(tool_code::TOOL_ERROR)
+        .to_owned()
 }
 
 fn failure(code: &str, message: impl Into<String>) -> ToolOutputError {
@@ -179,5 +196,12 @@ mod tests {
         .await;
         assert_eq!(refused.code.as_deref(), Some(tool_code::TOOL_ERROR));
         assert_eq!(refused.message, "no cats here");
+        let classed = settled(|peer, id| {
+            let error = ErrorObject::new(7, "busy").with_data(json!({"code": "transient"}));
+            peer.answer(Response::err(Id::String(id.into()), error));
+        })
+        .await;
+        assert_eq!(classed.code.as_deref(), Some("transient"));
+        assert_eq!(classed.details, Some(json!({"code": "transient"})));
     }
 }

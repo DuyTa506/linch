@@ -20,7 +20,7 @@ mod allowlists;
 
 pub use allowlists::{
     Allowlists, DEFAULT_MAX_AGENTS, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_RUNS,
-    DEFAULT_MIN_SCHEDULE_INTERVAL, McpCommand,
+    DEFAULT_MIN_SCHEDULE_INTERVAL, DEFAULT_TOOL_CACHE_BYTES, McpCommand,
 };
 
 /// How a connection's client is trusted.

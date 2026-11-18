@@ -37,9 +37,18 @@ pub(super) fn tool_call_end_event() -> impl Strategy<Value = ToolCallEndEvent> {
         option::of(json_value(1)),
         option::of(json_object(1).prop_map(Box::new)),
         option::of(short_string()),
+        any::<bool>(),
     )
         .prop_map(
-            |(tool_name, result, duration_ms, canonical_output, metadata, error_code)| {
+            |(
+                tool_name,
+                result,
+                duration_ms,
+                canonical_output,
+                metadata,
+                error_code,
+                cache_hit,
+            )| {
                 ToolCallEndEvent {
                     tool_name,
                     result,
@@ -47,6 +56,7 @@ pub(super) fn tool_call_end_event() -> impl Strategy<Value = ToolCallEndEvent> {
                     canonical_output,
                     metadata,
                     error_code,
+                    cache_hit,
                 }
             },
         )

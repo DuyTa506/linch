@@ -26,11 +26,13 @@ Linch bản Python dựng cùng các bảo đảm này trên một IoC container
   ([chuỗi hook](#chuỗi-hook)). Mười hai trong số đó chỉ quan sát: được thêm
   để tương đương với các lifecycle hook của Python, chúng trả lời `()`/`{}`
   và không thể fail closed (`hooks/observe.rs`).
-- Không có `ToolPipeline` với các seam `tools/pre-execute`, `tools/execute` và
-  `tools/post-execute`. Một batch chạy qua `plan` và `execute`
-  (`crates/linch-core/src/scheduler.rs:1-22`); các chuỗi `pre_tool_use` và
-  `post_tool_use` là nơi để thêm hành vi, và `execute` không có waterfall nào để bọc
-  ([các seam của lời gọi tool](#các-seam-của-lời-gọi-tool)).
+- Các seam của `ToolPipeline` trong Python ánh xạ vào các điểm hook.
+  `tools/pre-execute` là `pre_tool_use`, `tools/post-execute` là `post_tool_use`
+  (cũng có thể `Mutate` một kết quả), và `tools/execute` là waterfall `tool_execute`
+  (`hooks/execute.rs`): một `ToolMiddleware` bọc một lần thử của một lời gọi và
+  phải await `Next::run` để chuyển vào bên trong, hoặc phủ quyết lời gọi bằng cách
+  không làm vậy ([các seam của lời gọi tool](#các-seam-của-lời-gọi-tool)). Một batch
+  vẫn chạy qua `plan` và `execute` (`crates/linch-core/src/scheduler.rs:1-22`).
 - Trong `linch-core` không có plugin và không có profile theo miền. Các điểm mở rộng
   là trait (`Provider`, `Tool`, `RunStore`, `SessionStore`,
   `TaskStore`, `FileBackend`, `Hook`) được đưa vào `AgentBuilder`.
@@ -151,7 +153,8 @@ Mỗi chuỗi tự quyết định cách kết hợp các câu trả lời. Mộ
 | `context_build` | Mọi hook đều chạy. Các block được nối theo thứ tự; metadata được gộp, khóa đến sau thắng. Không thể fail closed (`hooks/turn.rs:150-154`) | open |
 | `pre_tool_use` | Một lần viết lại được chuyển cho hook kế tiếp. Một block, một resolve hoặc một lỗi closed dừng chuỗi. Chỉ khi chuỗi đã chạy mọi hook khớp thì tool mới được chạy (`hooks/tool.rs:101-136`) | closed |
 | `permission_request` | Câu trả lời nghiêm ngặt nhất thắng. Một deny hoặc lỗi closed dừng chuỗi; một allow thì không (`hooks/tool.rs:226-258`) | closed |
-| `post_tool_use` | Một bản thay thế được chuyển cho hook kế tiếp. Một lỗi closed giữ lại kết quả và dừng chuỗi (`hooks/tool.rs:312-336`) | open |
+| `post_tool_use` | Một bản thay thế hoặc một `Mutate` (một giá trị mới, hoặc cờ lỗi, giữ nguyên metadata và mã lỗi) được chuyển cho hook kế tiếp. Một lỗi closed giữ lại kết quả và dừng chuỗi (`hooks/tool.rs`) | open |
+| `tool_execute` | Một waterfall, không phải chuỗi các câu trả lời: layer được đăng ký đầu tiên là ngoài cùng, và mỗi layer await `Next::run` để chạy các layer bên trong rồi đến tool, hoặc trả về một kết quả mà không gọi nó để phủ quyết lời gọi. Chạy một lần cho mỗi lần thử, nên một lời gọi được retry sẽ đi qua nó lần nữa. Một lỗi closed làm lời gọi thất bại (hoặc giữ lại kết quả khi nó xảy ra sau khi tool đã chạy) (`hooks/execute.rs`) | closed |
 | `before_provider_call` | Một lần viết lại được chuyển cho hook kế tiếp; bản viết lại cuối cùng là bản được gửi đi và được `context_build` ghi lại. Một `force_continue` dừng chuỗi và bỏ qua lời gọi: không có `context_build` hay delivery nào được ghi, feedback của hook đi tới model trong một `<system-reminder>`, được ghi bền trước lượt kế tiếp như một stop feedback, và run chạy thêm một lượt, bị giới hạn bởi `max_turns` và bởi `max_idle_turns` của loop guard ([vòng đời của lượt](./turn-lifecycle.md#loop-guard); `force_continue` của Python tại đó). Một block hoặc một lỗi closed dừng chuỗi và làm run thất bại, trước khi provider được gọi (`hooks/call.rs`) | open, nhưng block của nó có thể fail closed |
 | `after_provider_call` | Một lần viết lại được chuyển cho hook kế tiếp; bản viết lại cuối cùng là bản được stage và nối vào session. Một retry dừng chuỗi: response (cùng mọi lần viết lại trước đó) được chấp nhận, các lời gọi tool của nó không chạy, và phản hồi của hook đến model trước một lượt khác. Một block hoặc một lỗi closed dừng chuỗi và làm run thất bại, trước khi response được stage (`hooks/assembly.rs`). Receipt và usage của lời gọi đã bền vững khi chuỗi chạy ([vòng đời của lượt](./turn-lifecycle.md#một-lần-crash-giữa-receipt-và-response-của-nó)) | open, nhưng block của nó có thể fail closed |
 | `stop` | Một lần viết lại được chuyển cho hook kế tiếp; bản viết lại cuối cùng là văn bản trả lời cuối cùng của run, không phải tin nhắn assistant đã được nối vào session từ trước. Hook đầu tiên giữ run tiếp tục (`Continue`, chỉ bị giới hạn bởi `max_turns`) sẽ dừng chuỗi; một `Retry` cũng vậy khi lần gọi run còn lượt retry duy nhất của nó, sau đó một retry được tính như allow. Một block hoặc một lỗi closed làm run thất bại (`hooks/turn.rs`). Với một output schema, nó chỉ chạy trên một câu trả lời thỏa schema, request của nó mang `structured_output` đã parse, và một bản viết lại được kiểm tra lại: bản không thỏa schema làm run thất bại | open |
@@ -200,7 +203,10 @@ panic cho ra một kết quả lỗi
 Để thêm hành vi vào việc thực thi tool, dùng một trong các cách sau:
 
 - Một hook `pre_tool_use` để viết lại, chặn hoặc phục vụ một lời gọi.
-- Một hook `post_tool_use` để thay thế hoặc che một kết quả.
+- Một hook `post_tool_use` để thay thế, mutate hoặc che một kết quả.
+- Một layer `tool_execute` để bọc chính phần thân của tool: đo thời gian, tracing, một
+  guard phủ quyết lời gọi, một lần viết lại kết quả trên đường đi ra. Khi không có layer
+  nào được đăng ký thì phần thân được gọi trực tiếp.
 - Một wrapper `Tool` được đăng ký bằng `ToolRegistry::replace`, thứ ẩn tool được bọc
   và được hoàn tác bằng `Registration` của nó.
 - `call_timeout_ms` và `max_tool_concurrency` trong spec cho timeout và
