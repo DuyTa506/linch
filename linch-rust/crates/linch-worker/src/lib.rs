@@ -79,8 +79,9 @@ pub use factory::{AgentFactory, FactoryError, JobAgent};
 pub use job::{JobId, RunRequest, enqueue, enqueue_approve, enqueue_resume, enqueue_run};
 pub use lease::set_queue_limit;
 pub use schedule::{
-    Schedule, ScheduleInfo, create_schedule, delete_schedule, fire_due_schedules, get_schedule,
-    list_schedules, pause_schedule, resume_schedule,
+    Schedule, ScheduleInfo, create_schedule, delete_agent_schedule, delete_schedule,
+    fire_due_schedules, get_schedule, list_agent_schedules, list_schedules, pause_schedule,
+    resume_schedule,
 };
 pub use status::{JobInfo, JobState, MAX_JOBS_LISTED, job, jobs, prune_history};
 pub use timing::Timing;

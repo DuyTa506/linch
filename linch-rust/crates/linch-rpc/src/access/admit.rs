@@ -23,7 +23,9 @@ impl Tenant {
     /// are all allowed. The workspace, the project root and the config
     /// directory are replaced by the paths that were checked, `bash` is
     /// turned off unless the tenant may run exec tools, the execution
-    /// backend must be one of the tenant's (absent: its first), and a Postgres
+    /// backend must be one of the tenant's (absent: its first),
+    /// `schedule_tools` is refused unless the tenant may hold schedules, and
+    /// a Postgres
     /// store that names no pool size gets the default size or the tenant's
     /// `max_pool_connections`, whichever is smaller.
     pub(crate) async fn admit(&self, config: &mut AgentConfig) -> Result<(), ErrorObject> {
@@ -80,6 +82,11 @@ impl Tenant {
         }
         config.bash &= allow.exec_tools;
         allow.admit_execution(&mut config.execution)?;
+        if config.schedule_tools && allow.max_schedules.is_none() {
+            let message = "schedule_tools needs schedules in the tenant's allowlists \
+                           (max_schedules)";
+            return Err(refused("schedule_tools", message.into()));
+        }
         if let StoreConfig::Postgres {
             dsn,
             max_connections,

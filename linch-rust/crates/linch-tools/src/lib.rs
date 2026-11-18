@@ -18,6 +18,10 @@
 //! [`task_tools`] are the session task tools ([`TaskCreate`], [`TaskList`],
 //! [`TaskGet`], [`TaskUpdate`]) over a [`TaskStore`](linch_core::TaskStore).
 //!
+//! [`schedule_tools`] are the schedule tools ([`CreateSchedule`],
+//! [`ListSchedules`], [`CancelSchedule`]) over a [`ScheduleBackend`] the
+//! host binds to one agent.
+//!
 //! The crate is Unix-only: Bash relies on process groups.
 
 #![forbid(unsafe_code)]
@@ -30,6 +34,7 @@ mod glob;
 mod grep;
 mod input;
 mod read;
+mod schedules;
 mod tasks;
 mod tracker;
 pub mod vfs;
@@ -47,6 +52,10 @@ pub use glob::Glob;
 pub use grep::Grep;
 pub use input::READ_FIRST_CODE;
 pub use read::Read;
+pub use schedules::{
+    CancelSchedule, CreateSchedule, ListSchedules, NewSchedule, SCHEDULE_TOOL_NAMES,
+    ScheduleBackend, ScheduleEntry, ScheduleTiming, schedule_tools,
+};
 pub use tasks::{TASK_TOOL_NAMES, TaskCreate, TaskGet, TaskList, TaskUpdate, task_tools};
 pub use tracker::ReadTracker;
 pub use write::Write;

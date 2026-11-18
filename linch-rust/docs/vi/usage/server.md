@@ -121,7 +121,7 @@ sẽ bị từ chối. Một tenant chỉ do worker phục vụ thì không cầ
 | `postgres_dsns` | không có | Các đích Postgres mà DSN của kho lưu trữ có thể dùng: host, cổng hoặc socket, cơ sở dữ liệu, người dùng, tùy chọn khởi động và tệp TLS đều phải khớp một mục, và `sslmode` của nó phải bằng hoặc chặt hơn `sslmode` của mục đó |
 | `mcp_commands` | không có | Các MCP stdio server, `{"command", "args", "env"}`: lệnh và danh sách đối số phải khớp chính xác, và transport chỉ được đặt các tên `env` được liệt kê |
 | `mcp_urls` | không có | Các endpoint mà một MCP HTTP transport có thể nêu, khớp như `provider_base_urls` |
-| `max_schedules` | không có: không có lịch | Số lịch mà tenant được giữ trong mỗi cơ sở dữ liệu ([Scheduler](./scheduler.md#tenant-được-lập-lịch-gì)) |
+| `max_schedules` | không có: không có lịch | Số lịch mà tenant được giữ trong mỗi cơ sở dữ liệu ([Scheduler](./scheduler.md#tenant-được-lập-lịch-gì)); không có nó thì một agent có `schedule_tools` bị từ chối |
 | `min_schedule_interval_ms` | 60000 | Khoảng thời gian ngắn nhất giữa hai lần kích hoạt của các lịch của nó |
 | `max_queued_jobs` | không có: không có run nền | Số job nền chưa xong mà nó được có khi đưa thêm một job vào hàng đợi |
 | `execution` | `[{"backend": "local"}]` | Các execution backend mà một cấu hình có thể chọn, mỗi cái kèm toàn bộ policy của nó; `execution` của cấu hình phải bằng một mục, và cấu hình không nêu gì nhận mục đầu tiên, nên `[{"backend": "sandbox"}]` giữ tenant trong sandbox ([Sandbox](./sandbox.md)) |

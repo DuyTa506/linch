@@ -174,6 +174,7 @@ có, trừ `bash`.
 | `bash` | `True` | Workspace tool có gồm `Bash`, `BashOutput` và `BashKill` hay không. Không dùng tới nếu không có workspace |
 | `execution` | `local`: `Bash` chạy với tư cách người dùng của server | Nơi `Bash` chạy: một `SandboxExecution` (Landlock, seccomp, rlimit) hoặc một `DockerExecution` ([Sandbox](./sandbox.md)). Là một phần của hợp đồng run trừ khi là `local` |
 | `ask_user` | `False` | Model có `AskUser` hay không; tool này tạm dừng run cho đến khi bạn trả lời ([Tool](./tools.md#hỏi-người-dùng)) |
+| `schedule_tools` | `False` | Model có `CreateSchedule`, `ListSchedules` và `CancelSchedule` hay không; các tool này lập lịch các run của agent này; cần một tenant có `max_schedules` ([Scheduler](./scheduler.md#để-model-lập-lịch)) |
 | `permissions` | mode `default`, project root là workspace (hoặc `/`) | Lời gọi nào chạy, hỏi hay bị từ chối ([bên dưới](#permissions), [Bảo mật](./security.md#permission-modes)) |
 | `mcp_servers` | `[]` | Các MCP server được kết nối lần lượt khi agent được mở ([bên dưới](#mcp_servers)) |
 | `skills` | `False` | Tool `Skill`, với skill `verify` tích hợp sẵn và các skill trong `config_dir/skills` ([Skill](./skills.md)) |

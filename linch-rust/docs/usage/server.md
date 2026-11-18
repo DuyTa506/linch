@@ -120,7 +120,7 @@ token twice is refused. A tenant only a worker serves needs no token.
 | `postgres_dsns` | none | Postgres targets a store DSN may use: host, port or socket, database, user, startup options and TLS files must all match one entry, and its `sslmode` must be the entry's or stricter |
 | `mcp_commands` | none | MCP stdio servers, `{"command", "args", "env"}`: the command and argument list must match exactly, and the transport may set only the `env` names listed |
 | `mcp_urls` | none | Endpoints an MCP HTTP transport may name, matched like `provider_base_urls` |
-| `max_schedules` | none: no schedules | Schedules the tenant may keep in each database ([Scheduler](./scheduler.md#what-a-tenant-may-schedule)) |
+| `max_schedules` | none: no schedules | Schedules the tenant may keep in each database ([Scheduler](./scheduler.md#what-a-tenant-may-schedule)); without it an agent with `schedule_tools` is refused |
 | `min_schedule_interval_ms` | 60000 | The shortest time between two fires of its schedules |
 | `max_queued_jobs` | none: no background runs | Unfinished background jobs it may have when it queues one |
 | `execution` | `[{"backend": "local"}]` | The execution backends a config may choose, each with its whole policy; a config's `execution` must equal one, and a config naming none gets the first, so `[{"backend": "sandbox"}]` holds the tenant to the sandbox ([Sandbox](./sandbox.md)) |

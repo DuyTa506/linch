@@ -20,7 +20,8 @@ use linch_providers::{
     ServerOptions, anthropic, deepseek, gemini, openai,
 };
 use linch_tools::{
-    ExecutionBackend, LocalFs, Processes, ReadTracker, TASK_TOOL_NAMES, task_tools, workspace_tools,
+    ExecutionBackend, LocalFs, Processes, ReadTracker, SCHEDULE_TOOL_NAMES, TASK_TOOL_NAMES,
+    task_tools, workspace_tools,
 };
 
 use crate::config::{
@@ -107,6 +108,9 @@ impl AgentConfig {
         hooks: Arc<Hooks>,
         pools: &PgPools,
     ) -> Result<OpenedAgent, OpenError> {
+        if self.schedule_tools {
+            schedule_tools_bound(&self.stores, &tools)?;
+        }
         let deep = deep::expand(&mut self)?;
         if let Some(profile) = &self.profile {
             profile.validate()?;
@@ -368,6 +372,26 @@ async fn register_workspace(
         let _ = tools.register(tool)?;
     }
     Ok((canonical, bash.then_some(backend)))
+}
+
+/// Refuse `schedule_tools` unless the stores are Postgres and the host
+/// already registered the schedule tools: the facade cannot run the
+/// schedules they make.
+fn schedule_tools_bound(stores: &StoreConfig, tools: &ToolRegistry) -> Result<(), OpenError> {
+    if !matches!(stores, StoreConfig::Postgres { .. }) {
+        return Err(OpenError::ScheduleTools("schedules need Postgres stores"));
+    }
+    let snapshot = tools.snapshot();
+    if !SCHEDULE_TOOL_NAMES
+        .iter()
+        .all(|name| snapshot.resolve(name).is_some())
+    {
+        return Err(OpenError::ScheduleTools(
+            "the schedule tools are bound by a host that runs schedules: open the agent \
+             through linch-server, for a tenant whose allowlists give it schedules",
+        ));
+    }
+    Ok(())
 }
 
 /// The longest [`OpenedAgent::close`] waits for the lease releases of

@@ -230,6 +230,71 @@ Một `Job` là một dict: `job_id`, `queue`, `state`, `session_id`, `run_id`
 Các event của run là bền vững: đọc chúng bằng `agent.events(run_id)` trên một agent của
 namespace. Các run nền không gửi stream trực tiếp tới client nào.
 
+## Để model lập lịch
+
+`schedule_tools: True` trong cấu hình agent cho model ba tool, để nó tự lập lịch các việc
+theo dõi tiếp ("kiểm tra deploy mỗi giờ"):
+
+| Tool | Scope | Input | Làm gì |
+|---|---|---|---|
+| `CreateSchedule` | `exec` | `payload`, và `cron` (kèm `timezone` tùy chọn) hoặc `interval_s` | Một heartbeat của agent này trong session của run đang gọi; trả lời `Scheduled <id> at <next fire>` |
+| `ListSchedules` | `read` | không có | Các lịch của agent này, mỗi lịch một dòng: `<id>: <payload> enabled=<bool> next_fire=<time>` |
+| `CancelSchedule` | `write` | `id` | Xóa một lịch của agent này; các run đã nằm trong hàng đợi vẫn chạy xong |
+
+```python
+config = {
+    "namespace": "acme",
+    "spec": {"model": "deepseek-chat"},
+    "provider": {"id": "deepseek"},
+    "stores": {"type": "postgres", "dsn": dsn},
+    "schedule_tools": True,
+}
+agent = await server.open_agent(config)
+run = await agent.run("ops", "Check the deploy every hour.", principal=ada)
+```
+
+Model chỉ chọn prompt và thời điểm. Server cố định phần còn lại, nên một lịch không bao giờ
+cho model nhiều hơn run đã tạo ra nó:
+
+- **Cùng một agent.** Mỗi lần kích hoạt chạy cấu hình mà agent này được mở cùng, được lưu
+  như `create_schedule` lưu. Không có cấu hình, id, queue hay session nào đến từ input của
+  tool.
+- **Cùng session và principal.** Mỗi lần kích hoạt là một run mới trong session của run
+  đang gọi (một [heartbeat](#heartbeat-một-session-được-kiểm-tra-liên-tục), nên các lần
+  kích hoạt bị bỏ qua khi session đang bận) và hành động thay cho principal của run đang
+  gọi: permission rule theo `role` có hiệu lực với các lần kích hoạt như với run.
+  Một lời gọi đã hỏi sẽ chạy sau `approve` cho principal mà approve nêu tên, như mọi lời
+  gọi của phần tiếp tục đó: hãy approve với cùng principal bạn đã bắt đầu run.
+- **Một lần cho mỗi lời gọi.** Id của lịch là `<run_id>:<tool_use_id>` của lời gọi, nên một
+  lần retry cùng lời gọi tìm thấy lịch của nó thay vì tạo thêm một lịch khác.
+- **Cùng các mức trần.** Một lời gọi được chấp nhận như `create_schedule`: `max_schedules`
+  của tenant (tính cả các lịch do client tạo) và `min_schedule_interval_ms`. Một lần từ chối
+  là lỗi của tool, với mã `not_allowed`, `limit_reached` hoặc `invalid_schedule`; run vẫn
+  tiếp tục.
+- **Chỉ lịch của chính nó.** `ListSchedules` và `CancelSchedule` thấy các lịch của
+  namespace của agent chạy cùng cấu hình này, bất kể ai tạo: không phải của agent khác, cũng
+  không phải của namespace khác.
+- **Không từ subagent.** Một subagent có thể có ít tool hơn agent mà lịch chạy, nên
+  `CreateSchedule` của nó nhận một lỗi.
+- **Được hỏi như mọi exec tool.** `CreateSchedule` hỏi ở mode `default` và `accept_edits`.
+  Một lần kích hoạt gọi nó mà không có ai để approve sẽ suspend; hãy cho các run nền một
+  mode hoặc rule cho phép những gì chúng phải làm.
+
+Các lần kích hoạt xếp hàng trên queue `default`. Run của một lần kích hoạt cũng có các tool
+này, nên nó có thể lập lịch tiếp, trong cùng các mức trần.
+
+`open_agent` từ chối `schedule_tools`:
+
+| Từ chối | Khi nào |
+|---|---|
+| `NotAllowed`, `kind == "schedule_tools"` | Allowlist của tenant không có `max_schedules` (từ chối theo mặc định), hoặc kết nối là cục bộ: một server stdio không chạy worker, và một client cục bộ không có mức trần |
+| `NotBackground`, `.reason` | Store bộ nhớ, host tool hoặc callback: các lần kích hoạt không thể chạy cùng agent đó |
+
+Một worker phải phục vụ cơ sở dữ liệu của agent ([Chạy một worker](#chạy-một-worker)); server
+không thấy được một worker ở process khác, nên `max_schedules` là lời của operator rằng có
+một worker đang chạy. Worker cũng kiểm tra lại ở mỗi lần kích hoạt: một tenant bị gỡ
+`max_schedules` sẽ làm job của lần kích hoạt thất bại.
+
 ## Độ bền vững
 
 - **Mỗi lần kích hoạt được đưa vào hàng đợi đúng một lần.** Hàng của một lịch đến hạn bị
@@ -257,7 +322,7 @@ namespace. Các run nền không gửi stream trực tiếp tới client nào.
 | `ScheduleExists` (-32042) | `create_schedule` với một id mà namespace đã có |
 | `JobNotFound` (-32043) | `job` với một id mà namespace không có, hoặc lịch sử của nó đã bị dọn |
 | `InvalidSchedule` (-32044) | Một mẫu cron không parse được hoặc không bao giờ kích hoạt, một múi giờ không biết, một interval ngoài phạm vi, hoặc có cả hai hay không có cái nào trong `cron` và `interval_ms`; `.reason` |
-| `NotAllowed` (-32004) | Một tenant không có `max_schedules` hoặc `max_queued_jobs`, hoặc một lịch nhanh hơn `min_schedule_interval_ms`, hoặc một principal của tenant khác; `.kind` |
+| `NotAllowed` (-32004) | Một tenant không có `max_schedules` hoặc `max_queued_jobs`, hoặc một lịch nhanh hơn `min_schedule_interval_ms`, hoặc một principal của tenant khác; `.kind`. Từ `open_agent`: `schedule_tools` mà không có `max_schedules`, hoặc trên một kết nối cục bộ (`kind == "schedule_tools"`) |
 | `LimitReached` (-32005) | Tenant đang giữ đủ `max_schedules` (`kind == "schedules"`) hoặc `max_queued_jobs` (`kind == "jobs"`) |
 
 Tất cả đều là `SchedulerError` trừ hai cái cuối.
@@ -272,7 +337,7 @@ Tất cả đều là `SchedulerError` trừ hai cái cuối.
 | `cancel_schedule` vô hiệu hóa các lần kích hoạt trong tương lai | `pause_schedule`, `resume_schedule` và `delete_schedule` |
 | Host truyền một `agent_factory` cho `Worker` của nó | Cấu hình của agent được lưu cùng lịch; worker của server mở nó |
 | `RunRequest.principal` được worker khôi phục | `principal=` trên `create_schedule` và `enqueue`, được đưa cho run của mọi lần kích hoạt |
-| `register_schedule_tools` cho phép model lập lịch | Chưa có |
+| `register_schedule_tools` cho phép model lập lịch; host gắn một session | `schedule_tools: True`: server gắn agent, session của nó là session của run đang gọi ([bên dưới](#để-model-lập-lịch)) |
 | Các lần kích hoạt bị lỡ được bù theo thứ tự | Giống nhau |
 
 ## Các trang liên quan
