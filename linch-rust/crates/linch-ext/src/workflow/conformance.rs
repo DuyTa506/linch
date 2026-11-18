@@ -13,7 +13,12 @@
 //!   rejected write changes nothing;
 //! - a `(call_key, occurrence)` is recorded at most once;
 //! - values and statuses round-trip exactly, and namespaces never share
-//!   workflows.
+//!   workflows;
+//! - a workflow has at most one hold at a time, a refused hold writes
+//!   nothing, and a dropped hold frees the workflow (a store with no
+//!   exclusive holds, which never refuses, is not held to the first two).
+
+use std::time::Duration;
 
 use serde_json::json;
 
@@ -28,6 +33,7 @@ pub async fn journal_store_suite(store: &dyn JournalStore) {
     stale_leases_are_fenced(store).await;
     statuses_round_trip(store).await;
     namespaces_are_isolated(store).await;
+    holds_are_exclusive(store).await;
 }
 
 fn record(call_key: &str, occurrence: u64) -> JournalRecord {
@@ -161,4 +167,32 @@ async fn namespaces_are_isolated(store: &dyn JournalStore) {
     assert_eq!(other.epoch, 1, "namespaces keep separate epochs");
     let run = store.load(a, "w1").await.expect("load").expect("exists");
     assert_eq!(run.epoch, 1, "a claim in b leaves a alone");
+}
+
+async fn holds_are_exclusive(store: &dyn JournalStore) {
+    let ns = "conformance/hold";
+    let first = store.hold(ns, "w1").await.expect("the first hold");
+    let second = store.hold(ns, "w1").await;
+    // A store without exclusive holds hands out an empty one every time.
+    if matches!(second, Err(JournalStoreError::Held { .. })) {
+        store
+            .hold(ns, "w2")
+            .await
+            .expect("another workflow is free");
+        assert!(
+            store.load(ns, "w1").await.expect("load").is_none(),
+            "a refused hold writes nothing"
+        );
+        drop(first);
+        // A store that frees the hold in the background may take a moment.
+        let mut freed = false;
+        for _ in 0..50 {
+            if store.hold(ns, "w1").await.is_ok() {
+                freed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(freed, "a dropped hold frees the workflow");
+    }
 }

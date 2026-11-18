@@ -52,6 +52,13 @@ impl TestDb {
             .expect("count connections")
     }
 
+    /// Drop `table` of the test schema, to make the code that uses it fail.
+    pub async fn break_table(&self, table: &str) {
+        let sql = format!("DROP TABLE {}.{table} CASCADE", self.schema);
+        let query = sqlx::query(AssertSqlSafe(sql));
+        query.execute(&self.admin).await.expect("drop the table");
+    }
+
     /// Drop the schema.
     pub async fn drop(self) {
         let sql = format!("DROP SCHEMA IF EXISTS {} CASCADE", self.schema);

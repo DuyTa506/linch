@@ -45,6 +45,8 @@ pub struct Rpc {
     notifications: Notifications,
     events: HashMap<RunId, VecDeque<Envelope>>,
     ends: HashMap<RunId, Option<ErrorObject>>,
+    /// The `workflow.event` notifications received so far, in order.
+    pub workflow_events: Vec<linch_rpc::protocol::WorkflowEventParams>,
 }
 
 impl Rpc {
@@ -94,6 +96,7 @@ impl Rpc {
             notifications,
             events: HashMap::new(),
             ends: HashMap::new(),
+            workflow_events: Vec::new(),
         }
     }
 
@@ -139,6 +142,16 @@ impl Rpc {
         Ended { envelopes, error }
     }
 
+    /// File every notification already waiting, without blocking.
+    pub async fn drain_notifications(&mut self) {
+        while let Ok(Some(_)) = tokio::time::timeout(std::time::Duration::from_millis(50), async {
+            self.pump().await;
+            Some(())
+        })
+        .await
+        {}
+    }
+
     /// File one notification under its run.
     async fn pump(&mut self) {
         let notification = self.notifications.recv().await.expect("server closed");
@@ -155,6 +168,10 @@ impl Rpc {
             method::RUN_END => {
                 let end: RunEnd = serde_json::from_value(notification.params).unwrap();
                 self.ends.insert(end.run_id, end.error);
+            }
+            method::WORKFLOW_EVENT => {
+                self.workflow_events
+                    .push(serde_json::from_value(notification.params).unwrap());
             }
             other => panic!("unexpected notification {other}"),
         }

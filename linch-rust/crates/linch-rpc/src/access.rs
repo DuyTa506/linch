@@ -22,7 +22,9 @@ mod rate;
 
 pub use allowlists::{
     Allowlists, DEFAULT_MAX_AGENTS, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_RUNS,
-    DEFAULT_MIN_SCHEDULE_INTERVAL, DEFAULT_TOOL_CACHE_BYTES, McpCommand,
+    DEFAULT_MAX_WORKFLOW_FAN_OUT, DEFAULT_MAX_WORKFLOW_RECORD_BYTES, DEFAULT_MAX_WORKFLOW_RECORDS,
+    DEFAULT_MAX_WORKFLOWS, DEFAULT_MIN_SCHEDULE_INTERVAL, DEFAULT_TOOL_CACHE_BYTES, McpCommand,
+    WorkflowCaps,
 };
 
 /// How a connection's client is trusted.
@@ -56,6 +58,7 @@ pub struct Tenant {
     runs: Arc<Semaphore>,
     agents: Arc<Semaphore>,
     connections: Arc<Semaphore>,
+    workflows: Arc<Semaphore>,
     pools: Arc<PgPools>,
     provider_calls: Mutex<rate::CallWindow>,
 }
@@ -85,15 +88,37 @@ impl Tenant {
             runs: places(allow.max_runs),
             agents: places(allow.max_agents),
             connections: places(allow.max_connections),
+            workflows: places(allow.workflow.map_or(0, |caps| caps.max_workflows)),
             pools: Arc::new(PgPools::new()),
             provider_calls: Mutex::default(),
             allow,
         })
     }
 
+    /// Live runs the tenant may drive at once.
+    pub(crate) fn max_runs(&self) -> usize {
+        self.allow.max_runs
+    }
+
     /// A place among the tenant's live runs, or `-32005`.
     pub(crate) fn run_place(&self) -> Result<OwnedSemaphorePermit, ErrorObject> {
         take(&self.runs, "runs", self.allow.max_runs)
+    }
+
+    /// The tenant's workflow caps, or `-32004` (`kind: workflow`) when its
+    /// allowlists give it none.
+    pub(crate) fn workflow_caps(&self) -> Result<WorkflowCaps, ErrorObject> {
+        self.allow.workflow.ok_or_else(|| {
+            let message = "workflows are not in the tenant's allowlists (workflow)";
+            ErrorObject::new(crate::error::code::NOT_ALLOWED, message)
+                .with_data(serde_json::json!({ "kind": "workflow" }))
+        })
+    }
+
+    /// A place among the tenant's concurrent workflows, or `-32005`.
+    pub(crate) fn workflow_place(&self) -> Result<OwnedSemaphorePermit, ErrorObject> {
+        let max = self.allow.workflow.map_or(0, |caps| caps.max_workflows);
+        take(&self.workflows, "workflows", max)
     }
 
     /// A place among the tenant's open agents, or `-32005`.

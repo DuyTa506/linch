@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use linch::{ExecutionConfig, PermissionMode, ReliabilityPolicy, SystemSection};
-use linch_rpc::{AccessError, Allowlists, McpCommand, Tenant, Tokens};
+use linch_rpc::{AccessError, Allowlists, McpCommand, Tenant, Tokens, WorkflowCaps};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -116,9 +116,33 @@ impl fmt::Debug for TokenSource {
     }
 }
 
+/// The `workflow` of an `allow` section: the caps on a tenant's
+/// workflows. Every field is at least 1 when given.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WorkflowAllow {
+    /// Workflows the tenant drives at once, across its connections;
+    /// [`linch_rpc::DEFAULT_MAX_WORKFLOWS`] when absent.
+    pub max_workflows: Option<usize>,
+    /// Journal records one workflow may hold;
+    /// [`linch_rpc::DEFAULT_MAX_WORKFLOW_RECORDS`] when absent.
+    pub max_records: Option<u64>,
+    /// Agent calls one workflow may have in flight at once;
+    /// [`linch_rpc::DEFAULT_MAX_WORKFLOW_FAN_OUT`] when absent.
+    pub max_fan_out: Option<usize>,
+    /// Bytes of one record's JSON value;
+    /// [`linch_rpc::DEFAULT_MAX_WORKFLOW_RECORD_BYTES`] when absent.
+    pub max_record_bytes: Option<usize>,
+    /// The most tokens a workflow's budget may allow, which a workflow with
+    /// no budget of its own gets; absent, no ceiling.
+    pub max_tokens: Option<u64>,
+    /// The most USD a workflow's budget may allow, as for `max_tokens`.
+    pub max_cost_usd: Option<f64>,
+}
+
 /// The serde form of [`Allowlists`]; see its builder methods for how each
 /// list matches.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AllowConfig {
     /// Whether the `scripted` provider is allowed (for tests and evals).
@@ -190,6 +214,10 @@ pub struct AllowConfig {
     /// Memories the tenant may keep in each database, in all its
     /// namespaces, at least 1; required with `memory`.
     pub max_memories: Option<u64>,
+    /// Whether the tenant may drive directed workflows (`workflow.*`),
+    /// and what each may do; absent, none (every `workflow.start` is
+    /// refused). `{}` allows them with the default caps.
+    pub workflow: Option<WorkflowAllow>,
     /// Endpoints a provider `base_url` may name, matched on origin and
     /// path: an entry with a path allows that path alone, one with none
     /// allows each provider's own path (`ProviderConfig::default_base_paths`).
@@ -320,6 +348,22 @@ impl ServerConfig {
                     allow.max_tool_cache_bytes.map(|max| max as usize),
                 ),
                 ("max_memories", allow.max_memories.map(|max| max as usize)),
+                (
+                    "workflow.max_workflows",
+                    (allow.workflow.as_ref()).and_then(|w| w.max_workflows),
+                ),
+                (
+                    "workflow.max_records",
+                    (allow.workflow.as_ref()).and_then(|w| w.max_records.map(|max| max as usize)),
+                ),
+                (
+                    "workflow.max_fan_out",
+                    (allow.workflow.as_ref()).and_then(|w| w.max_fan_out),
+                ),
+                (
+                    "workflow.max_record_bytes",
+                    (allow.workflow.as_ref()).and_then(|w| w.max_record_bytes),
+                ),
             ];
             if let Some((field, _)) = caps.into_iter().find(|(_, cap)| *cap == Some(0)) {
                 let tenant = name.clone();
@@ -397,6 +441,20 @@ pub struct Built {
     pub tenants: Vec<Arc<Tenant>>,
 }
 
+impl WorkflowAllow {
+    fn caps(&self) -> WorkflowCaps {
+        let defaults = WorkflowCaps::default();
+        WorkflowCaps {
+            max_workflows: self.max_workflows.unwrap_or(defaults.max_workflows),
+            max_records: self.max_records.unwrap_or(defaults.max_records),
+            max_fan_out: self.max_fan_out.unwrap_or(defaults.max_fan_out),
+            max_record_bytes: self.max_record_bytes.unwrap_or(defaults.max_record_bytes),
+            max_tokens: self.max_tokens,
+            max_cost_usd: self.max_cost_usd,
+        }
+    }
+}
+
 impl AllowConfig {
     /// The [`Allowlists`] this describes.
     ///
@@ -433,7 +491,8 @@ impl AllowConfig {
             .max_queued_jobs(self.max_queued_jobs)
             .system_sections(&self.system_sections)?
             .memory(self.memory)
-            .max_memories(self.max_memories);
+            .max_memories(self.max_memories)
+            .workflow(self.workflow.as_ref().map(WorkflowAllow::caps));
         if let Some(ms) = self.min_schedule_interval_ms {
             allow = allow.min_schedule_interval(Duration::from_millis(ms));
         }

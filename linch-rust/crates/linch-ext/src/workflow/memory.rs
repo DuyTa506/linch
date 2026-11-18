@@ -1,14 +1,15 @@
 //! [`MemoryJournalStore`]: the journal kept in process memory, for tests
 //! and development.
 
-use std::collections::{BTreeMap, HashMap};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
 use linch_core::JsonValue;
 
 use super::journal::{
-    JournalLease, JournalRecord, JournalStore, JournalStoreError, WorkflowRun, WorkflowStatus,
+    JournalLease, JournalRecord, JournalStore, JournalStoreError, WorkflowHold, WorkflowRun,
+    WorkflowStatus,
 };
 
 /// A [`JournalStore`] kept in process memory. It passes the same
@@ -17,6 +18,25 @@ use super::journal::{
 #[derive(Debug, Default)]
 pub struct MemoryJournalStore {
     workflows: Mutex<HashMap<(String, String), Stored>>,
+    held: Arc<Mutex<HashSet<(String, String)>>>,
+}
+
+/// Frees a held workflow when it drops.
+struct Held {
+    held: Arc<Mutex<HashSet<(String, String)>>>,
+    key: (String, String),
+}
+
+#[async_trait]
+impl super::journal::HoldGuard for Held {
+    async fn release(self: Box<Self>) {}
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        held.remove(&self.key);
+    }
 }
 
 #[derive(Debug)]
@@ -126,5 +146,23 @@ impl JournalStore for MemoryJournalStore {
         let mut workflows = self.workflows();
         Self::leased(&mut workflows, lease)?.status = status;
         Ok(())
+    }
+
+    async fn hold(
+        &self,
+        namespace: &str,
+        workflow_id: &str,
+    ) -> Result<WorkflowHold, JournalStoreError> {
+        let key = (namespace.to_owned(), workflow_id.to_owned());
+        let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        if !held.insert(key.clone()) {
+            return Err(JournalStoreError::Held {
+                workflow_id: workflow_id.to_owned(),
+            });
+        }
+        Ok(WorkflowHold::new(Held {
+            held: Arc::clone(&self.held),
+            key,
+        }))
     }
 }

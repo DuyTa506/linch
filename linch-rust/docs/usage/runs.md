@@ -93,7 +93,7 @@ busy with True
   envelopes wait in memory. Cancel it if you no longer want it.
 - **Choose the run id** when you need to find the run again even if `run()`
   never returned (a timeout, a crash of your process). The server picks a UUID
-  when you do not. An id already stored ends the run with `RunError` (code
+  when you do not. An id already stored ends the run with `RunExists` (code
   -32023) and writes nothing.
 - Many runs of one server stream at once; each `Run` gets only its own
   envelopes.
@@ -116,7 +116,7 @@ the stream: iterating, or `result()`, raises a `RunError` subclass.
 | Exception | Code | When |
 |---|---|---|
 | `RunNotFound` | -32021 | No such run in the agent's stores (with memory stores: not in this handle) |
-| `RunError` | -32023 | `run_id` is already stored |
+| `RunExists` | -32023 | `run_id` is already stored; `run_or_resume` handles it ([Workflows](./workflows.md#run_or_resume)) |
 | `ContractMismatch` | -32025 | The run started under another contract ([Agent config](./agent.md#the-run-contract)); `data["expected"]` is the run's contract and `data["found"]` this agent's, as the message names them |
 | `RunTerminal` | -32026 | The run already finished; `data.status` is its status |
 | `NotSuspended` | -32027 | `approve` on a run that is not waiting for approval, or `answer` on one not waiting for an answer ([below](#approve)) |
@@ -539,7 +539,7 @@ steer_id = await agent.steer(run.id, "Use tabs, not spaces.")
 - **A call sent again.** `steer_id` names the steer (letters, digits and
   `-_.:`, at most 128 bytes). Sent again with the same id after a dropped
   answer, the steer is taken once. A call that fails with the run stopped
-  first (`RunError`, -32023) may or may not have landed; send it again with
+  first (`RunExists`, -32023) may or may not have landed; send it again with
   the same id.
 - **Other servers.** A run another server drives is not routed to: the call
   gets `RunLeased` (with `expires_in`), as `approve` does, and so does one for

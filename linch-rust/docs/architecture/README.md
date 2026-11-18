@@ -30,7 +30,7 @@ has its own usage docs.
 | [MCP client](./mcp.md) | `linch-mcp`: stdio and HTTP transports, tool mapping, relist, reconnect, cancel, process-group kill, bounded close, limits and redaction |
 | [Stores](./stores.md) | Run, session, task and file store contracts and their conformance suites; memory stores; the Postgres stores: schema, migrations, one live run per session, fencing, single-statement writes, refusal classification, pool sizing; group-commit write counts |
 | [Worker](./worker.md) | `linch-worker`: the Postgres job queue, the worker loop, leases and fencing, back-off and dead letters, one active job per run, cron schedules |
-| [Extensions](./ext.md) | `linch-ext`: the eval harness and scorers, run reports, journaled workflows on memory and Postgres journals |
+| [Extensions](./ext.md) | `linch-ext`: the eval harness and scorers, run reports, journaled workflows on memory and Postgres journals, and how a client drives them over RPC |
 | [OpenTelemetry](./otel.md) | `linch-otel`: spans and metrics built from the event stream, the mapping to Python Linch's names, content capture, what hosts wire |
 | [Events](./events.md) | `Event` and its kinds, `Envelope`, persistence classes, the wire format and its version, subagent wrapping, the Python client's decoding and the parity test, adding an event kind |
 | [Skills and subagents](./skills-subagents.md) | The `Skill` tool, its listing and overlay; the `Subagent` tool, foreground and background workers, `SubagentContinue` and `TaskStop`; the run family; child contracts; resume after a crash; reloads; the deep agent roster |

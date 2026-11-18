@@ -74,6 +74,7 @@ Server ─────── one linch-server child process, or a connection to 
 | [Observability](./observability.md) | Span và metric OpenTelemetry từ client |
 | [Monitoring](./monitoring.md) | Cái gì được trace, cách tính và đặt giá chi phí, chạy eval, đọc run report |
 | [Server](./server.md) | Chạy `linch-server` cho các tenant từ xa, và `Server.connect`: token, allowlist, giới hạn |
+| [Workflows](./workflows.md) | Một hàm Python điều hướng một chuỗi lời gọi agent đã biết: fan-out, pipeline, step, interrupt; có journal trong Postgres nên một lần crash resume mà không lặp lại các lời gọi đã xong; handoff giữa các step; `run_or_resume` |
 | [Scheduler](./scheduler.md) | Lịch cron và interval theo múi giờ, heartbeat trên một session, run nền một lần, trạng thái job, worker chạy chúng |
 
 Sẽ có sau:

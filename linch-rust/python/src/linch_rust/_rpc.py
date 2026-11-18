@@ -27,7 +27,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -170,6 +170,7 @@ class Connection:
         self._runs: dict[str, RunQueue] = {}
         self._room = asyncio.Semaphore(NOTIFICATION_CAPACITY)
         self._agents: dict[str, _Handlers] = {}
+        self._workflows: dict[str, Callable[[JsonObject], None]] = {}
         self._served: dict[Any, asyncio.Task[None]] = {}
         self._closed: str | None = None
         self._task = asyncio.create_task(self._read())
@@ -182,6 +183,14 @@ class Connection:
     ) -> None:
         """Route the server's `tool.call` and `hook.call` for `agent` to these."""
         self._agents[agent] = _Handlers(tools, callbacks)
+
+    def watch_workflow(self, run_id: str, sink: Callable[[JsonObject], None]) -> None:
+        """Pass each `workflow.event` of workflow `run_id` to `sink`, in order."""
+        self._workflows[run_id] = sink
+
+    def unwatch_workflow(self, run_id: str) -> None:
+        """Stop passing the events of workflow `run_id`."""
+        self._workflows.pop(run_id, None)
 
     def unbind(self, agent: str) -> None:
         """Forget the handlers of a closed agent."""
@@ -244,6 +253,10 @@ class Connection:
             queue = self._runs.get(params.get("run_id", ""))
             if queue is not None:
                 await queue.put(params.get("envelopes") or [])
+        elif method == "workflow.event":
+            sink = self._workflows.get(params.get("run_id", ""))
+            if sink is not None:
+                sink(params.get("event") or {})
         elif method == "run.end":
             queue = self._runs.pop(params.get("run_id", ""), None)
             error = params.get("error")

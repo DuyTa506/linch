@@ -129,6 +129,7 @@ token twice is refused. A tenant only a worker serves needs no token.
 | `tool_cache` | `false` | `spec.tool_cache`, which keeps results in the server's memory or database for the tenant's namespace; bounded to 1024 entries, a one-hour ttl, 1 MiB a result and 32 tools. The agent also needs `spec.redaction` over tool results, and the entries serve only the session that stored them |
 | `tool_cache_shared` | `false` | Whether the tenant's `tool_cache` may use `scope: "namespace"`, which serves one session's result to every session of the namespace; a read tool may answer per session, so the operator decides |
 | `max_tool_cache_bytes` | 67108864 (64 MiB) | Bytes of cached results all of the tenant's namespaces may hold together; at least 1 |
+| `workflow` | none: no workflows | `workflow.*` ([Workflows](./workflows.md#admission)): `{}` allows them with the default caps, or set `max_workflows` (4), `max_records` (10000), `max_fan_out` (8), `max_record_bytes` (1 MiB), `max_tokens`, `max_cost_usd` |
 | `max_queued_jobs` | none: no background runs | Unfinished background jobs it may have when it queues one |
 | `system_sections` | none | System prompt sections `{"name", "text", "order"?, "cacheable"?}` added to every agent of the tenant; the tenant cannot remove or rename them, and `replace_defaults` leaves them in. Changing them refuses the resume of the tenant's in-flight runs ([Agent config](./agent.md#system-sections)) |
 | `memory` | `false`: no long-term memory | Whether a config may turn on [`memory`](./memory.md#built-in-long-term-memory) |

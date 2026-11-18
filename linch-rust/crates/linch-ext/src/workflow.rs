@@ -92,15 +92,16 @@ mod step;
 #[cfg(test)]
 mod tests;
 
-pub use context::{EventSink, WorkflowContext};
-pub use engine::{WorkflowOptions, run_workflow};
+pub use agent::{AgentCall, AgentOutcome};
+pub use context::{EventSink, LiveGate, WorkflowContext};
+pub use engine::{WorkflowBudget, WorkflowOptions, WorkflowSession, run_workflow};
 pub use error::{BoxError, WorkflowError};
 pub use journal::{
-    Interrupt, JournalLease, JournalRecord, JournalStore, JournalStoreError, WorkflowRun,
-    WorkflowStatus, agent_key, interrupt_key, step_key,
+    Interrupt, JournalLease, JournalRecord, JournalStore, JournalStoreError, WorkflowHold,
+    WorkflowRun, WorkflowStatus, agent_key, agent_key_with, interrupt_key, step_key,
 };
 pub use memory::MemoryJournalStore;
 pub use policy::Retry;
 #[cfg(feature = "postgres")]
 pub use postgres::PgJournalStore;
-pub use step::StepOptions;
+pub use step::{StepOptions, StepSlot, StepTicket};

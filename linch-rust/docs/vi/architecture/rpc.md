@@ -74,6 +74,13 @@ tới handler của nó. Các kiểu params từ chối trường không biết;
 | `provider.model` | `ProviderModelParams` | `server/provider.rs`: `Provider::model_info` | `ModelInfo`; `-32036` khi danh sách không có nó |
 | `eval.run` | `EvalRunParams` `{agent, cases, scorers?, include_events?}` (`protocol/monitor.rs`) | `server/monitor.rs`: `run_eval` trên agent; chiếm một chỗ run của tenant và đánh dấu agent bận (`agent.close` trả `-32002`) cho đến khi xong; dừng cùng kết nối | kết quả eval dạng JSON (`total`, `passed`, `pass_rate`, `total_cost_usd`, `usage`, `duration_ms`, `cases`) và `markdown`; case hoặc scorer sai là `-32602` |
 | `run.report` | `ReportParams` `{agent, run_id, timeline?}` | `server/monitor.rs`: `build_run_report` trên `Agent::run_record` và `Agent::events` | `{report, markdown}`; run không tồn tại là `-32021` |
+| `workflow.start` | `WorkflowStartParams` `{agent, run_id, budget?, resume?}` (`protocol/workflow.rs`) | `Server::start_workflow` (`server/workflow.rs`): các mức trần của tenant, rồi `WorkflowSession::open_held`; `-32045` khi một client khác đang drive nó | `WorkflowStarted` `{records, resumed, previous?, limits?}` |
+| `workflow.agent` | `WorkflowAgentParams` `{run_id, prompt, name?, subagent?, label?, key?, output_schema?, fork?, timeout_ms?, retry?, branch?, call_id?}` | `workflow_agent`: `WorkflowContext::agent_with` trên nhánh; bị bỏ cùng kết nối như một run | `WorkflowAgentResult` `{text, structured?, session_id, tokens, cost_usd, replayed}` |
+| `workflow.step.begin`, `workflow.step.complete` | `{run_id, name, key?, branch?}`, `{run_id, ticket, value}` | `step_begin`, `step_complete`; ticket do server giữ | `{replayed, value?, ticket?}`, `{}` |
+| `workflow.interrupt` | `{run_id, key, payload?, branch?}` | `WorkflowContext::interrupt` | `{suspended, value?}` |
+| `workflow.cancel` | `{run_id, call_id?}` | hủy một lời gọi agent đang chạy, hoặc tất cả | `{cancelled}` |
+| `workflow.finish` | `{run_id, ok}` | kết thúc các lời gọi đang chạy, ghi trạng thái (`awaiting_input` khi một interrupt đã suspend nó), giải phóng hold | `{status}` |
+| `workflow.status` | `{agent, run_id}` | đọc workflow đã lưu | `{status, records, interrupt?}` |
 | `schedule.create` | `ScheduleCreateParams` (`protocol/schedule.rs`) | `Server::create_schedule` (`server/schedule.rs`) | `ScheduleInfo` |
 | `schedule.list` | `ScheduleListParams` | `server/schedule.rs` | `{schedules}` |
 | `schedule.pause`, `schedule.resume` | `ScheduleIdParams` | `server/schedule.rs`; `-32041` cho một id không biết | `ScheduleInfo` |
@@ -82,7 +89,7 @@ tới handler của nó. Các kiểu params từ chối trường không biết;
 | `job.get` | `JobGetParams` | `server/schedule.rs`; `-32043` cho một id không biết | `JobInfo` |
 | `job.list` | `JobListParams` | `server/schedule.rs` | `{jobs}` |
 
-Server gửi hai notification. `run.event` `{run_id, envelopes}`
+Server gửi ba notification. `workflow.event` `{run_id, event}` mang từng `WorkflowEvent` của một workflow mà kết nối đang drive, theo thứ tự, trước câu trả lời của lời gọi tạo ra nó. Hai cái còn lại: `run.event` `{run_id, envelopes}`
 (`RunEvent`, `protocol.rs:256`) mang một hoặc nhiều envelope liên tiếp
 của một run; `run.end` `{run_id, error?}` (`RunEnd`, `protocol.rs:266`) là
 message cuối cùng của một run. Nó cũng gửi các request riêng: `tool.call`
@@ -110,6 +117,7 @@ docs (`lib.rs:328-364`) và các mã nằm trong `crates/linch-rpc/src/error.rs:
 | -32020 đến -32034, -32038 | Một run, trong `run.end`, và `run.events`: lỗi store, `RunError`, session bận, một `output_schema` hoặc `tool_choice` không dùng được (`-32034`), một câu trả lời không khớp (`-32032`, `data.reason`), một lease đã mất (`-32022`, từ một claim hoặc một lần ghi journal bị fence), một run mà process khác đang giữ lease (`-32033`, `data: {run_id, owner, expires_in_ms}`), một steer để trống, quá dài hoặc có id không dùng được (`-32038`, `data.reason`) |
 | -32035 đến -32037 | Các method provider: một provider không có danh sách model (`-32035`, `data.provider`), một model mà danh sách của nó không có (`-32036`, `data.model`, và `data.truncated` khi danh sách bị cắt), một request thất bại hoặc một câu trả lời lỗi (`-32037`, `data: {kind, status?}`, `kind` là một trong `unreachable` (kết nối, reset và timeout như nhau), `status`, `invalid_request`, `other`; message là một văn bản cố định cho mỗi kind, không bao giờ chứa key, URL hay lời của vendor). Thiếu key là `-32013` với `data.env`. Một tenant cần `allow.provider_info` và một `base_url` được cho phép (`-32004`, `kind` là `provider_info` hoặc `provider_base_url`) |
 | -32040 đến -32044 | Các method của scheduler: một agent không thể chạy nền (`-32040`, `data.reason` là `memory_store`, `host_tools` hoặc `callbacks`), một lịch không biết (`-32041`), một id lịch đã dùng (`-32042`), một job không biết (`-32043`), một timing không dùng được (`-32044`, `data.reason`) |
+| -32045 đến -32048 | Các method workflow: một client khác đang drive workflow (`-32045`), budget đã hết (`-32046`, `data: {spent_tokens, spent_usd, max_tokens?, max_cost_usd?}`), một lời gọi agent không tạo ra kết quả (`-32047`, `data.kind` là `failed`, `aborted`, `timeout`, `approval` hoặc `invalid`), một lời gọi cho workflow mà kết nối này không drive (`-32048`). Một tenant cần `allow.workflow` (`-32004`, `kind: workflow`, hoặc `workflow_budget` khi vượt mức trần của nó) và gặp `-32005` với `kind` là `workflows`, `agent_calls_in_flight` hoặc `journal_records` |
 
 `RunError::ContractMismatch {expected, found}` nêu tên các contract từ phía của agent:
 `expected` là contract của agent đã cố tiếp tục run, `found` là contract được lưu cùng
@@ -128,6 +136,26 @@ bất kể id (`python/src/linch_rust/_remote.py:112-142`).
 Client Python ánh xạ mã sang exception trong `_BY_CODE`
 (`python/src/linch_rust/errors.py:158-170`), với các dải cho phần còn lại
 (`errors.py:173-186`); `python/tests/test_protocol.py:196` cố định ánh xạ này.
+
+### Các method workflow
+
+Hàm workflow chạy trong client, và server giữ những gì phải bền vững. Wire là lát
+cắt nhỏ nhất giữ được cả hai điều đó: một lời gọi phải replay được là một request
+(`workflow.agent`, `workflow.interrupt`, hoặc `begin` và `complete` của một step),
+nên một lần crash giữa hai request không làm mất gì mà journal đã có, và các bộ
+đếm occurrence nằm cùng journal, trong `WorkflowSession` của kết nối. Client nêu
+tên nhánh fan-out của nó trong mỗi lời gọi, nên `parallel` chạy ở phía client mà
+vẫn tìm thấy record của từng nhánh khi resume. Một `wf.agent` bị hủy gửi
+`workflow.cancel` cho `call_id` của nó và chờ lời gọi kết thúc, nên một `parallel`
+thất bại đã ngừng tiêu tiền khi nó raise.
+
+Server drive một `workflow.agent` như một run: kết nối kết thúc sẽ bỏ nó, để run
+con ở trạng thái bền vững cuối cùng, và lần drive kế tiếp tiếp tục run đó. Chỉ
+`workflow.cancel` mới abort một run con. `workflow.finish` làm yên các lời gọi
+đang chạy, ghi trạng thái và giải phóng hold. `max_workflows` của tenant được lấy
+ở `workflow.start`; `max_fan_out` và chỗ run của tenant được `LiveGate` lấy trước
+mỗi lời gọi thật. Lỗi journal đến tenant dưới dạng văn bản cố định `the workflow
+journal failed`; nguyên nhân đi vào log của server.
 
 ## Bên trong một kết nối
 

@@ -61,6 +61,7 @@ Most tasks need more than one row. Paths are relative to `$DOCS`.
 | Traces and metrics | `usage/observability.md` |
 | One server for many processes or tenants | `usage/server.md` |
 | Cron or interval schedules, heartbeats, background runs | `usage/scheduler.md` |
+| A known sequence of agent calls (fan-out, pipeline, approval, a signing step) that must resume after a crash; one run started once under a chosen id | `usage/workflows.md` |
 
 ## 3. Build it the way linch-rust expects
 

@@ -116,6 +116,97 @@ impl WorkflowContext {
     }
 }
 
+/// A step that has to run: handed out by [`WorkflowContext::step_begin`]
+/// and given back to [`WorkflowContext::step_complete`] with the value.
+#[derive(Debug)]
+pub struct StepTicket {
+    name: String,
+    call_key: String,
+    occurrence: u64,
+}
+
+/// What [`WorkflowContext::step_begin`] found in the journal.
+#[derive(Debug)]
+pub enum StepSlot {
+    /// An earlier run finished this step: its value, to use as is.
+    Replayed(JsonValue),
+    /// The step has no record: run it, then complete the ticket.
+    Run(StepTicket),
+}
+
+impl WorkflowContext {
+    /// Start a journaled step whose function runs elsewhere (a client of
+    /// the RPC server): the first half of [`step_with`](Self::step_with).
+    ///
+    /// Returns the journaled value when an earlier run finished the step
+    /// (and emits `step_replayed`), else a ticket (and emits
+    /// `step_start`). The occurrence is counted here, in call order, so a
+    /// step that is begun and never completed still uses its place.
+    ///
+    /// Args:
+    ///     name: The step's durable identity, as in `step_with`.
+    ///     key: The identity of the step's inputs, as in
+    ///         [`StepOptions::key`].
+    ///
+    /// Raises:
+    ///     WorkflowError: `Encode` when `key` does not encode, `Aborted`
+    ///         when the cancel token fired first.
+    pub fn step_begin(
+        &self,
+        name: &str,
+        key: Option<&JsonValue>,
+    ) -> Result<StepSlot, WorkflowError> {
+        let label = format!("step {name}");
+        let content_key = step_key(name, key)
+            .map_err(|error| encode_error(&label, format!("its key does not encode: {error}")))?;
+        let (call_key, occurrence, cached) = self.next_occurrence(&content_key);
+        let mut event = event(
+            WorkflowKind::StepReplayed,
+            name.to_owned(),
+            call_key.clone(),
+            occurrence,
+        );
+        if let Some(value) = cached {
+            event.result_text = Some(value.to_string());
+            self.emit(event);
+            return Ok(StepSlot::Replayed(value));
+        }
+        self.check_cancel(&label)?;
+        self.check_room()?;
+        event.kind = WorkflowKind::StepStart;
+        self.emit(event);
+        Ok(StepSlot::Run(StepTicket {
+            name: name.to_owned(),
+            call_key,
+            occurrence,
+        }))
+    }
+
+    /// Journal the value of a step started with
+    /// [`step_begin`](Self::step_begin); it is durable when this returns.
+    ///
+    /// Raises:
+    ///     WorkflowError: `Store` when the journal write fails or the lease
+    ///         was lost, `LimitExceeded` past the record cap.
+    pub async fn step_complete(
+        &self,
+        ticket: StepTicket,
+        value: JsonValue,
+    ) -> Result<(), WorkflowError> {
+        self.record(&ticket.call_key, ticket.occurrence, &value)
+            .await?;
+        let mut event = event(
+            WorkflowKind::StepEnd,
+            ticket.name,
+            ticket.call_key,
+            ticket.occurrence,
+        );
+        event.result_text = Some(value.to_string());
+        self.emit(event);
+        Ok(())
+    }
+}
+
 /// `value` as JSON, and decoded back, so the caller gets exactly what a
 /// replay would give.
 fn round_trip<T: Serialize + DeserializeOwned>(

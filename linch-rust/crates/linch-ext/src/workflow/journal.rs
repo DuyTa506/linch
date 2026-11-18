@@ -110,9 +110,56 @@ pub enum JournalStoreError {
         /// What conflicted.
         message: String,
     },
+    /// Another holder has the workflow ([`JournalStore::hold`]).
+    #[error("workflow {workflow_id} is held by another client")]
+    Held {
+        /// The workflow that is held.
+        workflow_id: String,
+    },
     /// The storage backend failed.
     #[error("journal store backend error")]
     Backend(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
+/// An exclusive hold on one workflow, released when it drops.
+///
+/// Returned by [`JournalStore::hold`]. It is separate from the epoch
+/// lease: the lease fences stale *writes* (a later claim wins), while a
+/// hold keeps a second driver from *claiming* a workflow that a live one
+/// still drives.
+#[derive(Default)]
+pub struct WorkflowHold(Option<Box<dyn HoldGuard>>);
+
+/// What a store keeps for a [`WorkflowHold`]: dropping it frees the
+/// workflow, in the background when that takes a round trip;
+/// [`release`](Self::release) frees it and waits.
+#[async_trait]
+pub trait HoldGuard: Send + Sync + 'static {
+    /// Free the workflow and wait until it is free.
+    async fn release(self: Box<Self>);
+}
+
+impl WorkflowHold {
+    /// A hold that frees the workflow when `guard` drops or is released.
+    pub fn new(guard: impl HoldGuard) -> Self {
+        Self(Some(Box::new(guard)))
+    }
+
+    /// Free the workflow and wait until another holder can take it. A hold
+    /// that is only dropped frees it too, but maybe a moment later.
+    pub async fn release(mut self) {
+        if let Some(guard) = self.0.take() {
+            guard.release().await;
+        }
+    }
+}
+
+impl std::fmt::Debug for WorkflowHold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkflowHold")
+            .field("held", &self.0.is_some())
+            .finish()
+    }
 }
 
 /// Durable workflow state: status, lease epoch and journal records.
@@ -159,6 +206,26 @@ pub trait JournalStore: Send + Sync {
         lease: &JournalLease,
         status: WorkflowStatus,
     ) -> Result<(), JournalStoreError>;
+
+    /// Take the exclusive hold of a workflow, for a driver that wants a
+    /// second one refused instead of fencing it: take it before
+    /// [`Self::claim`] and keep it until the workflow is finished.
+    ///
+    /// The hold ends when the guard drops, and, in a store that outlives
+    /// the process, when the process dies. A store with no such notion
+    /// (the default) holds nothing, and a later claim still fences the
+    /// earlier one.
+    ///
+    /// Raises:
+    ///     JournalStoreError: `Held` while another holder has the
+    ///         workflow.
+    async fn hold(
+        &self,
+        _namespace: &str,
+        _workflow_id: &str,
+    ) -> Result<WorkflowHold, JournalStoreError> {
+        Ok(WorkflowHold::default())
+    }
 }
 
 /// The content key of one `step` call: its name plus its optional input
@@ -184,6 +251,32 @@ pub fn agent_key(name: &str, prompt: &str) -> String {
     digest_with_domain("agent", &value)
         .expect("a flat JSON object always encodes")
         .to_string()
+}
+
+/// [`agent_key`] for a call that also carries identity beyond its name and
+/// prompt.
+///
+/// With `key` the caller owns the identity: the prompt and `options` are
+/// left out, and the caller must change `key` when they should miss. Else
+/// `options` (the tool filter, the output schema, the host session a call
+/// forks) is hashed with the name and prompt, so editing one makes that
+/// call miss the record it had. With neither this is exactly [`agent_key`],
+/// so a call that sets nothing extra keeps its key.
+///
+/// Raises:
+///     CanonicalError: If `options` nests too deeply to encode.
+pub fn agent_key_with(
+    name: &str,
+    prompt: &str,
+    key: Option<&str>,
+    options: Option<&JsonValue>,
+) -> Result<String, CanonicalError> {
+    let value = match (key, options) {
+        (Some(key), _) => json!({"name": name, "key": key}),
+        (None, Some(options)) => json!({"name": name, "prompt": prompt, "options": options}),
+        (None, None) => return Ok(agent_key(name, prompt)),
+    };
+    Ok(digest_with_domain("agent", &value)?.to_string())
 }
 
 /// The content key of one `interrupt` call. Only the key is hashed: the

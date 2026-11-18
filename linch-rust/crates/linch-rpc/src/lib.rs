@@ -526,6 +526,10 @@
 //! | -32042 | schedule exists | the agent's namespace already has a schedule with that id |
 //! | -32043 | job not found | no job with that id in the agent's namespace, or its history was pruned |
 //! | -32044 | invalid schedule | the timing does not parse or never fires, an unknown time zone, an interval out of range, or both or neither of `cron` and `interval_ms`; `data: {reason}` |
+//! | -32045 | workflow held | another client drives the workflow; `workflow.start` wrote nothing; `data: {run_id}` |
+//! | -32046 | workflow budget | the workflow's budget is spent; `data: {spent_tokens, spent_usd, max_tokens?, max_cost_usd?}` |
+//! | -32047 | workflow call failed | a `workflow.agent` call's run failed, was aborted, timed out or waits for an approval, or its subagent is unknown; `data: {kind}` |
+//! | -32048 | workflow not found | this connection drives no workflow with that id |
 //!
 //! Codes from -32010 to -32015 answer `agent.open`. Codes from -32020 on
 //! come in `run.end` for a run and as the error of `run.events`.
@@ -554,8 +558,9 @@ mod server;
 
 pub use access::{
     Access, AccessError, Allowlists, ConnectionPlace, DEFAULT_MAX_AGENTS, DEFAULT_MAX_CONNECTIONS,
-    DEFAULT_MAX_RUNS, DEFAULT_MIN_SCHEDULE_INTERVAL, DEFAULT_TOOL_CACHE_BYTES, MAX_PENDING_LOGINS,
-    McpCommand, Tenant, Tokens,
+    DEFAULT_MAX_RUNS, DEFAULT_MAX_WORKFLOW_FAN_OUT, DEFAULT_MAX_WORKFLOW_RECORD_BYTES,
+    DEFAULT_MAX_WORKFLOW_RECORDS, DEFAULT_MAX_WORKFLOWS, DEFAULT_MIN_SCHEDULE_INTERVAL,
+    DEFAULT_TOOL_CACHE_BYTES, MAX_PENDING_LOGINS, McpCommand, Tenant, Tokens, WorkflowCaps,
 };
 pub use background::BackgroundAgents;
 pub use client::{Client, ClientError, NOTIFICATION_CAPACITY, Notifications, RequestHandler};
