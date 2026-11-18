@@ -29,8 +29,10 @@ pub struct CallbackSpec {
     /// `permission_request` and `post_tool_use`. Absent: every tool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matcher: Option<Vec<String>>,
-    /// Longest wait for an answer (default 30 000). A late answer is a
-    /// failure, handled by the fail mode.
+    /// Longest wait for an answer. Absent: no limit, as in Python; the run
+    /// waits until the client answers, the run is cancelled or the
+    /// connection ends. A late answer is a failure, handled by the fail
+    /// mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<NonZeroU64>,
     /// What an error or timeout means. Absent: the point's default, `closed`

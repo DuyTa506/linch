@@ -367,7 +367,7 @@ old config for resuming them.
 
 ## Callbacks
 
-A callback is an async function the server asks at one hook point of a run.
+A callback is a function the server asks at one hook point of a run.
 Declare it with `@callback(point, policy_id, policy_version, matcher=None,
 timeout=None, fail_mode=None)` and pass it to `open_agent(callbacks=...)`.
 
@@ -439,7 +439,7 @@ A tool result in a request or an answer is `{"output": {"value",
 | `point` | required | One of the seven points above |
 | `policy_id`, `policy_version` | required | Enter the run contract. Bump the version whenever the behaviour, matcher, timeout or fail mode changes |
 | `matcher` | every tool | Tool-name globs (`*`, `?`), only at the three tool points; a miss never reaches this process |
-| `timeout` | `30` seconds | How long the server waits for an answer |
+| `timeout` | none | How long the server waits for an answer; absent, it waits until the callback answers, the run is cancelled or the connection ends |
 | `fail_mode` | `closed` at `pre_tool_use` and `permission_request`, `open` elsewhere | What an exception, a bad answer or a timeout does: `closed` gives the point's blocking answer, `open` skips the callback. `context_build` and `post_turn` cannot fail closed |
 
 Callbacks at one point run in declaration order. A `pre_tool_use` rewrite

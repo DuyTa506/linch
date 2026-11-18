@@ -94,7 +94,7 @@ def test_a_context_parameter_is_left_out_of_the_schema() -> None:
     assert plain.context_param is None
 
 
-def test_a_tool_needs_a_valid_scope_and_an_async_function() -> None:
+def test_a_tool_needs_a_valid_scope() -> None:
     with pytest.raises(TypeError):
         tool()  # type: ignore[call-arg]  # scope has no default (#99)
     with pytest.raises(ValueError, match="scope"):
@@ -102,11 +102,23 @@ def test_a_tool_needs_a_valid_scope_and_an_async_function() -> None:
     with pytest.raises(ValueError, match="timeout"):
         tool(scope="read", timeout=0)
 
-    def sync(q: str) -> str:
-        return q
 
-    with pytest.raises(TypeError, match="async"):
-        tool(scope="read")(sync)  # type: ignore[arg-type]
+async def test_a_plain_function_is_a_tool_and_a_callback_run_in_a_thread() -> None:
+    import threading
+
+    main = threading.get_ident()
+
+    @tool(scope="read")
+    def sync(q: str) -> str:
+        return f"{q}:{threading.get_ident() == main}"
+
+    @callback("stop", "p", 1)
+    def stop(request: dict[str, object]) -> dict[str, object]:
+        return {"action": "allow", "thread": threading.get_ident() != main}
+
+    assert sync.input_schema["required"] == ["q"]
+    assert await sync.fn(q="a") == "a:False"
+    assert (await stop.fn({}))["thread"] is True
 
 
 def test_an_unsupported_hint_asks_for_an_explicit_schema() -> None:

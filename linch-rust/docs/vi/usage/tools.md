@@ -25,7 +25,7 @@ host tool trước, rồi các tool còn lại.
 
 ## Host tool
 
-Host tool là một hàm bất đồng bộ được gắn decorator `@tool`. Server xác thực input
+Host tool là một hàm được gắn decorator `@tool`. Server xác thực input
 của model theo schema của tool, rồi gọi hàm trong process của bạn với input đó
 dưới dạng keyword argument.
 

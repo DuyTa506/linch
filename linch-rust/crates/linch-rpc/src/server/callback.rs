@@ -28,9 +28,6 @@ use crate::protocol::{
     PreToolUseAnswer, StopAnswer, UserPromptAnswer, WireToolResult, method,
 };
 
-/// Wait for an answer when the declaration sets no `timeout_ms`.
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-
 /// The hook chains holding one [`RpcHook`] per declaration, in order.
 ///
 /// Raises:
@@ -57,9 +54,9 @@ fn register(hooks: &Hooks, spec: CallbackSpec, agent: &str, peer: &Peer) -> Resu
         policy_id: spec.policy_id,
         policy_version: spec.policy_version,
         matcher,
-        timeout: spec
-            .timeout_ms
-            .map_or(DEFAULT_TIMEOUT, |ms| Duration::from_millis(ms.get())),
+        // Absent: no limit, as in Python. The client's answer, `run.cancel`
+        // or the end of the connection end the wait.
+        timeout: spec.timeout_ms.map(|ms| Duration::from_millis(ms.get())),
         fail_mode: spec.fail_mode,
         peer: peer.clone(),
     };
@@ -90,7 +87,7 @@ struct Common {
     policy_id: String,
     policy_version: u32,
     matcher: Option<ToolMatcher>,
-    timeout: Duration,
+    timeout: Option<Duration>,
     fail_mode: Option<FailMode>,
     peer: Peer,
 }
@@ -118,7 +115,7 @@ impl<P: Wire> Hook<P> for RpcHook<P> {
     /// The chain applies it and drops the call on expiry, which sends
     /// `$/cancelRequest`.
     fn timeout(&self) -> Option<Duration> {
-        Some(self.common.timeout)
+        self.common.timeout
     }
 
     fn fail_mode(&self) -> Option<FailMode> {

@@ -332,3 +332,20 @@ async fn turn_point_callbacks_cross_the_connection() {
     assert_eq!(error.code, code::PROMPT_BLOCKED);
     assert_eq!(error.data.unwrap()["reason"], "no prompts today");
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_callback_without_timeout_ms_waits_as_long_as_the_client_takes() {
+    let (mut rpc, log) = client(json!({"permission_request": null}));
+    let approver = json!({"point": "permission_request", "policy_id": "approver",
+                          "policy_version": 1});
+    let extra = json!({"tools": [host_tool("poke", "exec")], "callbacks": [approver]});
+    let turns = vec![tool_turn("call_1", "poke", json!({})), text_turn("OK.")];
+    // Python never times a hook out, so an hour of silence is not a failure.
+    let waited = tokio::time::timeout(
+        std::time::Duration::from_secs(3600),
+        run(&mut rpc, turns, extra),
+    )
+    .await;
+    assert!(waited.is_err(), "the run is still waiting for the approver");
+    assert!(log.hung().iter().all(|token| !token.is_cancelled()));
+}

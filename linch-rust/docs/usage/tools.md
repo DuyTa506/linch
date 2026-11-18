@@ -23,7 +23,7 @@ order: host tools first, then the others.
 
 ## Host tools
 
-A host tool is an async function decorated with `@tool`. The server validates
+A host tool is a function decorated with `@tool`. The server validates
 the model's input against the tool's schema, then calls the function in your
 process with that input as keyword arguments.
 
