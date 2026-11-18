@@ -89,6 +89,13 @@ pub struct WorkerSection {
     /// 7 days.
     #[serde(default)]
     pub history_retention_ms: Option<u64>,
+    /// How long it waits for the jobs in flight after SIGTERM or SIGINT
+    /// before it hands them back (their runs' leases and the jobs are
+    /// released, so another worker takes them at once) and exits; 30000, at
+    /// least 1. Keep the supervisor's termination grace period above it plus
+    /// about 15 s.
+    #[serde(default)]
+    pub drain_timeout_ms: Option<u64>,
     /// Deleting what ended runs and idle sessions leave in the stores; off
     /// when absent. Every worker of the fleet may carry it: one pass runs at
     /// a time.
@@ -345,6 +352,10 @@ pub enum ConfigError {
         /// The field.
         field: &'static str,
     },
+    /// `worker.drain_timeout_ms` is 0, which would hand back every job in
+    /// flight the moment the server stops.
+    #[error("worker.drain_timeout_ms is 0; set at least 1, or leave it out for the default")]
+    ZeroDrainTimeout,
     /// `server_id` is empty, too long or has other characters.
     #[error("server_id must be 1-64 ASCII letters, digits, '.', '_' or '-'")]
     ServerId,
@@ -393,6 +404,9 @@ impl ServerConfig {
         }
         if let Some((field, max)) = config.liveness.oversized_field() {
             return Err(ConfigError::OversizedLiveness { field, max });
+        }
+        if (config.worker.as_ref()).is_some_and(|worker| worker.drain_timeout_ms == Some(0)) {
+            return Err(ConfigError::ZeroDrainTimeout);
         }
         if let Some(id) = &config.server_id {
             let valid = (1..=64).contains(&id.len())

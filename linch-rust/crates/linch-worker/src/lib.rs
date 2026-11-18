@@ -95,7 +95,7 @@ pub use schedule::{
 };
 pub use status::{JobInfo, JobState, MAX_JOBS_LISTED, job, jobs, prune_history};
 pub use timing::Timing;
-pub use worker::{HISTORY_RETENTION, Worker, WorkerConfig};
+pub use worker::{DRAIN_TIMEOUT, HISTORY_RETENTION, Worker, WorkerConfig};
 
 /// Table that records which worker migrations have been applied.
 ///

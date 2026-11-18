@@ -149,6 +149,9 @@ fn worker_config(
     if let Some(keep) = millis(section.history_retention_ms, "history_retention_ms")? {
         config.history_retention = Some(keep);
     }
+    if let Some(drain) = millis(section.drain_timeout_ms, "drain_timeout_ms")? {
+        config.drain_timeout = drain;
+    }
     if let Some(section) = &section.retention {
         config.retention = Some(retention(section)?);
     }
@@ -212,6 +215,23 @@ mod tests {
         let text = r#"{"dsn": {"value": "postgres://x"}}"#;
         let section: WorkerSection = serde_json::from_str(text).unwrap();
         assert_eq!(worker_config(&section, "srv").unwrap().retention, None);
+    }
+
+    #[test]
+    fn the_drain_timeout_is_30_seconds_unless_set_and_zero_is_refused_at_load() {
+        let text = r#"{"dsn": {"value": "postgres://x"}}"#;
+        let section: WorkerSection = serde_json::from_str(text).unwrap();
+        let config = worker_config(&section, "srv").unwrap();
+        assert_eq!(config.drain_timeout, Duration::from_secs(30));
+        let text = r#"{"dsn": {"value": "postgres://x"}, "drain_timeout_ms": 2500}"#;
+        let section: WorkerSection = serde_json::from_str(text).unwrap();
+        let config = worker_config(&section, "srv").unwrap();
+        assert_eq!(config.drain_timeout, Duration::from_millis(2500));
+        let zero = r#"{"tenants": {}, "worker": {"dsn": {"value": "postgres://x"}, "drain_timeout_ms": 0}}"#;
+        let error = crate::ServerConfig::from_json(zero)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("drain_timeout_ms is 0"), "{error}");
     }
 
     #[test]
