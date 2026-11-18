@@ -198,9 +198,21 @@ pub enum StopResponse {
     /// Let the run stop.
     Allow,
     /// Keep the run going. Stops the chain; the remaining hooks see the
-    /// next stop candidate instead.
+    /// next stop candidate instead. Python's `force_continue` at `stop`:
+    /// bounded only by `max_turns`.
     Continue {
-        /// Shown to the model as the reason to keep going.
+        /// Shown to the model, in a system reminder, as the reason to keep
+        /// going.
+        feedback: String,
+    },
+    /// Do not accept this answer yet: the model gets `feedback` and answers
+    /// again. Python's `before_final_answer` `retry`/`force_continue`, and
+    /// bounded like it: honoured once per run call (a resume starts
+    /// afresh). While honoured it stops the chain; once spent it counts as
+    /// [`StopResponse::Allow`], so the remaining hooks still run, and the
+    /// answer stops the run unless one of them says otherwise.
+    Retry {
+        /// Shown to the model, in a system reminder, as what to fix.
         feedback: String,
     },
     /// Use this text as the run's final answer instead; later hooks see it.
@@ -235,6 +247,11 @@ pub enum StopOutcome {
         /// Shown to the model.
         feedback: String,
     },
+    /// A hook asked for another answer, and retries were allowed.
+    Retry {
+        /// Shown to the model.
+        feedback: String,
+    },
     /// A hook blocked the stop, or failed closed: the answer is not
     /// accepted unchecked, and sending the failure back as feedback would
     /// pay for one more answer per turn, so the run ends failed either way.
@@ -259,6 +276,7 @@ impl Point for Stop {
         match response {
             StopResponse::Allow => "allow",
             StopResponse::Continue { .. } => "continue",
+            StopResponse::Retry { .. } => "retry",
             StopResponse::Rewrite { .. } => "rewrite",
             StopResponse::Block { .. } => "block",
         }
@@ -267,29 +285,36 @@ impl Point for Stop {
 
 impl HookChain<Stop> {
     /// Run the hooks in order. A rewrite feeds the next hook. The first
-    /// hook that keeps the run going stops the chain. A block or a closed
-    /// failure stops it too, and fails the run.
+    /// hook that keeps the run going, or asks for another answer, stops the
+    /// chain. A block or a closed failure stops it too, and fails the run.
     pub async fn run(&self, request: StopRequest) -> ChainResult<StopOutcome> {
         let mut records = Vec::new();
-        let outcome = self.run_into(request, &mut records).await;
+        let outcome = self.run_into(request, true, &mut records).await;
         ChainResult { outcome, records }
     }
 
     /// [`Self::run`], pushing each record into `records` as its hook
     /// returns, so a dropped chain keeps the records of the hooks that did.
+    /// Without `retry`, a [`StopResponse::Retry`] counts as an allow: the
+    /// run spent its retries.
     pub(crate) async fn run_into(
         &self,
         mut request: StopRequest,
+        retry: bool,
         records: &mut Vec<HookRecord>,
     ) -> StopOutcome {
         for entry in self.entries().iter() {
             match entry.invoke(&request, records).await {
                 Step::Skip | Step::Answer(StopResponse::Allow) => {}
+                Step::Answer(StopResponse::Retry { .. }) if !retry => {}
                 Step::Answer(StopResponse::Rewrite { text }) => {
                     request.text = text;
                 }
                 Step::Answer(StopResponse::Continue { feedback }) => {
                     return StopOutcome::Continue { feedback };
+                }
+                Step::Answer(StopResponse::Retry { feedback }) => {
+                    return StopOutcome::Retry { feedback };
                 }
                 Step::Answer(StopResponse::Block { reason }) | Step::Closed(reason) => {
                     return StopOutcome::Failed { reason };

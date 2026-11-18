@@ -228,10 +228,12 @@ pub(super) async fn continue_run(
             message,
             stop_reason,
             appended,
+            retry_feedback,
         } => Step::Received {
             message,
             stop_reason,
             appended,
+            retry_feedback,
         },
         Recovery::ToolBatch { decisions, calls } => {
             let Phase::ToolBatch { after_seq, .. } = checkpoint.phase else {

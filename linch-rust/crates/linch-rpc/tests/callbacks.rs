@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use common::*;
 use linch::Event;
-use linch::events::kinds::ResultSubtype;
+use linch::events::kinds::{ResultSubtype, UserEventSubtype};
 use linch_rpc::protocol::{AgentOpened, method};
 use linch_rpc::{ClientError, ErrorObject, code};
 use serde_json::{Value, json};
@@ -517,6 +517,124 @@ async fn after_provider_call_can_block_the_response() {
         !ended.kinds().contains(&"assistant".to_owned()),
         "{:?}",
         ended.kinds()
+    );
+}
+
+/// The texts of the run's `user` events after its prompt: the feedback the
+/// model was sent.
+fn feedback(ended: &Ended) -> Vec<String> {
+    (ended.envelopes.iter())
+        .filter_map(|envelope| match &envelope.event {
+            Event::User(user) if user.subtype != UserEventSubtype::Prompt => {
+                Some(user.message.text())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn final_text(ended: &Ended) -> Option<String> {
+    match ended.last() {
+        Event::Result(result) => result.final_text.clone(),
+        other => panic!("the run ends with a result: {other:?}"),
+    }
+}
+
+/// A client that answers each callback with `answer(point, request)`.
+fn answering(
+    answer: impl Fn(&str, &Value) -> Value + Send + Sync + 'static,
+) -> (Rpc, Arc<Mutex<Vec<String>>>) {
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&asked);
+    let answer = Arc::new(answer);
+    let rpc = Rpc::with_handler(handler(move |_method, params, _cancel| {
+        let (seen, answer) = (Arc::clone(&seen), Arc::clone(&answer));
+        async move {
+            let point = params["point"].as_str().unwrap().to_owned();
+            seen.lock().unwrap().push(point.clone());
+            Ok(answer(&point, &params["request"]))
+        }
+    }));
+    (rpc, asked)
+}
+
+/// `retry` at `after_provider_call` keeps the answer, sends the feedback in
+/// a system reminder and takes another turn; the retried answer never
+/// reaches `stop`.
+#[tokio::test]
+async fn after_provider_call_retry_takes_another_turn() {
+    let (mut rpc, asked) = answering(|point, request| match point {
+        "after_provider_call"
+            if request["assembly"]["message"]["content"][0]["text"] == "First." =>
+        {
+            json!({"action": "retry", "feedback": "cite a source"})
+        }
+        "after_provider_call" => json!({"action": "continue"}),
+        _ => json!({"action": "allow"}),
+    });
+    let extra = json!({"callbacks": [
+        {"point": "after_provider_call", "policy_id": "judge", "policy_version": 1},
+        {"point": "stop", "policy_id": "done", "policy_version": 1},
+    ]});
+    let turns = vec![text_turn("First."), text_turn("Second.")];
+    let ended = run(&mut rpc, turns, extra).await;
+    assert!(finished(&ended));
+    assert_eq!(final_text(&ended).as_deref(), Some("Second."));
+    assert_eq!(
+        feedback(&ended),
+        ["<system-reminder>\ncite a source\n</system-reminder>"]
+    );
+    assert_eq!(
+        *asked.lock().unwrap(),
+        ["after_provider_call", "after_provider_call", "stop"]
+    );
+}
+
+/// `retry` at `stop` is Python's `before_final_answer` retry: honoured once
+/// per run call, then the answer stops the run.
+#[tokio::test]
+async fn a_stop_retry_is_honoured_once() {
+    let (mut rpc, asked) = answering(|_, _| json!({"action": "retry", "feedback": "be precise"}));
+    let extra = json!({"callbacks": [
+        {"point": "stop", "policy_id": "judge", "policy_version": 1},
+    ]});
+    let turns = vec![
+        text_turn("First."),
+        text_turn("Second."),
+        text_turn("Third."),
+    ];
+    let ended = run(&mut rpc, turns, extra).await;
+    assert!(finished(&ended));
+    assert_eq!(final_text(&ended).as_deref(), Some("Second."));
+    assert_eq!(
+        feedback(&ended),
+        ["<system-reminder>\nbe precise\n</system-reminder>"]
+    );
+    assert_eq!(*asked.lock().unwrap(), ["stop", "stop"]);
+}
+
+/// `force_continue` at `stop` keeps the run going as `continue` does,
+/// bounded only by `max_turns`.
+#[tokio::test]
+async fn a_stop_force_continue_keeps_the_run_going() {
+    let (mut rpc, _) = answering(|_, request| match request["text"].as_str() {
+        Some("Second.") => json!({"action": "allow"}),
+        _ => json!({"action": "force_continue", "feedback": "keep going"}),
+    });
+    let extra = json!({"callbacks": [
+        {"point": "stop", "policy_id": "more", "policy_version": 1},
+    ]});
+    let ended = run(
+        &mut rpc,
+        vec![text_turn("First."), text_turn("Second.")],
+        extra,
+    )
+    .await;
+    assert!(finished(&ended));
+    assert_eq!(final_text(&ended).as_deref(), Some("Second."));
+    assert_eq!(
+        feedback(&ended),
+        ["<system-reminder>\nkeep going\n</system-reminder>"]
     );
 }
 

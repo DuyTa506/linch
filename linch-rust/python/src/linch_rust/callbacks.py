@@ -85,6 +85,15 @@ def callback(
     loop. An
     exception, a bad answer or a timeout is handled by the fail mode.
 
+    Python Linch's `retry` and `force_continue` are answers at two points.
+    At `after_provider_call`, `{"action": "retry", "feedback": "..."}` (or
+    `"force_continue"`) keeps the response, runs none of its tool calls and
+    sends the feedback before another turn. At `stop`, `"force_continue"`
+    is `"continue"` (bounded only by `max_turns`), and `"retry"` is
+    `before_final_answer`'s retry, honoured once per run call; a ported
+    `before_final_answer` hook that answered `force_continue` answers
+    `"retry"` here. Every other point refuses both as a bad answer.
+
     Args:
         point: The hook point it intercepts.
         policy_id: Stable id of the policy; with the version it enters the

@@ -28,8 +28,7 @@ package `linch` has its own [changelog](../CHANGELOG.md).
   ending the run before anything is staged. Defaults open, but like
   `before_provider_call` its blocking answer can fail closed. Available to
   `@callback` in `linch_rust` and to `Hook<AfterProviderCall>` in
-  `linch-core`. Python's `retry`/`force_continue` actions at this point are
-  not ported: Rust has only `Continue`/`Rewrite`/`Block`.
+  `linch-core`.
 - `stop` can now rewrite the run's final-answer text, or block the stop
   outright. This is Python's `before_final_answer` hook point, folded into
   `stop` rather than added as a separate point: the rewrite replaces only the
@@ -45,8 +44,14 @@ package `linch` has its own [changelog](../CHANGELOG.md).
   and never for a stream-only delta or tool-progress event. Answers `()`
   (`{}` on the wire) and can never fail closed. Available to `@callback` in
   `linch_rust` and to `Hook<EventEmit>` in `linch-core`.
+- `after_provider_call` can retry, as Python's `retry`/`force_continue` there: the response is kept and logged, none of its tool calls run, and the feedback goes to the model (in a `<system-reminder>`, or as the first call's error result) before another turn; `{"action": "retry"|"force_continue", "feedback"}` on the wire, `AfterProviderCallResponse::Retry` in `linch-core`.
+- `stop` can retry the final answer once per run call, as Python's `before_final_answer` `retry` (`_MAX_FINAL_ANSWER_REENTRIES`); a spent retry counts as `allow`. `{"action": "retry", "feedback"}` on the wire, `StopResponse::Retry` in `linch-core`.
+- `stop` accepts `{"action": "force_continue", "feedback"}`, Python's name for its `continue`.
+- `Phase::AssistantReceived` records an `after_provider_call` retry in an optional `retry_feedback`, durable with the paid response; checkpoints without one are unchanged, but a binary older than this one cannot resume a run whose checkpoint has one.
 
 ### Changed
+
+- `stop` feedback (`continue`) reaches the model wrapped in `<system-reminder>`, as Python's does, instead of as bare text.
 
 - An intercept callback without `timeout_ms` (Python `timeout`) no longer times out
   after 30 seconds: it waits until the client answers, the run is cancelled or the

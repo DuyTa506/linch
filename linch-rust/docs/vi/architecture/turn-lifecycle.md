@@ -24,11 +24,14 @@ Linch bản Python có cùng vòng lặp ([vòng đời của lượt](../../../
 - Các hook point là hai mươi hai point trong [kernel](./kernel.md#chuỗi-hook), trong đó
   mười ba point chỉ quan sát. `before_provider_call` có thể viết lại hoặc block
   request sắp được gửi, và `after_provider_call` có thể viết lại hoặc block response
-  mà một lời gọi vừa dựng xong, trước khi nó được stage; hành động `retry`/
-  `force_continue` của Python tại điểm đó không được port (`hooks.rs`).
-  `before_final_answer` của Python không phải một point riêng: `stop` có thể viết
-  lại văn bản trả lời cuối cùng của run (không phải tin nhắn assistant, đã được nối
-  vào từ trước khi `stop` chạy) hoặc block việc dừng lại. `event_emit`, một trong các
+  mà một lời gọi vừa dựng xong, trước khi nó được stage, hoặc chấp nhận nó rồi chạy
+  thêm một lượt thay vì làm theo nó (`retry` và `force_continue` của Python tại
+  đó). `before_final_answer` của Python không phải một point riêng: `stop` có thể
+  viết lại văn bản trả lời cuối cùng của run (không phải tin nhắn assistant, đã
+  được nối vào từ trước khi `stop` chạy), block việc dừng lại, hoặc đòi trả lời lại
+  một lần cho mỗi lần gọi run (`retry` của `before_final_answer` trong Python);
+  `continue` của nó là `force_continue` của stop trong Python. `force_continue` của
+  Python tại `before_provider_call` không được port: point đó từ chối nó. `event_emit`, một trong các
   point chỉ quan sát, chạy một lần cho mỗi event sắp được gửi tới bên gọi, nhưng chỉ
   với event vừa được stream vừa được ghi bền — không bao giờ cho record của chính một
   hook, cũng không cho một delta chỉ stream.
@@ -61,7 +64,9 @@ Linch bản Python có cùng vòng lặp ([vòng đời của lượt](../../../
    trạng thái failed và không gì được stage (`hooks/assembly.rs`, `runner/hooks.rs`).
    Khi thành công, run sau đó stage các event `Assistant` và `Usage` rồi lưu
    `AssistantReceived`, thứ được ghi write-through cùng receipt (`turn.rs:353-380`,
-   `journal.rs:192-193`). Bên gọi chỉ thấy các event đó sau lần commit này
+   `journal.rs:192-193`). Một lần retry của hook đi cùng lần ghi đó dưới dạng
+   `retry_feedback` của checkpoint, nên response đã trả tiền và việc phải làm với
+   nó bền vững cùng nhau. Bên gọi chỉ thấy các event đó sau lần commit này
    (`journal.rs:25-28`).
 7. **Nối response vào session** (`turn.rs:395-397`).
 8. **Rẽ nhánh theo các lời gọi tool** của response (bên dưới).
@@ -91,17 +96,30 @@ tương tự (`turn.rs:322-333`, `runner/end.rs:76-90, 130-139`).
 
 `received` thu thập các block `tool_use` của response (`turn.rs:388-392`).
 
+- **Bị `after_provider_call` retry**, response được nối vào nhưng không nhánh nào
+  bên dưới chạy: không lời gọi tool nào của nó được lập kế hoạch, và `stop` không
+  được hỏi. Message user tiếp theo là phản hồi của hook, dựng như
+  `_primary_control_message` của Python: khi không có lời gọi tool, phản hồi nằm
+  trong một `<system-reminder>`; khi có, mỗi lời gọi nhận một kết quả lỗi, lời gọi
+  đầu tiên mang phản hồi và các lời gọi còn lại ghi "Tool not executed; revise and
+  resubmit your final answer.", để lịch sử provider vẫn ghép cặp
+  (`runner/hooks.rs`, `retry_message`). Nó được stage như một `notification` và
+  giữ dưới dạng `ToolResults`, rồi lượt kế tiếp bắt đầu. Chỉ `max_turns` giới hạn
+  các lần retry này, như trong Python.
 - **Có lời gọi tool**, run chuyển sang `Step::Batch` (`turn.rs:416-421`).
   Sau đó `Step::Results` nối các kết quả và bắt đầu lượt kế tiếp. `stop_reason` của
   provider không quyết định điều này; các block mới quyết định.
 - **Không có**, trước hết run chờ mọi subagent chạy nền mà nó có, việc này có thể thêm
   một thông báo và một lượt nữa (`turn.rs:433-435`, `runner/inbox.rs:137-168`). Sau đó
-  chuỗi hook `stop` chạy: một hook có thể giữ run tiếp tục bằng một phản hồi, được nối vào
-  như một message của user và bắt đầu một lượt khác, hoặc viết lại văn bản trả lời cuối
-  cùng (giá trị mà `post_turn` và `Result` cuối cùng sẽ thấy), hoặc block việc dừng lại,
-  khiến run thất bại (`turn.rs:436-440`, `runner/hooks.rs`). Khi mọi hook cho phép dừng,
-  `post_turn` chạy và run kết thúc với trạng thái `completed` cùng văn bản đó
-  (`turn.rs:441-448`).
+  chuỗi hook `stop` chạy: một hook có thể giữ run tiếp tục bằng một phản hồi
+  (`continue`, chỉ bị giới hạn bởi `max_turns`), đòi một câu trả lời khác (`retry`,
+  được chấp nhận một lần cho mỗi lần gọi run, sau đó được tính như allow và các hook
+  phía sau quyết định), viết lại văn bản trả lời cuối cùng (giá trị mà `post_turn` và
+  `Result` cuối cùng sẽ thấy), hoặc block việc dừng lại, khiến run thất bại
+  (`turn.rs:436-440`, `runner/hooks.rs`). Phản hồi của cả hai đến model như của
+  Python, trong một message user `<system-reminder>` được stage như một
+  `notification`, và một lượt khác bắt đầu. Khi mọi hook cho phép dừng, `post_turn`
+  chạy và run kết thúc với trạng thái `completed` cùng văn bản đó (`turn.rs:441-448`).
 
 `max_turns` là điều kiện dừng của vòng lặp: lời gọi sẽ vượt quá giới hạn này không được
 thực hiện và run thất bại với `TurnLimitError` (`runner/end.rs:93-108`).
@@ -261,7 +279,7 @@ Những gì `reconcile` làm với từng phase (`journal/reconcile.rs:170-231`)
 |---|---|---|
 | `Started` | `Started` | Nối prompt trừ khi nó đã có trong session, rồi đến lượt |
 | `ProviderPending` | `Redispatch`, hoặc `Received` với một receipt đã được chấp nhận | Một receipt bị hủy cho delivery không có receipt, rồi attempt + 1; hoặc response bền vững |
-| `AssistantReceived` | `Received` | Nối response trừ khi nó đã có trong session, rồi rẽ nhánh theo các lời gọi tool của nó |
+| `AssistantReceived` | `Received` | Nối response trừ khi nó đã có trong session, rồi rẽ nhánh theo các lời gọi tool của nó; khi có `retry_feedback`, gửi phản hồi đó thay vào, không hỏi lại hook |
 | `ToolBatch` | `ToolBatch` | Với mỗi lời gọi: kết quả bền vững của nó, một placeholder, hoặc một lần plan lại |
 | `AwaitingApproval` | `AwaitingApproval` | Plan lại với các quyết định đã ghi; suspend lần nữa nếu còn lời gọi cần câu trả lời |
 | `ToolResults` | `ToolResults` | Nối message trừ khi nó đã có trong session, rồi đến lượt kế tiếp |

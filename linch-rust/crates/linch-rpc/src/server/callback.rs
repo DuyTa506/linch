@@ -263,7 +263,10 @@ impl Wire for Stop {
     fn decode(value: JsonValue) -> Result<StopResponse, serde_json::Error> {
         Ok(match answer(value)? {
             StopAnswer::Allow {} => StopResponse::Allow,
-            StopAnswer::Continue { feedback } => StopResponse::Continue { feedback },
+            StopAnswer::Continue { feedback } | StopAnswer::ForceContinue { feedback } => {
+                StopResponse::Continue { feedback }
+            }
+            StopAnswer::Retry { feedback } => StopResponse::Retry { feedback },
             StopAnswer::Rewrite { text } => StopResponse::Rewrite { text },
             StopAnswer::Block { reason } => StopResponse::Block { reason },
         })
@@ -300,6 +303,10 @@ impl Wire for AfterProviderCall {
             AfterProviderCallAnswer::Continue {} => AfterProviderCallResponse::Continue,
             AfterProviderCallAnswer::Rewrite { assembly } => {
                 AfterProviderCallResponse::Rewrite { assembly }
+            }
+            AfterProviderCallAnswer::Retry { feedback }
+            | AfterProviderCallAnswer::ForceContinue { feedback } => {
+                AfterProviderCallResponse::Retry { feedback }
             }
             AfterProviderCallAnswer::Block { reason } => {
                 AfterProviderCallResponse::Block { reason }

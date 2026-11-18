@@ -168,6 +168,7 @@ async fn save_writes_through_or_holds_by_phase() {
             Phase::AssistantReceived {
                 message: message.clone(),
                 stop_reason: StopReason::EndTurn,
+                retry_feedback: None,
             },
             true,
         ),

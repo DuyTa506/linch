@@ -138,14 +138,17 @@ fn a_pending_session_append_is_checked_against_the_log() {
     type Expect = fn(bool) -> Recovery;
     let phases: [(Phase, Expect); 2] = [
         (
+            // A hook's retry is carried with the response.
             Phase::AssistantReceived {
                 message: pending.clone(),
                 stop_reason: StopReason::EndTurn,
+                retry_feedback: Some("again".into()),
             },
             |appended| Recovery::Received {
                 message: Message::user_text("pending"),
                 stop_reason: StopReason::EndTurn,
                 appended,
+                retry_feedback: Some("again".into()),
             },
         ),
         (
@@ -219,6 +222,7 @@ fn provider_pending_retries_or_reuses_the_receipt() {
             message: Message::assistant_text("answer"),
             stop_reason: StopReason::EndTurn,
             appended,
+            retry_feedback: None,
         })
     };
     let missing = Err(ReconcileError::MissingDelivery { turn: 2 });

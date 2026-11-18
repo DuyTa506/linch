@@ -434,8 +434,8 @@ Hàm nhận dict request và trả về câu trả lời của điểm đó. M�
 | `user_prompt_submit` | `content` (các content block) | `{"action": "continue"}`, `{"action": "rewrite", "content"}`, `{"action": "block", "reason"}` |
 | `context_build` | `messages` (cuộc hội thoại mà model sẽ thấy) | `{"blocks"?: [{"text"}], "metadata"?: {...}}`; `metadata` dành cho observer và eval: nó nằm trên `ContextBuildEvent` của lời gọi, key của callback đến sau thắng, và model không bao giờ thấy nó |
 | `before_provider_call` | `turn`, `request` (toàn bộ provider request sắp được gửi) | `{"action": "continue"}`, `{"action": "rewrite", "request"}`, `{"action": "block", "reason"}`; một rewrite là thứ được gửi đi và được `context_build` ghi lại, và một block kết thúc run trước khi provider được gọi |
-| `after_provider_call` | `turn`, `assembly` (`message`, `stop_reason`, `usage?`, `model`: thứ lời gọi provider vừa dựng xong) | `{"action": "continue"}`, `{"action": "rewrite", "assembly"}`, `{"action": "block", "reason"}`; một rewrite là thứ được stage và nối vào session, và một block kết thúc run trước khi response được stage. Hành động `retry`/`force_continue` của Python tại đây không có sẵn: dùng `{"action": "continue"}` để chấp nhận response không đổi |
-| `stop` | `text` | `{"action": "allow"}`, `{"action": "continue", "feedback"}` |
+| `after_provider_call` | `turn`, `assembly` (`message`, `stop_reason`, `usage?`, `model`: thứ lời gọi provider vừa dựng xong) | `{"action": "continue"}`, `{"action": "rewrite", "assembly"}`, `{"action": "retry", "feedback"}`, `{"action": "block", "reason"}`; một rewrite là thứ được stage và nối vào session, và một block kết thúc run trước khi response được stage. Một retry (`"force_continue"` cũng vậy, như trong Python) giữ response, không chạy lời gọi tool nào của nó, và gửi `feedback` cho model trước một lượt khác: trong một `<system-reminder>`, hoặc, khi response có gọi tool, dưới dạng kết quả lỗi của lời gọi đầu tiên (các lời gọi còn lại ghi "Tool not executed; revise and resubmit your final answer."). Chỉ `max_turns` giới hạn nó |
+| `stop` | `text` (văn bản trả lời cuối cùng cho đến lúc này, của model hoặc của một rewrite trước đó) | `{"action": "allow"}`, `{"action": "continue", "feedback"}`, `{"action": "retry", "feedback"}`, `{"action": "rewrite", "text"}`, `{"action": "block", "reason"}`; một rewrite thay văn bản trả lời cuối cùng của run (không phải tin nhắn assistant, đã được nối vào session trước khi `stop` chạy), và một block kết thúc run với trạng thái failed. Đây cũng là nơi `before_final_answer` của Python nằm: không có point riêng. `continue` (hoặc `"force_continue"`, tên Python dùng cho nó ở `stop`) gửi `feedback` trong một `<system-reminder>` và chạy thêm một lượt, chỉ bị giới hạn bởi `max_turns`. `retry` là retry của `before_final_answer` trong Python: được chấp nhận một lần cho mỗi lần gọi run, sau đó được tính như `allow` và các callback phía sau quyết định. Hãy khai báo callback retry trước các callback khác, vì Python chạy `before_final_answer` trước `stop`. Một hook `before_final_answer` của Python trả lời `force_continue` thì ở đây phải trả lời `retry`: `force_continue` ở `stop` là `continue` không giới hạn |
 | `post_turn` | `turn`, `stop_reason` | `{}` |
 
 Kết quả tool trong một request hoặc một câu trả lời có dạng `{"output":
@@ -484,7 +484,23 @@ tool. Ở `permission_request`, một deny dừng chuỗi còn allow thì không
 đến sau thắng; nếu không có câu trả lời, lời gọi hỏi host như bình thường
 ([phê duyệt](./tools.md#phê-duyệt)). Một `user_prompt_submit` bị chặn sẽ kết thúc
 run bằng `PromptBlocked` trước khi bất kỳ thứ gì được ghi. Mỗi lời gọi xuất hiện
-dưới dạng một [event](./events.md) `hook` chỉ có trong stream.
+dưới dạng một [event](./events.md) `hook` chỉ có trong stream. `retry` và
+`force_continue` của Python chỉ là câu trả lời hợp lệ ở `after_provider_call` và
+`stop`; mọi point khác từ chối chúng như một câu trả lời sai, được xử lý theo fail
+mode.
+
+Phản hồi của một `retry`, `continue` hoặc `force_continue` được ghi vào session như
+message user kế tiếp, và đến dưới dạng event `user` với subtype `notification`.
+Python đánh dấu cùng message đó là `prompt`; ở đây `prompt` vẫn là prompt riêng của
+run, điều mà observer OpenTelemetry dựa vào.
+
+```python
+@callback("stop", "cite-sources", 1)
+async def cite(request: dict[str, Any]) -> dict[str, Any]:
+    if "http" not in request["text"]:
+        return {"action": "retry", "feedback": "Cite a source for each claim."}
+    return {"action": "allow"}
+```
 
 ## Session
 

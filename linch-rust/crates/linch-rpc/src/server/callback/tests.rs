@@ -100,6 +100,69 @@ fn after_provider_call_carries_the_assembly_and_reads_each_action() {
     assert!(AfterProviderCall::decode(json!({"action": "continue", "x": 1})).is_err());
 }
 
+/// Python treats `retry` and `force_continue` alike at
+/// `after_provider_call`: accept the response, send the feedback, take
+/// another turn.
+#[test]
+fn after_provider_call_reads_retry_and_force_continue_alike() {
+    for action in ["retry", "force_continue"] {
+        let answer = json!({"action": action, "feedback": "cite a source"});
+        assert_eq!(
+            AfterProviderCall::decode(answer).unwrap(),
+            AfterProviderCallResponse::Retry {
+                feedback: "cite a source".into()
+            },
+            "{action}"
+        );
+        assert!(
+            AfterProviderCall::decode(json!({ "action": action })).is_err(),
+            "{action} needs its feedback"
+        );
+    }
+}
+
+/// At `stop`, `force_continue` is Python's stop `force_continue`, which
+/// `continue` already is; `retry` is Python's `before_final_answer` retry,
+/// honoured once per run call.
+#[test]
+fn stop_reads_retry_and_force_continue() {
+    let retry = json!({"action": "retry", "feedback": "be precise"});
+    assert_eq!(
+        Stop::decode(retry).unwrap(),
+        StopResponse::Retry {
+            feedback: "be precise".into()
+        }
+    );
+    let more = json!({"action": "force_continue", "feedback": "keep going"});
+    assert_eq!(
+        Stop::decode(more).unwrap(),
+        StopResponse::Continue {
+            feedback: "keep going".into()
+        }
+    );
+}
+
+/// Every point that does not honour `retry` or `force_continue` refuses
+/// them, so a callback written for Python fails loudly instead of being
+/// read as something else.
+#[test]
+fn points_that_do_not_honour_retry_refuse_it() {
+    for action in ["retry", "force_continue"] {
+        let answer = json!({"action": action, "feedback": "again"});
+        assert!(PreToolUse::decode(answer.clone()).is_err(), "{action}");
+        assert!(PostToolUse::decode(answer.clone()).is_err(), "{action}");
+        assert!(
+            UserPromptSubmit::decode(answer.clone()).is_err(),
+            "{action}"
+        );
+        assert!(
+            BeforeProviderCall::decode(answer.clone()).is_err(),
+            "{action}"
+        );
+        assert!(PermissionRequest::decode(answer).is_err(), "{action}");
+    }
+}
+
 #[test]
 fn user_prompt_submit_carries_content_and_reads_each_action() {
     let (session_id, run_id) = ids();

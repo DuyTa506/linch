@@ -152,6 +152,17 @@ pub enum AfterProviderCallAnswer {
         /// The new response.
         assembly: Box<AssistantAssembly>,
     },
+    /// Accept the response but take another turn instead of acting on it:
+    /// none of its tool calls run, and `feedback` goes to the model first.
+    Retry {
+        /// What the model is told before it answers again.
+        feedback: String,
+    },
+    /// The same as `retry`, under Python's other name for it here.
+    ForceContinue {
+        /// What the model is told before it answers again.
+        feedback: String,
+    },
     /// Do not accept the response; end the run with this reason.
     Block {
         /// Why the response was blocked.
@@ -178,9 +189,21 @@ pub struct ContextBuildAnswer {
 pub enum StopAnswer {
     /// Let the run stop.
     Allow {},
-    /// Keep the run going; `feedback` is shown to the model.
+    /// Keep the run going; `feedback` is shown to the model. Bounded only
+    /// by `max_turns`.
     Continue {
         /// Why to keep going.
+        feedback: String,
+    },
+    /// The same as `continue`, under Python's name for it at `stop`.
+    ForceContinue {
+        /// Why to keep going.
+        feedback: String,
+    },
+    /// Ask for another answer, as Python's `before_final_answer` `retry`:
+    /// honoured once per run call, after which it counts as `allow`.
+    Retry {
+        /// What to fix.
         feedback: String,
     },
     /// Use this text as the run's final answer instead; later callbacks

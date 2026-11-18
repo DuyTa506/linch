@@ -59,6 +59,7 @@ async fn tool_turn(
     let phase = Phase::AssistantReceived {
         message: message.clone(),
         stop_reason: StopReason::ToolUse,
+        retry_feedback: None,
     };
     journal.save(checkpoint(0, 1, phase)).await?;
     journal.flush_checkpoint().await?;

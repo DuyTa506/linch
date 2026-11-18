@@ -285,8 +285,17 @@
 //! | `post_tool_use` | `tool_use_id, tool_name, input, result` | `{"action": "continue"}`, `{"action": "replace", "result"}` |
 //! | `user_prompt_submit` | `content` (content blocks) | `{"action": "continue"}`, `{"action": "rewrite", "content"}`, `{"action": "block", "reason"}` |
 //! | `context_build` | `messages` (the provider view) | `{"blocks"?: [{"text"}], "metadata"?: {..}}`; `metadata` lands on the call's `context_build` event, a later callback's key winning |
-//! | `stop` | `text` | `{"action": "allow"}`, `{"action": "continue", "feedback"}` |
+//! | `before_provider_call` | `turn, request` (the provider request about to be sent) | `{"action": "continue"}`, `{"action": "rewrite", "request"}`, `{"action": "block", "reason"}` |
+//! | `after_provider_call` | `turn, assembly` (the response just assembled) | `{"action": "continue"}`, `{"action": "rewrite", "assembly"}`, `{"action": "retry", "feedback"}` (or `"force_continue"`), `{"action": "block", "reason"}` |
+//! | `stop` | `text` | `{"action": "allow"}`, `{"action": "continue", "feedback"}` (or `"force_continue"`), `{"action": "retry", "feedback"}`, `{"action": "rewrite", "text"}`, `{"action": "block", "reason"}` |
 //! | `post_turn` | `turn, stop_reason` | `{}` |
+//!
+//! An `after_provider_call` `retry` keeps the response, runs none of its
+//! tool calls and sends `feedback` to the model before another turn. At
+//! `stop`, `continue` is bounded only by `max_turns`, and `retry` (Python's
+//! `before_final_answer` retry) is honoured once per run call, after which
+//! it counts as `allow`. Every other point refuses `retry` and
+//! `force_continue`.
 //!
 //! A `pre_tool_use` rewrite feeds the next callback and is validated
 //! against the tool's schema again; a block or resolve stops the chain,

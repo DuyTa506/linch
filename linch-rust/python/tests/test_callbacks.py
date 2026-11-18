@@ -5,15 +5,18 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from scripted import config, text_turn, tool_turn
+from scripted import MODEL, config, text_turn, tool_turn
 
 from linch_rust import (
     ContextBuildEvent,
+    Envelope,
     HookEvent,
     PromptBlocked,
     ResultEvent,
     Server,
     ToolCallEndEvent,
+    ToolCallStartEvent,
+    UserEvent,
     callback,
     tool,
 )
@@ -79,3 +82,136 @@ async def test_a_user_prompt_submit_block_raises_prompt_blocked() -> None:
             await run.result()
 
     assert raised.value.reason == "mentions a secret"
+
+
+def _feedback(envelopes: list[Envelope]) -> list[dict[str, Any]]:
+    """The messages sent back to the model after the prompt."""
+    return [
+        e.event.message
+        for e in envelopes
+        if isinstance(e.event, UserEvent) and e.event.subtype != "prompt"
+    ]
+
+
+def _verdicts(envelopes: list[Envelope], point: str) -> list[str]:
+    return [
+        e.event.outcome["verdict"]
+        for e in envelopes
+        if isinstance(e.event, HookEvent) and e.event.point == point
+    ]
+
+
+def _reminder(text: str) -> dict[str, Any]:
+    body = f"<system-reminder>\n{text}\n</system-reminder>"
+    return {"role": "user", "content": [{"type": "text", "text": body}]}
+
+
+async def test_an_after_provider_call_retry_answers_the_tool_calls_and_takes_another_turn() -> None:
+    ran: list[str] = []
+
+    @tool(scope="read")
+    async def lookup(q: str) -> str:
+        ran.append(q)
+        return "found"
+
+    @callback("after_provider_call", "no-lookups", 1)
+    async def judge(request: dict[str, Any]) -> dict[str, Any]:
+        content = request["assembly"]["message"]["content"]
+        if any(block["type"] == "tool_use" for block in content):
+            return {"action": "retry", "feedback": "answer from what you know"}
+        return {"action": "continue"}
+
+    turns = [tool_turn("call_1", "lookup", {"q": "x"}), text_turn("From memory.")]
+    async with Server() as server:
+        agent = await server.open_agent(config(turns), tools=[lookup], callbacks=[judge])
+        run = await agent.run("s1", "Look up x")
+        envelopes = [e async for e in run]
+
+    assert ran == []
+    assert not any(isinstance(e.event, ToolCallStartEvent) for e in envelopes)
+    [sent] = _feedback(envelopes)
+    [result] = sent["content"]
+    assert result["type"] == "tool_result" and result["tool_use_id"] == "call_1"
+    assert result["is_error"] and "answer from what you know" in str(result["content"])
+    assert _verdicts(envelopes, "after_provider_call") == ["retry", "continue"]
+    final = envelopes[-1].event
+    assert isinstance(final, ResultEvent) and final.final_text == "From memory."
+
+
+async def test_force_continue_at_after_provider_call_is_a_retry() -> None:
+    @callback("after_provider_call", "cite", 1)
+    async def judge(request: dict[str, Any]) -> dict[str, Any]:
+        if request["assembly"]["message"]["content"][0]["text"] == "first":
+            return {"action": "force_continue", "feedback": "cite a source"}
+        return {"action": "continue"}
+
+    async with Server() as server:
+        turns = [text_turn("first"), text_turn("second")]
+        agent = await server.open_agent(config(turns), callbacks=[judge])
+        run = await agent.run("s1", "go")
+        envelopes = [e async for e in run]
+
+    assert _feedback(envelopes) == [_reminder("cite a source")]
+    final = envelopes[-1].event
+    assert isinstance(final, ResultEvent) and final.final_text == "second"
+
+
+async def test_a_stop_retry_is_honoured_once_per_run() -> None:
+    asked: list[str] = []
+
+    @callback("stop", "judge", 1)
+    def judge(request: dict[str, Any]) -> dict[str, Any]:
+        asked.append(request["text"])
+        return {"action": "retry", "feedback": "be precise"}
+
+    turns = [text_turn("first"), text_turn("second"), text_turn("third")]
+    async with Server() as server:
+        agent = await server.open_agent(config(turns), callbacks=[judge])
+        run = await agent.run("s1", "go")
+        envelopes = [e async for e in run]
+
+    assert asked == ["first", "second"]
+    assert _feedback(envelopes) == [_reminder("be precise")]
+    final = envelopes[-1].event
+    assert isinstance(final, ResultEvent)
+    assert final.subtype == "success" and final.final_text == "second"
+
+
+async def test_a_stop_force_continue_keeps_the_run_going_until_max_turns() -> None:
+    @callback("stop", "more", 1)
+    async def more(request: dict[str, Any]) -> dict[str, Any]:
+        return {"action": "force_continue", "feedback": "keep going"}
+
+    turns = [text_turn("first"), text_turn("second"), text_turn("third")]
+    async with Server() as server:
+        limited = config(turns, spec={"model": MODEL, "max_turns": 2})
+        agent = await server.open_agent(limited, callbacks=[more])
+        run = await agent.run("s1", "go")
+        envelopes = [e async for e in run]
+
+    assert _verdicts(envelopes, "stop") == ["continue", "continue"]
+    assert _feedback(envelopes) == [_reminder("keep going")] * 2
+    final = envelopes[-1].event
+    assert isinstance(final, ResultEvent) and final.subtype == "error"
+
+
+async def test_points_that_do_not_honour_retry_refuse_it() -> None:
+    @callback("pre_tool_use", "retry-here", 1, fail_mode="closed")
+    async def guard(request: dict[str, Any]) -> dict[str, Any]:
+        return {"action": "retry", "feedback": "again"}
+
+    @tool(scope="read")
+    async def lookup(q: str) -> str:
+        return "found"
+
+    turns = [tool_turn("call_1", "lookup", {"q": "x"}), text_turn("ok")]
+    async with Server() as server:
+        agent = await server.open_agent(config(turns), tools=[lookup], callbacks=[guard])
+        run = await agent.run("s1", "Look up x")
+        envelopes = [e async for e in run]
+
+    [hook] = [e.event for e in envelopes if isinstance(e.event, HookEvent)]
+    assert hook.outcome["status"] == "failed"
+    assert "malformed hook answer" in hook.outcome["error"]
+    [end] = [e.event for e in envelopes if isinstance(e.event, ToolCallEndEvent)]
+    assert end.is_error

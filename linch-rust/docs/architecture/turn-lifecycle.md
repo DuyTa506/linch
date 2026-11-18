@@ -23,11 +23,15 @@ What differs in Rust:
 - Hook points are the twenty-two in the [kernel](./kernel.md#hook-chains),
   thirteen of which only observe. `before_provider_call` can rewrite or
   block the request about to be sent, and `after_provider_call` can rewrite
-  or block the response a call just assembled, before it is staged; Python's
-  `retry`/`force_continue` actions at that point are not ported (`hooks.rs`).
-  Python's `before_final_answer` is not a separate point: `stop` can rewrite
-  the run's final-answer text (not the assistant message, already appended
-  by the time `stop` runs) or block the stop outright. `event_emit`, one of
+  or block the response a call just assembled, before it is staged, or
+  accept it and take another turn instead of acting on it (Python's `retry`
+  and `force_continue` there). Python's `before_final_answer` is not a
+  separate point: `stop` can rewrite the run's final-answer text (not the
+  assistant message, already appended by the time `stop` runs), block the
+  stop outright, or retry the answer once per run call (Python's
+  `before_final_answer` `retry`); its `continue` is Python's stop
+  `force_continue`. Python's `force_continue` at `before_provider_call`
+  is not ported: that point refuses it. `event_emit`, one of
   the observe-only points, fires once per event about to be delivered to the
   caller, but only for an event that is both streamed and durably logged —
   never for a hook's own record or a stream-only delta.
@@ -61,7 +65,9 @@ What differs in Rust:
    block ends the run as failed and nothing is staged (`hooks/assembly.rs`,
    `runner/hooks.rs`). On success the run then stages the `Assistant` and
    `Usage` events and saves `AssistantReceived`, which writes through with
-   the receipt (`turn.rs:353-380`, `journal.rs:192-193`). The caller sees
+   the receipt (`turn.rs:353-380`, `journal.rs:192-193`). A hook's retry
+   rides that same write as the checkpoint's `retry_feedback`, so the paid
+   response and what to do with it are durable together. The caller sees
    those events only after this commit (`journal.rs:25-28`).
 7. **Append the response to the session** (`turn.rs:395-397`).
 8. **Branch on the tool calls** of the response (below).
@@ -92,18 +98,31 @@ run ends the same way (`turn.rs:322-333`, `runner/end.rs:76-90, 130-139`).
 
 `received` collects the `tool_use` blocks of the response (`turn.rs:388-392`).
 
+- **Retried by `after_provider_call`**, the response is appended but neither
+  of the branches below runs: none of its tool calls is planned, and `stop`
+  is not asked. The next user message is the hook's feedback, built as
+  Python's `_primary_control_message`: without tool calls, the feedback in a
+  `<system-reminder>`; with them, an error result per call, the first one
+  carrying the feedback and the others "Tool not executed; revise and
+  resubmit your final answer.", so the provider history stays paired
+  (`runner/hooks.rs`, `retry_message`). It is staged as a `notification`
+  and held as `ToolResults`, then the next turn starts. Only `max_turns`
+  bounds these retries, as in Python.
 - **With tool calls**, the run goes to `Step::Batch` (`turn.rs:416-421`).
   Then `Step::Results` appends the results and starts the next turn. The
   provider's `stop_reason` does not decide this; the blocks do.
 - **Without**, the run first waits for any background subagent it has, which
   can add a notification and another turn (`turn.rs:433-435`,
   `runner/inbox.rs:137-168`). Then the `stop` hook chain runs: a hook can keep
-  the run going with feedback, which is appended as a user message and starts
-  another turn, or rewrite the final-answer text (the value `post_turn` and
-  the terminal `Result` see next), or block the stop outright, ending the run
-  failed (`turn.rs:436-440`, `runner/hooks.rs`). When every hook lets it stop,
-  `post_turn` runs and the run ends `completed` with that text
-  (`turn.rs:441-448`).
+  the run going with feedback (`continue`, bounded only by `max_turns`), ask
+  for another answer (`retry`, honoured once per run call, after which it
+  counts as an allow and the later hooks decide), rewrite the final-answer
+  text (the value `post_turn` and the terminal `Result` see next), or block
+  the stop outright, ending the run failed (`turn.rs:436-440`,
+  `runner/hooks.rs`). Feedback from either reaches the model as Python's
+  does, in a `<system-reminder>` user message staged as a `notification`,
+  and another turn starts. When every hook lets it stop, `post_turn` runs
+  and the run ends `completed` with that text (`turn.rs:441-448`).
 
 `max_turns` is the stop condition for the loop: the call that would exceed it
 is not made and the run fails with `TurnLimitError` (`runner/end.rs:93-108`).
@@ -265,7 +284,7 @@ What `reconcile` makes of each phase (`journal/reconcile.rs:170-231`):
 |---|---|---|
 | `Started` | `Started` | Append the prompt unless it is in the session, then the turn |
 | `ProviderPending` | `Redispatch`, or `Received` with an accepted receipt | A cancelled receipt for a delivery with no receipt, then attempt + 1; or the durable response |
-| `AssistantReceived` | `Received` | Append the response unless it is in the session, then branch on its tool calls |
+| `AssistantReceived` | `Received` | Append the response unless it is in the session, then branch on its tool calls; with `retry_feedback`, send that feedback instead, without asking the hook again |
 | `ToolBatch` | `ToolBatch` | Each call: its durable result, a placeholder, or a re-plan |
 | `AwaitingApproval` | `AwaitingApproval` | Re-plan with the recorded decisions; suspend again if one still needs an answer |
 | `ToolResults` | `ToolResults` | Append the message unless it is in the session, then the next turn |
