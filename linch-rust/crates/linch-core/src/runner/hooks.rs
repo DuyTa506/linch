@@ -230,7 +230,7 @@ pub(super) async fn event_emit(
 const RETRY_TEXT: &str = "Provider hook requested another turn.";
 
 /// Result text of every later tool call of a retried response (Python's).
-const NOT_RUN_TEXT: &str = "Tool not executed; revise and resubmit your final answer.";
+pub(super) const NOT_RUN_TEXT: &str = "Tool not executed; revise and resubmit your final answer.";
 
 /// The user message an `after_provider_call` retry sends back after
 /// `response`, as Python builds it: with no tool calls, `feedback` in a
@@ -395,9 +395,9 @@ impl Runner {
                 return Ok(Stopping::Ended);
             }
         };
-        // Python's `_gate_retry_tail`: the feedback in a system reminder.
-        let message = Message::user_text(system_reminder(&feedback));
-        Ok(Stopping::Continue(self.feedback(message).await?))
+        // Python's `_gate_retry_tail`: the feedback in a system reminder, or
+        // the results of a final tool call being decided on.
+        Ok(Stopping::Continue(self.send_back(&feedback).await?))
     }
 
     /// Hold `message`, a hook's feedback for the model, as the user message

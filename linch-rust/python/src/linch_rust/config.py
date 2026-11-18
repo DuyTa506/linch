@@ -417,8 +417,14 @@ class OutputSchema(TypedDict, total=False):
     back to the model with the error while retries last, then the run fails
     with `structured_error` set.
 
+    A provider without native structured output (`deepseek`, `vllm`,
+    `sglang`, `llamacpp`) is not sent the schema: the run offers a final
+    tool named `name` whose input schema is `schema`, and its call ends the
+    run with the checked input as the answer.
+
     Attributes:
-        name: Identifier sent to the provider; required.
+        name: Identifier sent to the provider, and the final tool's name
+            where there is one (letters, digits, `_` and `-`); required.
         schema: The JSON Schema (draft 2020-12) of an object; required.
         strict: Whether a provider that can enforce the schema should
             (OpenAI); true when absent.
@@ -429,6 +435,28 @@ class OutputSchema(TypedDict, total=False):
     schema: Required[Mapping[str, Any]]
     strict: bool
     description: str
+
+
+class ToolChoice(TypedDict, total=False):
+    """Whether and which tool the model must call.
+
+    Set it as the agent's `spec.tool_choice`, or per run with
+    `Agent.run(tool_choice=...)`; it goes with every request of the run
+    but on a turn that offers no tool. `{"type": "auto"}` lets the model
+    choose, `{"type": "none"}` forbids tools, `{"type": "required"}` forces
+    some tool and `{"type": "tool", "name": "Read"}` forces that one. A
+    forced choice holds every turn, so such a run ends through its final
+    tool or a limit. The agent refuses a named tool it does not offer and a
+    choice its provider refuses: DeepSeek refuses a forced one unless
+    `spec.thinking` is `{"type": "disabled"}`, llama.cpp a named one.
+
+    Attributes:
+        type: `auto`, `none`, `required` or `tool`; required.
+        name: The tool to call, with `type` `tool` only.
+    """
+
+    type: Required[str]
+    name: str
 
 
 class RedactionRule(TypedDict, total=False):
@@ -577,6 +605,8 @@ class AgentConfig(TypedDict, total=False):
             policy (see `ProviderRetry`), `fallback_models`, the models to
             fail over to in order, an `output_schema` (see
             `OutputSchema`) with its `structured_output_retries`, a
+            `tool_choice` (see `ToolChoice`), a `final_tool_name` (a
+            registered tool whose call ends the run, its input the answer), a
             `redaction` (see `Redaction`), a `verification` (see
             `Verification`) and a `loop_guard` (see `LoopGuard`) go here
             too.

@@ -268,7 +268,7 @@ write happens.
 | `Started`, `AssistantReceived`, `Compacted`, `Aborting` | Through, at once | unchanged |
 | `AwaitingApproval` | Through, at once | `awaiting_approval` |
 | `AwaitingInput` | Through, at once | `awaiting_input` |
-| `ProviderPending`, `CompactionPending`, `ToolBatch`, `ToolResults` | Held | unchanged |
+| `ProviderPending`, `CompactionPending`, `Cleared`, `ToolBatch`, `ToolResults`, `Finishing` | Held | unchanged |
 
 A held checkpoint is a snapshot: it covers only the events pending when it
 was saved (`journal.rs:76-80`, `201-202`). Every committed state is one that
@@ -452,6 +452,7 @@ What `reconcile` makes of each phase (`journal/reconcile.rs:170-231`):
 | `CompactionPending` | `Recompact` or `Redispatch` | Another summary attempt, or the primary call when the summary call already settled without a summary |
 | `Compacted` | `Compacted` | Append the projection unless it is in the session, then dispatch |
 | `Aborting` | `Aborting` | Append the cancel's results unless they are in the session, then the `aborted` terminal ([below](#cancel-a-suspended-run)) |
+| `Finishing` | `Finishing` | Append the results that pair a final tool call unless they are in the session, then the terminal its `ending` holds ([below](#the-final-tool)) |
 
 Each tool call of a recovered batch recovers on its own
 (`reconcile.rs:309-332`):
@@ -609,3 +610,36 @@ The table is the shape pinned by
 attached, the response step is two writes: the
 receipt and `Usage` with `ProviderPending` before the hooks, then
 `Assistant` with `AssistantReceived` after them, so the turn costs `4 + 2k`.
+
+## The final tool
+
+A run may have a final tool (`structured.rs`, `FinalTool`): the agent's
+`spec.final_tool_name`, or one made from the output schema when the
+provider reports no native structured output
+(`Provider::native_output_schema`). `Runner::request` (`runner/catalog.rs`)
+then leaves `output_schema` off, appends the made tool after the others, and
+forces it when it is the only tool and the provider takes a forced choice
+with the request's thinking (`Provider::tool_choice_refusal`).
+
+`received` hands a logged response that calls it to `final_call`
+(`runner/final_tool.rs`) instead of planning a batch, so no tool event is
+written. While the run decides, `Runner::unpaired` holds the response:
+
+- Feedback (a schema failure, a verifier's or a `stop` hook's retry) goes
+  through `send_back`, which turns it into the response's results (the
+  final call's carries the feedback, any other `Tool not executed`) held as
+  `ToolResults`, so the next turn starts paired.
+- Every terminal goes through `end_with`, which, with a response still
+  unpaired, builds its results (the acknowledgement of an answer taken, the
+  schema error, or `Final answer not taken`), stages their `user` event,
+  holds them with the `Ending` (status, stop reason and answer) as
+  `Finishing`, appends them (the `flush_checkpoint` barrier commits the
+  checkpoint and the staged `verification` and `error` events first), then
+  writes the terminal.
+
+A crash before that barrier resumes from `AssistantReceived` and decides
+again: the schema check is deterministic and the retries spent are counted
+from durable events. A crash after it resumes from `Finishing`, which only
+appends and ends. `crates/linch-core/tests/e2e_tool_choice.rs` crashes
+every write of a good answer, a retried one and one past its retries.
+

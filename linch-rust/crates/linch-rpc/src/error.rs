@@ -113,6 +113,10 @@ pub mod code {
     /// wrote nothing. `data` is `{run_id, owner, expires_in_ms}`: try again
     /// once that holder stops, at the latest after `expires_in_ms`.
     pub const RUN_LEASED: i64 = -32033;
+    /// `RunError::InvalidToolChoice`: the `tool_choice` of `run.start` names
+    /// a tool the run does not offer, or the agent's provider refuses it;
+    /// `data.reason` says why. Nothing was written.
+    pub const INVALID_TOOL_CHOICE: i64 = -32034;
     /// The agent cannot run in the background, so `schedule.create` and
     /// `job.enqueue` refuse it: `data.reason` is `memory_store` (its runs
     /// would live in this connection only), `host_tools` or `callbacks`
@@ -222,6 +226,9 @@ impl From<&RunError> for ErrorObject {
             }
             RunError::InvalidAnswer { reason, .. } => {
                 Self::new(code::INVALID_ANSWER, message).with_data(json!({ "reason": reason }))
+            }
+            RunError::InvalidToolChoice { reason, .. } => {
+                Self::new(code::INVALID_TOOL_CHOICE, message).with_data(json!({ "reason": reason }))
             }
         }
     }

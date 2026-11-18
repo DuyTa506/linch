@@ -33,6 +33,8 @@ trong Rust:
 | `fn id(&self) -> &str` | Định danh ổn định (`deepseek`, `openai-chat`, `vllm`, ...). Lớp OpenTelemetry ánh xạ nó sang `gen_ai.provider.name`. |
 | `async fn stream(&self, request, cancel) -> Result<ProviderStream, ProviderError>` | Bắt đầu một lời gọi. Một lỗi trước event đầu tiên (kết nối, mã trạng thái HTTP, một request mà adapter từ chối) là `Err`. Stream kết thúc sau `message_end` hoặc sau một mục lỗi. Hủy `cancel` kết thúc nó với `ProviderError::Cancelled`. |
 | `fn context_window(&self, model: &str) -> u64` | Cửa sổ ngữ cảnh của model, không có I/O; `DEFAULT_CONTEXT_WINDOW` (128000) trừ khi bị ghi đè. Compaction không có `threshold_tokens` (`crates/linch-core/src/compaction.rs`, `due`), ngân sách danh sách skill và tỷ lệ offload của facade đều suy ra từ nó. |
+| `fn native_output_schema(&self) -> bool` | Adapter có gửi `output_schema` theo dạng structured-output riêng của nó hay không; `true` trừ khi bị ghi đè. Khi là `false`, run không bao giờ gửi nó và đưa ra một final tool được tạo từ schema thay thế ([vòng đời lượt](./turn-lifecycle.md#the-final-tool)). DeepSeek và các profile vLLM, SGLang và llama.cpp ghi đè nó. |
+| `fn tool_choice_refusal(&self, choice, thinking) -> Option<String>` | Lý do adapter không thể gửi `choice` với `thinking`, không có I/O; `None` (nhận mọi lựa chọn) trừ khi bị ghi đè. Agent từ chối một `spec.tool_choice` mà nó nêu tên khi build, và một lựa chọn riêng của run trước khi có gì được ghi; run hỏi nó trước khi ép final tool của mình. Phần ghi đè của mỗi adapter là hàm mà trình dựng payload của nó gọi, nên các quy tắc lúc open và lúc gọi không thể lệch nhau. |
 | `async fn prepare(&self)` | Khám phá một lần, là no-op trừ khi bị ghi đè; không bao giờ thất bại. Facade gọi nó khi mở một agent, trước khi có gì đọc cửa sổ; một host dựng agent bằng mã sẽ gọi nó trước `AgentBuilder::build`. |
 
 `ProviderStream` là `BoxStream<'static, Result<ProviderEvent, ProviderError>>`
@@ -351,8 +353,10 @@ bật nó (`deepseek.rs:129`). Khi thinking bật, mọi lượt assistant trư�
 `reasoning_content`, là `""` khi nó không có, nếu không một request có tool sẽ
 thất bại với 400 (`deepseek.rs:147-153`). Một `tool_choice` bắt buộc khi thinking bật,
 và mọi `output_schema`, thất bại ngay tại chỗ với `InvalidRequest`:
-DeepSeek không có response format JSON-schema, chế độ `json_object` không
-mang schema, và việc ép một tool cuối bị từ chối khi thinking bật.
+DeepSeek không có response format JSON-schema và chế độ `json_object` không
+mang schema. `native_output_schema` là `false`, nên một run có schema đưa ra
+final tool của nó thay thế, và `tool_choice_refusal` (cùng quy tắc với của
+payload) từ chối một lựa chọn bị ép trừ khi thinking là `Disabled`.
 Effort ánh xạ `medium` và `xhigh` sang `high` (`deepseek.rs:184`).
 
 <a id="openai-chat-completions-and-server-profiles"></a>
@@ -379,7 +383,10 @@ bỏ ra (`profile.rs:144-154`). Một `output_schema` được gửi dưới d�
 `response_format: {"type": "json_schema", "json_schema": {name, strict,
 schema, description?}}` khi quy tắc `json_schema` của profile bật, mà chỉ
 profile của OpenAI bật; vLLM, SGLang và llama.cpp từ chối nó ngay tại chỗ với
-`InvalidRequest` cho đến khi từng cái được đối chiếu với tài liệu của server.
+`InvalidRequest` cho đến khi từng cái được đối chiếu với tài liệu của server, và
+báo `native_output_schema` là `false`, nên một run đưa ra final tool ở đó.
+`tool_choice_refusal` là hàng `tool_choice` của profile, quy tắc mà
+`build_payload` kiểm tra.
 
 ### OpenAI Responses
 

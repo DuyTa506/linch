@@ -9,6 +9,7 @@ use crate::message::SystemBlock;
 use crate::registry::ToolSnapshot;
 use crate::runner::{self, RunStream};
 use crate::skills::SKILL_TOOL;
+use crate::structured::FINAL_TOOL_FEATURE;
 use crate::subagents::{CONTINUE_TOOL, STOP_TOOL, SUBAGENT_TOOL, SubagentDefinition};
 use crate::tool_search::TOOL_SEARCH_TOOL;
 
@@ -120,17 +121,22 @@ impl AgentInner {
             serde_json::to_value(definition).map_err(|e| BuildError::Invalid(e.to_string()))?;
         features.insert("subagent".into(), value);
         let hooks = self.built_hooks;
-        // The parent's final-answer schema and verifiers are not the
-        // child's: a subagent answers its parent in text. Its redaction is:
+        // The parent's final-answer schema, final tool, tool choice and
+        // verifiers are not the child's: a subagent answers its parent in
+        // text. Its redaction is:
         // the child's output reaches the same logs.
         let mut spec = self.spec.clone();
         spec.output_schema = None;
         spec.structured_output_retries = 0;
         spec.verification = None;
+        spec.tool_choice = None;
+        spec.final_tool_name = None;
+        features.remove(FINAL_TOOL_FEATURE);
         let contract = contract_digest(&spec, &tools.contract_tools(), hooks, &features)?;
         Ok(Self {
             spec,
             output: None,
+            final_tool: None,
             redactor: self.redactor.clone(),
             verifiers: None,
             provider: Arc::clone(&self.provider),

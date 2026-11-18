@@ -278,7 +278,20 @@ pub enum ProviderConfig {
         /// The context window of every model; absent: 128000.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_window: Option<u64>,
+        /// Whether it takes an output schema natively; false makes a run
+        /// with a schema offer its final tool, as DeepSeek or a local
+        /// server does. True when absent.
+        #[serde(default = "native", skip_serializing_if = "is_native")]
+        native_output_schema: bool,
     },
+}
+
+fn native() -> bool {
+    true
+}
+
+fn is_native(value: &bool) -> bool {
+    *value
 }
 
 fn yes() -> bool {

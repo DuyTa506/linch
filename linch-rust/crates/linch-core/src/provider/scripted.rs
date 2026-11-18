@@ -178,6 +178,8 @@ pub struct ScriptedProvider {
     state: Mutex<State>,
     /// The context window it reports for every model.
     window: u64,
+    /// What [`Provider::native_output_schema`] reports.
+    native: bool,
 }
 
 #[derive(Debug)]
@@ -199,6 +201,7 @@ impl ScriptedProvider {
                 requests: Vec::new(),
             }),
             window: DEFAULT_CONTEXT_WINDOW,
+            native: true,
         }
     }
 
@@ -206,6 +209,14 @@ impl ScriptedProvider {
     /// set), for tests of what derives from it.
     pub fn with_context_window(mut self, window: u64) -> Self {
         self.window = window;
+        self
+    }
+
+    /// Report no native structured output, so a run with an output schema
+    /// offers its final tool instead (see
+    /// [`Provider::native_output_schema`]).
+    pub fn without_native_output_schema(mut self) -> Self {
+        self.native = false;
         self
     }
 
@@ -265,6 +276,10 @@ impl Provider for ScriptedProvider {
 
     fn context_window(&self, _model: &str) -> u64 {
         self.window
+    }
+
+    fn native_output_schema(&self) -> bool {
+        self.native
     }
 
     async fn stream(

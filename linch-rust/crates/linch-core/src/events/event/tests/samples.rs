@@ -32,6 +32,8 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
             resumed: true,
             turn: 3,
             output_schema: None,
+            tool_choice: None,
+            final_tool: None,
         }),
         Event::User(UserEvent {
             message: crate::message::Message::user_text("hi"),

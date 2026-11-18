@@ -122,10 +122,11 @@ object, beside `text`.
 
 ## What each provider receives
 
-Every request of the run, the summary call of a compaction excluded, carries
-the schema. Each adapter sends it in the vendor's own structured-output form,
-which shapes only the text answer, so the model can still call tools on any
-turn:
+On a provider with native structured output, every request of the run, the
+summary call of a compaction excluded, carries the schema. Each adapter sends
+it in the vendor's own structured-output form, which shapes only the text
+answer, so the model can still call tools on any turn. The others get a
+[final tool](#the-final-tool) instead:
 
 | Provider | Sent as |
 |---|---|
@@ -133,7 +134,7 @@ turn:
 | `openai-chat` | `response_format` = `{"type": "json_schema", "json_schema": {name, strict, schema, description?}}` |
 | `openai-responses` | `text.format` = `{"type": "json_schema", name, strict, schema, description?}` |
 | `gemini` | `generationConfig.responseMimeType` `application/json` and `responseJsonSchema` |
-| `deepseek`, `vllm`, `sglang`, `llamacpp` | Refused before the call: the request fails with an `error` event naming the adapter |
+| `deepseek`, `vllm`, `sglang`, `llamacpp` | Not sent: the run offers a [final tool](#the-final-tool) instead |
 
 Vendors accept only part of JSON Schema in these forms (Anthropic and OpenAI
 strict mode want `additionalProperties: false` on every object, for example).
@@ -147,6 +148,95 @@ A run that fails over to one of `spec.fallback_models` sends the fallback the
 same schema, checks its answers the same way, and keeps counting the schema
 retries the run already spent.
 
+## The final tool
+
+DeepSeek has no JSON-schema response format (only `json_object`, which does
+not carry the schema), and the vLLM, SGLang and llama.cpp adapters send none.
+On these providers the run sends no schema. It offers one more tool, named
+after the schema (`name`), whose input schema is your `schema` and whose
+description is yours or a sentence asking for the final answer. It goes
+last in the tool list, so the cached prefix of the others keeps its bytes.
+
+A response that calls it ends the run with the call's input as the answer:
+
+- The call never runs: there is no `tool_call_start` or `tool_call_end`.
+- Its input is checked like a text answer: a failure goes back as the call's
+  error result (`Call the invoice tool again, ...`), under the same
+  `structured_output_retries` and `verification` events, and past them the
+  run fails with `StructuredOutputError`.
+- It must be the only call of its response. One beside other calls is such a
+  failure, and none of the calls runs.
+- An input that passes meets the verifiers and the `stop` callbacks, which
+  see it as JSON text; that text is the result's `final_text`, the object its
+  `structured_output`. A callback's retry goes back as the call's result.
+- The session gets a result for every call of the response before the run
+  ends (`Final answer captured by the host.` for an answer taken), so the next
+  run of the session starts paired, whatever ended this one. A crash after
+  the decision finishes the run on resume without asking the model or a
+  callback again.
+- It ends the run at once, even with [background subagents](./agent.md)
+  still running: they are cancelled, as at any end of a run.
+
+When the final tool is the only tool, it is forced with a named
+`tool_choice`, or `required` where the provider refuses a named one, as
+Python's compatible mode does. DeepSeek refuses a forced choice while it
+thinks (the default), so set `spec.thinking` to `{"type": "disabled"}` to
+force it there; otherwise the model is only offered the tool. A text answer
+is still checked as above, so a model that answers in JSON text instead ends
+the run too. Your own `spec.tool_choice` always wins.
+
+The run records the tool's name in its first `init` event
+(`InitEvent.final_tool`) and a resume uses it again. An agent whose own
+schema becomes a final tool has it in its [run contract](./agent.md#the-run-contract);
+an agent on a provider with native structured output keeps the contract it
+had. `agent.open` refuses a schema whose `name` is a registered tool's or is
+not a legal tool name (1 to 64 letters, digits, `_` or `-`).
+
+### Name your own final tool
+
+`spec.final_tool_name` names a registered tool whose call ends the run the
+same way, on any provider (Python's `final_tool_name`). Its input is checked
+against the output schema when there is one, and is the answer as it is
+otherwise. The tool never runs. `agent.open` refuses a name that is not a
+registered tool.
+
+```python
+spec = {"model": "deepseek-v4-flash", "final_tool_name": "submit_report"}
+```
+
+## Choose which tool the model calls
+
+`spec.tool_choice` sets whether and which tool the model must call, for every
+request of the agent's runs; `agent.run(..., tool_choice=...)` replaces it
+for one run, and the run stores it in its first `init` event
+(`InitEvent.tool_choice`) so a resume keeps it.
+
+| `tool_choice` | The model |
+|---|---|
+| `{"type": "auto"}` | Chooses: a tool or an answer |
+| `{"type": "none"}` | Calls no tool |
+| `{"type": "required"}` | Calls some tool |
+| `{"type": "tool", "name": "Read"}` | Calls `Read` |
+
+It is sent with every request but on a turn that offers no tool (Python's
+rule: a skill that narrows a turn to no tool, for example). A forced choice holds every turn, so such a run can end only through
+its final tool, or `max_turns` and the [loop guard](./agent.md#loop_guard).
+`agent.open` refuses a named tool the agent does not offer (the final tool
+counts), `required` when it offers no tool at all, and a choice its provider
+refuses; a run's own one is refused with
+`InvalidToolChoice` (code -32034) before anything is written.
+
+| Provider | Refuses |
+|---|---|
+| `deepseek` | `required` and a named tool while thinking is on, which is any `spec.thinking` but `{"type": "disabled"}` ([API reference](https://api-docs.deepseek.com/api/create-chat-completion)) |
+| `anthropic` | `required` and a named tool with budgeted thinking (`{"type": "enabled", "budget_tokens": ...}`) |
+| `llamacpp` | A named tool, which the server does not honour (`common/chat.cpp` parses only `auto`, `none` and `required`) |
+| `vllm`, `sglang` | Nothing ([vLLM tool calling](https://docs.vllm.ai/en/latest/features/tool_calling/), [SGLang tool parser](https://docs.sglang.io/advanced_features/tool_parser.html)); a forced choice needs the server's tool-call parser |
+| `openai-chat`, `openai-responses`, `gemini` | Nothing |
+
+`tool_choice` and `final_tool_name` are part of the run contract; an agent
+that sets neither keeps the contract it had. A subagent's runs take neither.
+
 ## How it differs from Python Linch
 
 | Python Linch | linch_rust |
@@ -154,12 +244,14 @@ retries the run already spent.
 | Past the retries the run succeeds with `structured_error` set | The run fails (`result` subtype `error`) with `structured_error` set |
 | The retry count restarts on resume | The retry count is read back from the run's events |
 | `verification` with `action: "exhausted"` | `action: "stop"` |
-| Anthropic `compatible` mode forces a final tool | Every provider uses its native form; no forced tool |
-| `final_tool_name`, a per-agent `tool_choice` | Not yet |
+| Anthropic `compatible` mode forces a final tool | The final tool is offered by every provider without native structured output (DeepSeek, vLLM, SGLang, llama.cpp); Anthropic always uses its native form |
+| The final tool is acknowledged, then a schema failure goes back as a separate message | A schema failure is the final call's error result |
+| A final call beside other calls fails the run | It is a schema failure, retried under `structured_output_retries` |
+| A per-run `final_tool_name` | Only `spec.final_tool_name` |
 
 ## Related pages
 
 - [Agent config](./agent.md#spec): the rest of `spec`
-- [Runs](./runs.md#errors-arrive-at-the-end-of-the-stream): `InvalidOutputSchema` and the other errors
+- [Runs](./runs.md#errors-arrive-at-the-end-of-the-stream): `InvalidOutputSchema`, `InvalidToolChoice` and the other errors
 - [Events](./events.md): `VerificationEvent` and `ResultEvent`
 - [Architecture: turn lifecycle](../architecture/turn-lifecycle.md#the-loop-continues-while-a-response-has-tool-calls): where the check runs and what it writes

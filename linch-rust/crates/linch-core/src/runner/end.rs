@@ -15,7 +15,7 @@ use crate::events::kinds::{
 };
 use crate::json::JsonObject;
 use crate::provider::AssistantAssembly;
-use crate::run::{RunStatus, StopReason};
+use crate::run::{Ending, RunStatus, StopReason};
 
 /// What the `Result` of a run reports as its answer.
 #[derive(Default)]
@@ -44,11 +44,34 @@ impl Runner {
         self.end_with(status, subtype, stop_reason, answer).await
     }
 
-    /// End the run with `status` and its `Result`, reporting `answer`,
+    /// End the run with `status` and its `Result`, reporting `answer`.
+    /// While a final tool call is being decided on, its response's calls
+    /// are paired first (see `runner/final_tool.rs`).
+    pub(super) async fn end_with(
+        &mut self,
+        status: RunStatus,
+        subtype: ResultSubtype,
+        stop_reason: StopReason,
+        answer: Answer,
+    ) -> Result<(), RunError> {
+        if let Some(unanswered) = self.unpaired.take() {
+            let ending = Ending {
+                status,
+                stop_reason,
+                final_text: answer.text,
+                structured_output: answer.structured_output,
+                structured_error: answer.structured_error,
+            };
+            return self.finish(unanswered.ended(&ending), ending).await;
+        }
+        self.terminal(status, subtype, stop_reason, answer).await
+    }
+
+    /// The terminal write: the `Result` reporting `answer` and `status`,
     /// once every child run still running was cancelled and ended. The
     /// `child_run_status` end of each background child not heard of yet
     /// goes into the same write, with no notification.
-    pub(super) async fn end_with(
+    pub(super) async fn terminal(
         &mut self,
         status: RunStatus,
         subtype: ResultSubtype,

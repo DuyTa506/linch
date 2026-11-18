@@ -202,6 +202,8 @@ fn without_a_record_the_status_follows_the_stream() {
         resumed: false,
         turn: 0,
         output_schema: None,
+        tool_choice: None,
+        final_tool: None,
     });
     let running = report(vec![init.clone()]);
     assert_eq!(

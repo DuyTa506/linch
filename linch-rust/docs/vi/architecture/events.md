@@ -38,7 +38,7 @@ bỏ tag bằng tay (`events/kinds/mod.rs:1-9`). `Event::type_name`
 
 | `type` | Payload, trong `events/` | Stored | Delivered | Ghi chú |
 |---|---|---|---|---|
-| `init` | `InitEvent`, `kinds/lifecycle.rs:19` | yes | yes | Một event cho mỗi lần gọi của run: lúc bắt đầu, và mỗi lần resume hoặc approve, với `resumed` và `turn` mà nó tiếp tục. Event của lúc bắt đầu mang `output_schema` riêng của run, thứ mà một lần resume đọc lại |
+| `init` | `InitEvent`, `kinds/lifecycle.rs:19` | yes | yes | Một event cho mỗi lần gọi của run: lúc bắt đầu, và mỗi lần resume hoặc approve, với `resumed` và `turn` mà nó tiếp tục. Event của lúc bắt đầu mang `output_schema` và `tool_choice` riêng của run, và tên final tool của nó (`final_tool`), thứ mà một lần resume đọc lại |
 | `user` | `UserEvent`, `kinds/lifecycle.rs:62` | yes | yes | `subtype`: `prompt`, `tool_result`, `alignment`, `notification` |
 | `assistant` | `AssistantEvent`, `kinds/lifecycle.rs:72` | yes | yes | |
 | `partial_assistant` | `PartialAssistantEvent`, `kinds/lifecycle.rs:82` | no | yes | |

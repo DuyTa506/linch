@@ -135,6 +135,14 @@ impl Provider for Anthropic {
         CONTEXT_WINDOW
     }
 
+    fn tool_choice_refusal(
+        &self,
+        choice: &linch_core::ToolChoice,
+        thinking: Option<&linch_core::Thinking>,
+    ) -> Option<String> {
+        payload::tool_choice_refusal(choice, thinking).map(str::to_owned)
+    }
+
     async fn stream(
         &self,
         request: ProviderRequest,

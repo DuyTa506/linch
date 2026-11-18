@@ -205,7 +205,7 @@
 //! written; the session and its runs stay, and a run of it still in
 //! progress just has to read again before it writes.
 //!
-//! **`run.start`** `{agent, session_id, prompt, run_id?, principal?, trace_id?, output_schema?}`
+//! **`run.start`** `{agent, session_id, prompt, run_id?, principal?, trace_id?, output_schema?, tool_choice?}`
 //! ([`StartParams`](protocol::StartParams)) starts a run; the session is
 //! created when missing. `run_id` names the new run (a fresh uuid when
 //! absent), so a client can resume it even if it never saw the answer; an
@@ -221,6 +221,11 @@
 //! and a resume or approve uses it again. One that does not compile, or
 //! whose root is not an object, ends the run with `-32031` and writes
 //! nothing. The result's `structured_output` is the checked answer.
+//! `tool_choice` (`{"type": "auto" | "none" | "required"}` or
+//! `{"type": "tool", "name"}`) replaces the agent's `spec.tool_choice` for
+//! this run, stored the same way; one that names a tool the run does not
+//! offer, or that the agent's provider refuses, ends the run with `-32034`
+//! and writes nothing.
 //!
 //! **`run.resume`** `{agent, run_id, principal?}`
 //! ([`ResumeParams`](protocol::ResumeParams)) continues a run after a crash
@@ -462,6 +467,7 @@
 //! | -32031 | invalid output schema | `RunError::InvalidOutputSchema`: the `output_schema` of `run.start` does not compile or is not an object schema, so nothing was written; `data: {reason}` |
 //! | -32032 | invalid answer | `RunError::InvalidAnswer`: a `run.answer` with no answers, for a request that is not pending, or that does not fit its questions; nothing was written and the run still awaits input; `data: {reason}` |
 //! | -32033 | run leased | `StoreError::RunLeased`: another process drives the run and keeps its lease alive, so `run.resume`, `run.approve` or `run.answer` wrote nothing; `data: {run_id, owner, expires_in_ms}`; try again once that holder stops, at the latest after `expires_in_ms` |
+//! | -32034 | invalid tool choice | `RunError::InvalidToolChoice`: the `tool_choice` of `run.start` names a tool the run does not offer, or the provider refuses it, so nothing was written; `data: {reason}` |
 //! | -32040 | not background | `schedule.create` or `job.enqueue` on an agent that cannot run in the background; `data: {reason}`: `memory_store`, `host_tools` or `callbacks` |
 //! | -32041 | schedule not found | no schedule with that id in the agent's namespace |
 //! | -32042 | schedule exists | the agent's namespace already has a schedule with that id |

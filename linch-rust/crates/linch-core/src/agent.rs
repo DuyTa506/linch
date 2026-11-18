@@ -22,7 +22,9 @@ use crate::json::JsonObject;
 use crate::message::{Message, SystemBlock};
 use crate::permissions::PermissionEngine;
 use crate::policy::Principal;
-use crate::provider::{CacheControl, OutputSchema, Provider, ProviderRequest, ToolDefinition};
+use crate::provider::{
+    CacheControl, OutputSchema, Provider, ProviderRequest, Thinking, ToolChoice, ToolDefinition,
+};
 use crate::redaction::Redactor;
 use crate::registration::Registration;
 use crate::registry::{ToolRegistry, ToolSnapshot};
@@ -30,7 +32,7 @@ use crate::run::RunStatus;
 use crate::runner::{self, Families, Releases, RunStream};
 use crate::skills::SkillSet;
 use crate::store::{RunRecord, RunStore, SessionStore};
-use crate::structured::OutputContract;
+use crate::structured::{FinalTool, OutputContract};
 use crate::subagents::{Registry, Roster, Workers};
 use crate::tool_search::ToolSearch;
 use crate::usage::Usage;
@@ -87,12 +89,20 @@ pub struct RunOptions {
     /// ignore this field. It is not part of the contract, which stays the
     /// agent's.
     pub output_schema: Option<OutputSchema>,
+    /// The tool choice of this run alone, in place of the agent's
+    /// `spec.tool_choice` (Python's `RunOptions.tool_choice`). `None` keeps
+    /// the agent's. It is checked before anything is written (a named tool
+    /// the run does not have, or a choice the provider refuses, fails with
+    /// [`RunError::InvalidToolChoice`]) and stored in the run's `init`
+    /// event, so a resume or approve uses it again; they ignore this
+    /// field. It is not part of the contract.
+    pub tool_choice: Option<ToolChoice>,
 }
 
 impl RunOptions {
     /// Options for `session_id`, with no run id, no principal, owner
     /// `linch`, a fresh cancel token, no trace id and the agent's output
-    /// schema.
+    /// schema and tool choice.
     pub fn new(session_id: impl Into<SessionId>) -> Self {
         Self {
             session_id: session_id.into(),
@@ -102,8 +112,36 @@ impl RunOptions {
             cancel: CancellationToken::new(),
             trace_id: None,
             output_schema: None,
+            tool_choice: None,
         }
     }
+}
+
+/// Why `choice` cannot be a run's tool choice on `provider` with
+/// `thinking`, `known` saying whether a tool name is one the run offers and
+/// `toolless` that it offers none; `None` when it can.
+pub(crate) fn tool_choice_problem(
+    provider: &dyn Provider,
+    choice: &ToolChoice,
+    thinking: Option<&Thinking>,
+    known: impl Fn(&str) -> bool,
+    toolless: bool,
+) -> Option<String> {
+    if toolless && matches!(choice, ToolChoice::Required {}) {
+        return Some("tool_choice required needs a tool, and the run offers none".into());
+    }
+    if let ToolChoice::Tool { name } = choice
+        && !known(name)
+    {
+        return Some(format!(
+            "tool_choice names {name:?}, which is not a tool the run offers"
+        ));
+    }
+    let refusal = provider.tool_choice_refusal(choice, thinking)?;
+    Some(format!(
+        "{} refuses this tool_choice: {refusal}",
+        provider.id()
+    ))
 }
 
 /// A callback that [`Agent::close_session`] runs.
@@ -123,6 +161,9 @@ pub(crate) struct AgentInner {
     pub(crate) spec: AgentSpec,
     /// The spec's `output_schema`, compiled; `None` without one.
     pub(crate) output: Option<Arc<OutputContract>>,
+    /// The final tool of a run that has no output schema of its own (see
+    /// [`AgentSpec::final_tool_name`]); `None` without one.
+    pub(crate) final_tool: Option<FinalTool>,
     /// The spec's `redaction`, compiled; `None` without one.
     pub(crate) redactor: Option<Arc<Redactor>>,
     /// The spec's `verification`, compiled; `None` without one.

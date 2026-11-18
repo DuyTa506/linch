@@ -7,6 +7,9 @@
 //! schema, compiled as draft 2020-12 like a tool's. The runner sends a
 //! failure back to the model up to `structured_output_retries` times, then
 //! ends the run failed (see `runner/structured.rs`).
+//!
+//! A run may also have a [`FinalTool`]: a tool whose call ends the run,
+//! its input the answer, checked the same way (see `runner/final_tool.rs`).
 
 use jsonschema::Validator;
 
@@ -14,11 +17,27 @@ use crate::events::Envelope;
 use crate::events::Event;
 use crate::events::kinds::VerificationAction;
 use crate::json::{JsonObject, JsonValue};
-use crate::provider::OutputSchema;
+use crate::provider::{OutputSchema, ToolDefinition};
 use crate::registry::{truncate, violations};
 
 /// The `verifier` of the `verification` events the schema gate stages.
 pub(crate) const VERIFIER: &str = "output_schema";
+
+/// The contract `features` key of an agent that makes its own final tool
+/// from its output schema; absent otherwise, so other contracts keep
+/// their digests.
+pub(crate) const FINAL_TOOL_FEATURE: &str = "final_tool";
+
+/// The result of a final tool call the run took as its answer (Python's
+/// acknowledgement): it pairs the call, so the session takes another run.
+pub(crate) const FINAL_ACK: &str = "Final answer captured by the host.";
+
+/// The description of a final tool made from a schema that has none.
+const FINAL_DESCRIPTION: &str = "Give your final answer as this tool's input. Call it once, \
+                                 as the only tool call of your response, when the task is done.";
+
+/// Longest tool name every provider takes.
+const MAX_TOOL_NAME: usize = 64;
 
 /// Longest JSON parse error kept, in characters.
 const MAX_PARSE_CHARS: usize = 240;
@@ -61,7 +80,12 @@ impl OutputContract {
     /// The object `text` holds, or why it is not one the schema accepts,
     /// worded for the model to fix.
     pub(crate) fn check(&self, text: &str) -> Result<JsonObject, String> {
-        let value = parse(text)?;
+        self.check_value(parse(text)?)
+    }
+
+    /// `value` as the object the schema accepts, or why it is not one,
+    /// worded as [`Self::check`] words it.
+    pub(crate) fn check_value(&self, value: JsonValue) -> Result<JsonObject, String> {
         if !value.is_object() {
             return Err(format!("Expected a JSON object, got {}", kind(&value)));
         }
@@ -78,12 +102,120 @@ impl OutputContract {
 
 /// The feedback a failed answer sends back to the model (Python's
 /// `_evaluate_terminal_gates` wording), before it is put in a system
-/// reminder.
-pub(crate) fn feedback(error: &str) -> String {
-    format!(
-        "Your previous response failed structured-output validation: {error}\n\
-         Respond again with ONLY a JSON object matching the required schema."
-    )
+/// reminder or a final tool call's result. With a final tool, the model
+/// is told to answer through it.
+pub(crate) fn feedback(error: &str, final_tool: Option<&str>) -> String {
+    let again = match final_tool {
+        None => "Respond again with ONLY a JSON object matching the required schema.".to_owned(),
+        Some(name) => format!(
+            "Call the {name} tool again, as the only tool call of your response, with input \
+             matching its schema."
+        ),
+    };
+    format!("Your previous response failed structured-output validation: {error}\n{again}")
+}
+
+/// A tool whose call ends the run, its input the answer (Python's
+/// `final_tool_name`).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct FinalTool {
+    /// The name the model calls it by.
+    pub(crate) name: String,
+    /// The definition the run adds to each request: `Some` for a tool the
+    /// run made from its output schema, `None` for a registered tool.
+    pub(crate) made: Option<ToolDefinition>,
+}
+
+impl FinalTool {
+    /// The final tool of a run with the spec's `named` one and the output
+    /// schema `output`, on a provider that takes a schema `native`ly or
+    /// not: the named one, else, with a schema the provider cannot take,
+    /// one made from it; `None` when neither applies.
+    pub(crate) fn of(
+        named: Option<&str>,
+        output: Option<&OutputContract>,
+        native: bool,
+    ) -> Option<Self> {
+        if let Some(name) = named {
+            return Some(Self {
+                name: name.to_owned(),
+                made: None,
+            });
+        }
+        let schema = output.filter(|_| !native)?.schema();
+        Some(Self::made(schema))
+    }
+
+    /// The final tool made from `schema`: named after it, its input
+    /// schema the output schema.
+    pub(crate) fn made(schema: &OutputSchema) -> Self {
+        let description = (schema.description.clone()).unwrap_or_else(|| FINAL_DESCRIPTION.into());
+        let definition = ToolDefinition {
+            name: schema.name.clone(),
+            description,
+            input_schema: schema.schema.clone(),
+        };
+        Self {
+            name: schema.name.clone(),
+            made: Some(definition),
+        }
+    }
+
+    /// The final tool a run recorded as `name` in its `init` event, for an
+    /// agent with the spec's `named` one and the run's schema `output`:
+    /// the named one, else the one made from the schema; `None` when
+    /// neither is called `name` any more.
+    pub(crate) fn recorded(
+        name: &str,
+        named: Option<&str>,
+        output: Option<&OutputContract>,
+    ) -> Option<Self> {
+        if named == Some(name) {
+            return Self::of(named, None, true);
+        }
+        let made = Self::made(output?.schema());
+        (made.name == name).then_some(made)
+    }
+
+    /// Why a run cannot offer this tool beside the registered tools,
+    /// `taken` saying whether a name is one; `None` when it can.
+    pub(crate) fn problem(&self, taken: impl Fn(&str) -> bool) -> Option<String> {
+        let name = &self.name;
+        match &self.made {
+            None if !taken(name) => {
+                Some(format!("the final tool {name:?} is not a registered tool"))
+            }
+            None => None,
+            Some(_) if taken(name) => Some(format!(
+                "the output schema's name {name:?} is a registered tool's, so it cannot name \
+                 the final tool made from it"
+            )),
+            Some(_) => tool_name_problem(name),
+        }
+    }
+
+    /// Why a response with `calls` tool calls, one of them this tool's,
+    /// cannot end the run: the final tool must be called alone.
+    pub(crate) fn alone(&self, calls: usize) -> Result<(), String> {
+        match calls {
+            1 => Ok(()),
+            _ => Err(format!(
+                "the final-answer tool {} must be the only tool call in its response; none \
+                 of the {calls} calls ran",
+                self.name
+            )),
+        }
+    }
+}
+
+/// Why `name` is not a tool name every provider takes (OpenAI's and
+/// Anthropic's rule, 1 to 64 of `A-Z a-z 0-9 _ -`); `None` when it is.
+pub(crate) fn tool_name_problem(name: &str) -> Option<String> {
+    let legal = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+    let fits = !name.is_empty() && name.len() <= MAX_TOOL_NAME && name.chars().all(legal);
+    (!fits).then(|| {
+        format!("{name:?} cannot name a tool: use 1 to {MAX_TOOL_NAME} letters, digits, _ or -")
+    })
 }
 
 /// How many schema retries `events`, a run's durable log, already spent:
@@ -206,5 +338,58 @@ mod tests {
             description: None,
         });
         assert!(blank.is_err());
+    }
+
+    #[test]
+    fn the_final_tool_is_the_named_one_else_one_made_without_native_output() {
+        let invoice = invoice();
+        assert_eq!(FinalTool::of(None, Some(&invoice), true), None);
+        let made = FinalTool::of(None, Some(&invoice), false).unwrap();
+        let definition = made.made.as_ref().unwrap();
+        assert_eq!(
+            (made.name.as_str(), definition.name.as_str()),
+            ("invoice", "invoice")
+        );
+        assert_eq!(definition.input_schema, invoice.schema().schema);
+        assert_eq!(definition.description, FINAL_DESCRIPTION);
+        let named = FinalTool::of(Some("Submit"), Some(&invoice), false).unwrap();
+        assert_eq!((named.name.as_str(), named.made.as_ref()), ("Submit", None));
+        // A resume finds the one the run recorded.
+        assert_eq!(
+            FinalTool::recorded("Submit", Some("Submit"), None),
+            Some(named)
+        );
+        assert_eq!(
+            FinalTool::recorded("invoice", None, Some(&invoice)),
+            Some(made)
+        );
+        assert_eq!(FinalTool::recorded("other", None, Some(&invoice)), None);
+    }
+
+    #[test]
+    fn a_made_final_tool_needs_a_free_legal_name() {
+        let made = FinalTool::made(invoice().schema());
+        assert_eq!(made.problem(|_| false), None);
+        assert!(made.problem(|name| name == "invoice").is_some());
+        let named = FinalTool::of(Some("Submit"), None, true).unwrap();
+        assert!(
+            named
+                .problem(|_| false)
+                .unwrap()
+                .contains("not a registered")
+        );
+        assert_eq!(named.problem(|_| true), None);
+        for bad in ["", "my tool", "naïve", &"x".repeat(65)] {
+            assert!(tool_name_problem(bad).is_some(), "{bad:?}");
+        }
+        assert_eq!(tool_name_problem(&"x".repeat(64)), None);
+        assert!(made.alone(1).is_ok());
+        assert!(made.alone(2).unwrap_err().contains("only tool call"));
+        let tool = feedback("bad", Some("invoice"));
+        assert!(tool.ends_with(
+            "Call the invoice tool again, as the only tool call of your \
+                                response, with input matching its schema."
+        ));
+        assert!(feedback("bad", None).ends_with("matching the required schema."));
     }
 }

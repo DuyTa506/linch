@@ -10,7 +10,7 @@ from typing import Any
 
 from . import schedule as _schedule
 from ._rpc import Connection, RunQueue
-from .config import OutputSchema, Principal
+from .config import OutputSchema, Principal, ToolChoice
 from .errors import LinchError
 from .events import Envelope, decode_envelope
 from .monitor import (
@@ -125,6 +125,7 @@ class Agent:
         principal: Principal | None = None,
         trace_id: str | None = None,
         output_schema: OutputSchema | None = None,
+        tool_choice: ToolChoice | None = None,
     ) -> Run:
         """Start a run of `prompt` in a session, which is created when missing.
 
@@ -149,6 +150,10 @@ class Agent:
                 stores it, so a resume or approve keeps it. The checked
                 answer is `ResultEvent.structured_output`. None keeps the
                 agent's.
+            tool_choice: Whether and which tool the model must call in this
+                run, in place of the agent's `spec.tool_choice` (see
+                `ToolChoice`). The run stores it, so a resume or approve
+                keeps it. None keeps the agent's.
 
         Returns:
             The started run; iterate it or await `Run.result()`.
@@ -158,6 +163,9 @@ class Agent:
             InvalidOutputSchema: Raised by the run, not this call: the
                 `output_schema` does not compile or its root is not an
                 object, so no run was created.
+            InvalidToolChoice: Raised by the run, not this call: the
+                `tool_choice` names a tool the run does not offer, or the
+                provider refuses it, so no run was created.
         """
         params: dict[str, Any] = {"agent": self.handle, "session_id": session_id, "prompt": prompt}
         if run_id is not None:
@@ -166,6 +174,8 @@ class Agent:
             params["trace_id"] = trace_id
         if output_schema is not None:
             params["output_schema"] = dict(output_schema)
+        if tool_choice is not None:
+            params["tool_choice"] = dict(tool_choice)
         return await self._start("run.start", params, principal)
 
     async def resume(self, run_id: str, *, principal: Principal | None = None) -> Run:

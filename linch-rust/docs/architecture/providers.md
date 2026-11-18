@@ -32,6 +32,8 @@ differs in Rust:
 | `async fn stream(&self, request, cancel) -> Result<ProviderStream, ProviderError>` | Start one call. An error before the first event (connect, HTTP status, a request the adapter refuses) is the `Err`. The stream ends after `message_end` or after one error item. Cancelling `cancel` ends it with `ProviderError::Cancelled`. |
 | `fn context_window(&self, model: &str) -> u64` | The model's context window, without I/O; `DEFAULT_CONTEXT_WINDOW` (128000) unless overridden. Compaction without a `threshold_tokens` (`crates/linch-core/src/compaction.rs`, `due`), the skill listing budget and the facade's offload fraction derive from it. |
 | `async fn prepare(&self)` | One-time discovery, a no-op unless overridden; it never fails. The facade calls it when it opens an agent, before anything reads the window; a host that builds an agent in code calls it before `AgentBuilder::build`. |
+| `fn native_output_schema(&self) -> bool` | Whether the adapter sends `output_schema` in its own structured-output form; `true` unless overridden. When `false` the run never sends it one and offers a final tool made from the schema instead ([turn lifecycle](./turn-lifecycle.md#the-final-tool)). DeepSeek and the vLLM, SGLang and llama.cpp profiles override it. |
+| `fn tool_choice_refusal(&self, choice, thinking) -> Option<String>` | Why the adapter cannot send `choice` with `thinking`, without I/O; `None` (takes every choice) unless overridden. The agent refuses a `spec.tool_choice` it names at build, and a run's own one before anything is written; the run asks it before forcing its final tool. Each adapter's override is the function its payload builder calls, so the open-time and call-time rules cannot drift. |
 
 `ProviderStream` is `BoxStream<'static, Result<ProviderEvent, ProviderError>>`
 (`client.rs:17`), so the stream owns everything it needs and outlives the
@@ -353,8 +355,10 @@ state turns it on (`deepseek.rs:129`). With thinking on, every earlier
 assistant turn sends `reasoning_content`, `""` when it has none, or a request
 with tools fails with 400 (`deepseek.rs:147-153`). A forced `tool_choice`
 with thinking on, and any `output_schema`, fail locally as `InvalidRequest`:
-DeepSeek has no JSON-schema response format, `json_object` mode does not
-carry the schema, and forcing a final tool is refused with thinking on.
+DeepSeek has no JSON-schema response format and `json_object` mode does not
+carry the schema. `native_output_schema` is `false`, so a run with a schema
+offers its final tool instead, and `tool_choice_refusal` (the same rule as
+the payload's) refuses a forced choice unless thinking is `Disabled`.
 Effort maps `medium` and `xhigh` to `high` (`deepseek.rs:184`).
 
 ### OpenAI Chat Completions and server profiles
@@ -380,7 +384,10 @@ left out (`profile.rs:144-154`). An `output_schema` is sent as
 `response_format: {"type": "json_schema", "json_schema": {name, strict,
 schema, description?}}` when the profile's `json_schema` rule is on, which only
 OpenAI's is; vLLM, SGLang and llama.cpp refuse it locally as `InvalidRequest`
-until each is checked against its server's docs.
+until each is checked against its server's docs, and report
+`native_output_schema` `false`, so a run offers its final tool there.
+`tool_choice_refusal` is the profile's `tool_choice` row, the rule
+`build_payload` checks.
 
 ### OpenAI Responses
 

@@ -104,6 +104,7 @@ impl WorkflowContext {
                 cancel: self.inner.cancel.child_token(),
                 trace_id: None,
                 output_schema: None,
+                tool_choice: None,
             };
             let stream = match agent.events(&run_id, 0).await {
                 Err(RunError::Store(StoreError::NotFound { .. })) => agent.run(prompt, options),

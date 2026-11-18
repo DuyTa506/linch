@@ -5,11 +5,12 @@ from __future__ import annotations
 from typing import Any, cast
 
 import pytest
-from scripted import config, text_turn
+from scripted import config, text_turn, tool_turn
 
 from linch_rust import (
     InitEvent,
     InvalidOutputSchema,
+    InvalidToolChoice,
     OutputSchema,
     ResultEvent,
     Server,
@@ -88,3 +89,39 @@ async def test_a_run_brings_its_own_schema() -> None:
     assert isinstance(result, ResultEvent)
     assert result.structured_output == {"name": "Ada"}
     assert "array" in raised.value.reason
+
+
+async def test_without_native_output_the_final_tool_call_is_the_answer() -> None:
+    turns = [
+        tool_turn("f1", "invoice", {"sum": 1}),
+        tool_turn("f2", "invoice", {"total": 3}),
+    ]
+    agent_config = shaped(turns, retries=1)
+    agent_config["provider"]["native_output_schema"] = False
+    async with Server() as server:
+        agent = await server.open_agent(agent_config)
+        run = await agent.run("s1", "Bill me")
+        envelopes = [envelope async for envelope in run]
+        result = await run.result()
+
+    init = envelopes[0].event
+    assert isinstance(init, InitEvent) and init.final_tool == "invoice"
+    assert isinstance(result, ResultEvent) and result.subtype == "success"
+    assert result.structured_output == {"total": 3}
+    checks = [e.event for e in envelopes if isinstance(e.event, VerificationEvent)]
+    assert [(c.action, c.attempt) for c in checks] == [("retry", 1)]
+
+
+async def test_a_run_brings_its_own_tool_choice() -> None:
+    async with Server() as server:
+        agent = await server.open_agent(config([text_turn("done")]))
+        run = await agent.run("s1", "Go", tool_choice={"type": "none"})
+        envelopes = [envelope async for envelope in run]
+        await run.result()
+        bad = await agent.run("s2", "Go", tool_choice={"type": "tool", "name": "Nope"})
+        with pytest.raises(InvalidToolChoice) as raised:
+            await bad.result()
+
+    init = envelopes[0].event
+    assert isinstance(init, InitEvent) and init.tool_choice == {"type": "none"}
+    assert "Nope" in raised.value.reason

@@ -11,6 +11,9 @@
 //!   value but `none` turns thinking on.
 //! - **`tool_choice`:** `auto`, `none`, `required` and a named function;
 //!   tool calls come back as `tool_calls` only with `--tool-call-parser`.
+//!   Rechecked 2026-11-17 against
+//!   <https://docs.sglang.io/advanced_features/tool_parser.html>, which
+//!   documents `required` and a named function as forcing a call.
 //! - **Usage** comes on a last chunk with empty `choices` when
 //!   `stream_options.include_usage` is set; `cached_tokens` needs
 //!   `--enable-cache-report`.
@@ -20,9 +23,11 @@
 //!   "type", "code"}`; mid-stream errors are `{"error": {...}}` with the
 //!   HTTP status in `code`. A graceful abort ends with `finish_reason`
 //!   `abort`.
-//! - **`output_schema`** is refused: the profile sends no
+//! - **`output_schema`** is refused in a request: the profile sends no
 //!   `response_format`, since the server's guided decoding would bind the
 //!   tool-call text to the schema too, and that was not checked live.
+//!   [`linch_core::Provider::native_output_schema`] is false, so a run with
+//!   a schema offers its final tool instead.
 
 use linch_core::JsonObject;
 use serde_json::json;

@@ -26,7 +26,8 @@ pub enum BuildError {
 ///
 /// A provider error is not a `RunError`: it ends the run with status
 /// `failed` and a `Result` event. Every `RunError` but
-/// [`RunError::PromptBlocked`] and [`RunError::InvalidOutputSchema`] leaves the run at its last durable state, so
+/// [`RunError::PromptBlocked`], [`RunError::InvalidOutputSchema`] and
+/// [`RunError::InvalidToolChoice`] leaves the run at its last durable state, so
 /// [`super::Agent::resume`] can pick it up again unless the run is
 /// terminal.
 #[derive(Debug, Error)]
@@ -98,6 +99,16 @@ pub enum RunError {
         /// The run id the stream announced.
         run_id: RunId,
         /// What is wrong with the schema.
+        reason: String,
+    },
+    /// The run's own tool choice ([`super::RunOptions::tool_choice`])
+    /// names a tool the run does not offer, or its provider refuses it.
+    /// Nothing was written: the run does not exist.
+    #[error("run {run_id} was not started: its tool_choice is unusable: {reason}")]
+    InvalidToolChoice {
+        /// The run id the stream announced.
+        run_id: RunId,
+        /// What is wrong with the choice.
         reason: String,
     },
     /// The durable checkpoint, events and session log do not fit together.

@@ -11,27 +11,35 @@ use serde_json::json;
 use super::DEFAULT_MAX_TOKENS;
 use super::catalog::Native;
 
-/// The streaming request body for `request`; `native` renders its
-/// catalog changes as tool blocks (see [`super::catalog`]).
-pub(crate) fn build(request: &ProviderRequest, native: bool) -> Result<JsonValue, ProviderError> {
-    let max_tokens = request.max_output_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
-    let manual_thinking = matches!(
-        request.thinking,
+/// Why Anthropic refuses `choice` with `thinking`: a forced choice
+/// (`required` or a named tool) with budgeted thinking; `None` when it
+/// takes it.
+pub(crate) fn tool_choice_refusal(
+    choice: &ToolChoice,
+    thinking: Option<&Thinking>,
+) -> Option<&'static str> {
+    let forced = matches!(choice, ToolChoice::Required {} | ToolChoice::Tool { .. });
+    let budgeted = matches!(
+        thinking,
         Some(Thinking::Enabled {
             budget_tokens: Some(_),
             ..
         })
     );
-    if manual_thinking
-        && matches!(
-            request.tool_choice,
-            Some(ToolChoice::Required {} | ToolChoice::Tool { .. })
-        )
+    (forced && budgeted).then_some(
+        "Anthropic rejects a forced tool_choice with budgeted thinking; \
+         use tool_choice auto, adaptive thinking, or no thinking",
+    )
+}
+
+/// The streaming request body for `request`; `native` renders its
+/// catalog changes as tool blocks (see [`super::catalog`]).
+pub(crate) fn build(request: &ProviderRequest, native: bool) -> Result<JsonValue, ProviderError> {
+    let max_tokens = request.max_output_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+    if let Some(refusal) = (request.tool_choice.as_ref())
+        .and_then(|choice| tool_choice_refusal(choice, request.thinking.as_ref()))
     {
-        return Err(invalid(
-            "Anthropic rejects a forced tool_choice with budgeted thinking; \
-             use tool_choice auto, adaptive thinking, or no thinking",
-        ));
+        return Err(invalid(refusal));
     }
     let cache = request.cache_control.map(cache_block);
     let mut catalog = native.then(|| Native::new(request));

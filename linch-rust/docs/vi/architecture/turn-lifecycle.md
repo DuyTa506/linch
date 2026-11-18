@@ -256,7 +256,7 @@ Một `Journal` giữ các event và checkpoint của một run trong bộ nhớ
 | `Started`, `AssistantReceived`, `Compacted`, `Aborting` | Write-through, ngay lập tức | không đổi |
 | `AwaitingApproval` | Write-through, ngay lập tức | `awaiting_approval` |
 | `AwaitingInput` | Write-through, ngay lập tức | `awaiting_input` |
-| `ProviderPending`, `CompactionPending`, `ToolBatch`, `ToolResults` | Giữ lại | không đổi |
+| `ProviderPending`, `CompactionPending`, `Cleared`, `ToolBatch`, `ToolResults`, `Finishing` | Giữ lại | không đổi |
 
 Một checkpoint được giữ lại là một snapshot: nó chỉ bao phủ các event đang chờ khi nó
 được lưu (`journal.rs:76-80`, `201-202`). Mọi trạng thái đã commit đều là trạng thái mà
@@ -435,6 +435,7 @@ Những gì `reconcile` làm với từng phase (`journal/reconcile.rs:170-231`)
 | `CompactionPending` | `Recompact` hoặc `Redispatch` | Một lần tóm tắt khác, hoặc lời gọi chính khi lời gọi tóm tắt đã kết thúc mà không có bản tóm tắt |
 | `Compacted` | `Compacted` | Nối projection trừ khi nó đã có trong session, rồi dispatch |
 | `Aborting` | `Aborting` | Nối các kết quả của cancel trừ khi chúng đã có trong session, rồi terminal `aborted` ([bên dưới](#cancel-a-suspended-run)) |
+| `Finishing` | `Finishing` | Nối các kết quả ghép cặp với một lời gọi final tool trừ khi chúng đã có trong session, rồi terminal mà `ending` của nó giữ ([bên dưới](#the-final-tool)) |
 
 Mỗi lời gọi tool của một batch được khôi phục sẽ tự khôi phục riêng
 (`reconcile.rs:309-332`):
@@ -579,3 +580,35 @@ Bảng này là hình dạng được cố định bởi
 được gắn, bước response là hai lần ghi: receipt và `Usage` với
 `ProviderPending` trước các hook, rồi `Assistant` với `AssistantReceived` sau chúng, nên
 lượt tốn `4 + 2k`.
+
+<a id="the-final-tool"></a>
+
+## Final tool
+
+Một run có thể có một final tool (`structured.rs`, `FinalTool`): `spec.final_tool_name`
+của agent, hoặc một tool được tạo từ output schema khi provider không báo có
+structured output native (`Provider::native_output_schema`). Khi đó
+`Runner::request` (`runner/catalog.rs`) bỏ `output_schema` ra, thêm tool được tạo
+vào sau các tool khác, và ép nó khi nó là tool duy nhất và provider nhận một lựa
+chọn bị ép với thinking của request (`Provider::tool_choice_refusal`).
+
+`received` giao một response đã ghi log mà gọi nó cho `final_call`
+(`runner/final_tool.rs`) thay vì plan một batch, nên không có event tool nào được
+ghi. Trong lúc run quyết định, `Runner::unpaired` giữ response đó:
+
+- Phản hồi (một lần thất bại schema, một retry của verifier hoặc của hook `stop`)
+  đi qua `send_back`, thứ biến nó thành các kết quả của response (kết quả của lời
+  gọi cuối mang phản hồi, mọi lời gọi khác là `Tool not executed`) được giữ dưới
+  dạng `ToolResults`, nên lượt kế tiếp bắt đầu ở trạng thái đã ghép cặp.
+- Mọi terminal đi qua `end_with`, thứ mà, khi một response vẫn chưa ghép cặp, dựng
+  các kết quả của nó (xác nhận của một câu trả lời được nhận, lỗi schema, hoặc
+  `Final answer not taken`), stage event `user` của chúng, giữ chúng cùng `Ending`
+  (trạng thái, lý do dừng và câu trả lời) dưới dạng `Finishing`, nối chúng (barrier
+  `flush_checkpoint` commit checkpoint và các event `verification` và `error` đã
+  stage trước), rồi ghi terminal.
+
+Một crash trước barrier đó resume từ `AssistantReceived` và quyết định lại: việc
+kiểm tra schema là tất định và các retry đã dùng được đếm từ các event bền vững.
+Một crash sau nó resume từ `Finishing`, thứ chỉ nối và kết thúc.
+`crates/linch-core/tests/e2e_tool_choice.rs` cho crash ở mọi lần ghi của một câu
+trả lời tốt, một câu trả lời đã retry và một câu trả lời quá số retry của nó.

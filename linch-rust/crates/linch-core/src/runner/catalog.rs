@@ -7,7 +7,7 @@ use std::sync::Arc;
 use super::turn::Runner;
 use crate::catalog;
 use crate::message::{ContentBlock, Message};
-use crate::provider::ProviderRequest;
+use crate::provider::{ProviderRequest, ToolChoice};
 use crate::scheduler::BatchPlan;
 use crate::tool_search::{Loads, NOT_OFFERED, TOOL_SEARCH_TOOL};
 
@@ -78,7 +78,9 @@ impl Runner {
     /// tools, narrowed to this turn's tools when a skill set them, with
     /// the tools added since the prefix named. Before the prefix is logged
     /// (never, once the prompt is in), the live ones. It carries the
-    /// run's output schema, if any.
+    /// run's output schema, if any, unless the provider cannot take it,
+    /// and the final tool the run made of it last; and the run's tool
+    /// choice (see [`Self::tool_choice`]).
     pub(super) fn request(&self, messages: Vec<Message>) -> ProviderRequest {
         let agent = &self.agent;
         let mut request = match &self.catalog {
@@ -96,7 +98,42 @@ impl Runner {
                 request
             }
         };
-        request.output_schema = (self.output.as_ref()).map(|output| output.schema().clone());
+        if agent.provider.native_output_schema() {
+            request.output_schema = (self.output.as_ref()).map(|output| output.schema().clone());
+        }
+        // Last, so the cached prefix of tools before it keeps its bytes.
+        let made = self.final_tool.as_ref().and_then(|tool| tool.made.clone());
+        request.tools.extend(made);
+        request.tool_choice = self.tool_choice(&request);
         request
+    }
+
+    /// The tool choice of `request`: none on a turn that offers no tool
+    /// (Python's rule); else the run's; else, when the run's own final
+    /// tool is the only tool, that tool forced, as Python's compatible
+    /// mode does, if the provider takes it with this thinking (or
+    /// `required`, which forces it too); else none.
+    fn tool_choice(&self, request: &ProviderRequest) -> Option<ToolChoice> {
+        if request.tools.is_empty() {
+            return None;
+        }
+        if let Some(choice) = &self.tool_choice {
+            return Some(choice.clone());
+        }
+        let tool = self
+            .final_tool
+            .as_ref()
+            .filter(|tool| tool.made.is_some())?;
+        if request.tools.len() != 1 {
+            return None;
+        }
+        let provider = &self.agent.provider;
+        let thinking = request.thinking.as_ref();
+        let named = ToolChoice::Tool {
+            name: tool.name.clone(),
+        };
+        [named, ToolChoice::Required {}]
+            .into_iter()
+            .find(|choice| provider.tool_choice_refusal(choice, thinking).is_none())
     }
 }

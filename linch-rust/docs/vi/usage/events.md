@@ -173,6 +173,8 @@ Run đã bắt đầu.
 | `resumed` | `True` ở `init` mở đầu một lần resume hoặc approve của run, kèm các tool hiện tại của run; `False` ở `init` đầu tiên của run |
 | `turn` | Lượt mà lời gọi tiếp tục: lượt của checkpoint run, với một `init` được resume; `0` ở lần đầu của run |
 | `output_schema` | [Output schema](./structured-output.md#give-one-run-its-own-schema) riêng của run, trên `init` đầu tiên của một run được bắt đầu với nó; `None` nếu không |
+| `tool_choice` | [Tool choice](./structured-output.md#choose-which-tool-the-model-calls) riêng của run, trên `init` đầu tiên của một run được bắt đầu với nó; `None` nếu không |
+| `final_tool` | Tên [final tool](./structured-output.md#the-final-tool) của run, trên `init` đầu tiên của một run có nó; `None` nếu không |
 
 Mọi stream `run`, `resume` và `approve` đều bắt đầu bằng `init`. Một `init` được
 resume là bền vững, nên các event được replay cho thấy điểm bắt đầu của mỗi lời

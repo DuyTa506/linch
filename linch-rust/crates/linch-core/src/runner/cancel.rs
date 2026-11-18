@@ -79,6 +79,11 @@ pub(super) fn step(
             Unpaired::Calls(calls()?)
         }
         Recovery::ToolResults { message, appended } => Unpaired::Message { message, appended },
+        // The answer was decided, but the cancel is too: the results go in
+        // and the run ends `aborted`.
+        Recovery::Finishing {
+            message, appended, ..
+        } => Unpaired::Message { message, appended },
         Recovery::Aborting { message, appended } => Unpaired::Saved { message, appended },
         // A prompt, a response without calls or a projection not yet in
         // the session is dropped; one that is in leaves it paired.

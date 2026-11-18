@@ -11,7 +11,7 @@ use futures::stream::BoxStream;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-use super::{ProviderEvent, ProviderRequest, StreamError};
+use super::{ProviderEvent, ProviderRequest, StreamError, Thinking, ToolChoice};
 
 /// The event stream of one provider call.
 pub type ProviderStream = BoxStream<'static, Result<ProviderEvent, ProviderError>>;
@@ -40,6 +40,29 @@ pub trait Provider: Send + Sync {
     /// `linch` facade calls it when it opens an agent; a host that builds
     /// one in code calls it before [`crate::AgentBuilder::build`].
     async fn prepare(&self) {}
+
+    /// Whether the provider takes a run's output schema in the request
+    /// ([`ProviderRequest::output_schema`]), in its own structured-output
+    /// form; true unless the adapter says otherwise. A provider without it
+    /// is never sent the schema: the run offers a final tool instead, whose
+    /// input schema is the output schema and whose call ends the run with
+    /// that input as the answer (Python's `structured_output_terminal_tool`).
+    fn native_output_schema(&self) -> bool {
+        true
+    }
+
+    /// Why the provider cannot send `choice` in a request with `thinking`;
+    /// `None` when it can (the default: every choice). It never does I/O.
+    /// The agent refuses a `tool_choice` this names when it is built and
+    /// when a run brings its own, rather than failing each call; an
+    /// adapter checks the same rule again when it builds the request.
+    fn tool_choice_refusal(
+        &self,
+        _choice: &ToolChoice,
+        _thinking: Option<&Thinking>,
+    ) -> Option<String> {
+        None
+    }
 
     /// Start one call. The stream ends after `message_end` or an error.
     /// Cancelling `cancel` ends the stream with [`ProviderError::Cancelled`].

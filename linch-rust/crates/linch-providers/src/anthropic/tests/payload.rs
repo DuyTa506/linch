@@ -123,6 +123,14 @@ fn forced_tool_choice_fails_only_with_budgeted_thinking() {
         assert!(invalid(&with(Some(budgeted.clone()))));
         assert!(!invalid(&with(Some(Thinking::Adaptive { display: None }))));
         assert!(!invalid(&with(None)));
+        // The open-time check is the same rule.
+        assert!(payload::tool_choice_refusal(&choice, Some(&budgeted)).is_some());
+        let adaptive = Thinking::Adaptive { display: None };
+        assert!(payload::tool_choice_refusal(&choice, Some(&adaptive)).is_none());
+        assert!(payload::tool_choice_refusal(&choice, None).is_none());
+    }
+    for open in [ToolChoice::Auto {}, ToolChoice::Disabled {}] {
+        assert!(payload::tool_choice_refusal(&open, Some(&budgeted)).is_none());
     }
 }
 

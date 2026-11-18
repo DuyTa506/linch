@@ -257,3 +257,40 @@ async fn server_key_is_sent_as_bearer_and_scrubbed_from_errors() {
         "{err:?}"
     );
 }
+
+/// The open-time check says what the payload builder does, and a server
+/// takes no output schema natively: a run there offers its final tool.
+#[test]
+fn servers_refuse_at_open_what_their_payload_refuses() {
+    let named = ToolChoice::Tool {
+        name: "get_weather".into(),
+    };
+    let choices = [
+        ToolChoice::Auto {},
+        ToolChoice::Disabled {},
+        ToolChoice::Required {},
+        named,
+    ];
+    for server in ALL {
+        let options = ServerOptions::new(server, "http://localhost/v1");
+        let provider = OpenAiChat::server(options).unwrap();
+        assert!(!provider.native_output_schema(), "{server:?}");
+        for choice in choices.clone() {
+            let request = ProviderRequest {
+                tool_choice: Some(choice.clone()),
+                ..request("m")
+            };
+            let refused = provider.tool_choice_refusal(&choice, None);
+            let built = body(server, &request);
+            assert_eq!(refused.is_some(), built.is_err(), "{server:?} {choice:?}");
+            let off = Thinking::Disabled {};
+            assert_eq!(provider.tool_choice_refusal(&choice, Some(&off)), refused);
+        }
+    }
+    let key = ApiKey::new("sk-test").unwrap();
+    let openai = OpenAiChat::new(crate::OpenAiChatOptions::new(key)).unwrap();
+    assert!(openai.native_output_schema());
+    for choice in choices {
+        assert_eq!(openai.tool_choice_refusal(&choice, None), None);
+    }
+}

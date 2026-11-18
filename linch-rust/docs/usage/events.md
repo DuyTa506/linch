@@ -171,6 +171,8 @@ The run started.
 | `resumed` | `True` on the `init` that starts a resume or approve of the run, with the run's current tools; `False` on the run's first |
 | `turn` | The turn the call continues in: the run checkpoint's, for a resumed `init`; `0` on the run's first |
 | `output_schema` | The run's own [output schema](./structured-output.md#give-one-run-its-own-schema), on the first `init` of a run started with one; `None` otherwise |
+| `tool_choice` | The run's own [tool choice](./structured-output.md#choose-which-tool-the-model-calls), on the first `init` of a run started with one; `None` otherwise |
+| `final_tool` | The name of the run's [final tool](./structured-output.md#the-final-tool), on the first `init` of a run that has one; `None` otherwise |
 
 Every `run`, `resume` and `approve` stream starts with `init`. A resumed one
 is durable, so replayed events show each call's start.

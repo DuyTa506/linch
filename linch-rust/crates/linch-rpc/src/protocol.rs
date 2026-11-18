@@ -6,7 +6,7 @@ use std::fmt;
 
 use linch::ask_user::AskUserAnswer;
 use linch::hooks::ApprovalResponse;
-use linch::{Envelope, OutputSchema, Principal, RunId, SessionId};
+use linch::{Envelope, OutputSchema, Principal, RunId, SessionId, ToolChoice};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ErrorObject;
@@ -203,6 +203,14 @@ pub struct StartParams {
     /// unusable one ends the run with `-32031` and writes nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<OutputSchema>,
+    /// The tool choice of this run alone, in place of the agent's
+    /// `spec.tool_choice`: `{"type": "auto" | "none" | "required"}` or
+    /// `{"type": "tool", "name"}`. It is stored with the run, so a resume or
+    /// approve uses it again. One that names a tool the run does not offer,
+    /// or that the provider refuses, ends the run with `-32034` and writes
+    /// nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<ToolChoice>,
 }
 
 /// Params of `run.resume`.
@@ -351,6 +359,24 @@ mod tests {
         assert_eq!((schema.name.as_str(), schema.strict), ("invoice", true));
         let mut wrong = bare;
         wrong["output_schema"] = json!({"name": "x", "schema": {}, "format": "json"});
+        assert!(serde_json::from_value::<StartParams>(wrong).is_err());
+    }
+
+    #[test]
+    fn start_params_carry_a_tool_choice_only_when_given() {
+        let bare = json!({"agent": "a", "session_id": "s1", "prompt": "hi"});
+        let params: StartParams = serde_json::from_value(bare.clone()).unwrap();
+        assert_eq!(params.tool_choice, None);
+        let mut chosen = bare.clone();
+        chosen["tool_choice"] = json!({"type": "tool", "name": "Read"});
+        let params: StartParams = serde_json::from_value(chosen.clone()).unwrap();
+        let read = linch::ToolChoice::Tool {
+            name: "Read".into(),
+        };
+        assert_eq!(params.tool_choice, Some(read));
+        assert_eq!(serde_json::to_value(&params).unwrap(), chosen);
+        let mut wrong = bare;
+        wrong["tool_choice"] = json!("required");
         assert!(serde_json::from_value::<StartParams>(wrong).is_err());
     }
 

@@ -92,7 +92,7 @@ pub use registry::{
     OutputContractError, RegisteredTool, RegistryError, SchemaKind, ToolRegistry, ToolSnapshot,
 };
 pub use reliability::ProviderRetry;
-pub use run::{Checkpoint, Phase, RunStatus, StopReason, ToolDecisionRecord};
+pub use run::{Checkpoint, Ending, Phase, RunStatus, StopReason, ToolDecisionRecord};
 pub use runner::RunStream;
 pub use scheduler::{
     BatchPlan, CallOutcome, ExecuteOptions, PlannedAction, PlannedCall, RecordedApproval,

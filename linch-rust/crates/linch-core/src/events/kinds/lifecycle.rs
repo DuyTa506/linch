@@ -5,7 +5,7 @@ use crate::events::wire::serialize_finite_f64_option;
 use crate::ids::{RunId, SessionId};
 use crate::json::JsonObject;
 use crate::message::Message;
-use crate::provider::OutputSchema;
+use crate::provider::{OutputSchema, ToolChoice};
 use crate::run::StopReason;
 use crate::usage::Usage;
 use serde::{Deserialize, Serialize};
@@ -46,6 +46,17 @@ pub struct InitEvent {
     /// back from here. Absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<OutputSchema>,
+    /// The run's own tool choice, on the `init` of a new run started with
+    /// one ([`crate::RunOptions::tool_choice`]); a resume reads it back
+    /// from here. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<ToolChoice>,
+    /// The name of the run's final tool, whose call ends the run with its
+    /// input as the answer ([`crate::AgentSpec::final_tool_name`], or the
+    /// one made from the output schema), on the `init` of a new run that
+    /// has one; a resume reads it back from here. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_tool: Option<String>,
 }
 
 /// Why a [`UserEvent`] was emitted.

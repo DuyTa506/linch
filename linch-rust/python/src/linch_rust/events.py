@@ -25,7 +25,8 @@ class InitEvent:
 
     A new run starts with one; each resume or approve starts with another,
     `resumed` and naming the `turn` it continues in. A run started with its
-    own `output_schema` has it on its first `init`.
+    own `output_schema` or `tool_choice` has it on its first `init`, and a
+    run with a final tool names it there as `final_tool`.
     """
 
     type: ClassVar[str] = "init"
@@ -39,6 +40,8 @@ class InitEvent:
     resumed: bool = False
     turn: int = 0
     output_schema: JsonObject | None = None
+    tool_choice: JsonObject | None = None
+    final_tool: str | None = None
 
 
 @dataclass(frozen=True)

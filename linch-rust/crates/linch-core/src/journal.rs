@@ -11,8 +11,8 @@
 //!   `Started`, `AssistantReceived`, `Compacted` (a paid summary) and
 //!   `Aborting` (a cancel's intent) write through, `AwaitingApproval` and `AwaitingInput` write through with
 //!   status `awaiting_approval` and `awaiting_input`, and
-//!   `ProviderPending`, `CompactionPending`, `ToolBatch` and `ToolResults`
-//!   are held. A held checkpoint is a snapshot: it covers only the events
+//!   `ProviderPending`, `CompactionPending`, `ToolBatch`, `ToolResults` and
+//!   `Finishing` are held. A held checkpoint is a snapshot: it covers only the events
 //!   pending when it was saved.
 //! - The caller places the barriers: [`Journal::flush`] before a provider
 //!   dispatch, after a summary call that gave no summary, after an accepted
@@ -216,7 +216,8 @@ impl Journal {
             | Phase::CompactionPending { .. }
             | Phase::Cleared { .. }
             | Phase::ToolBatch { .. }
-            | Phase::ToolResults { .. } => {
+            | Phase::ToolResults { .. }
+            | Phase::Finishing { .. } => {
                 self.check()?;
                 let covers = self.pending.len();
                 self.held = Some(Held { checkpoint, covers });
