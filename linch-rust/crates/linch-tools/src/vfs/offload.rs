@@ -31,6 +31,9 @@ const POLICY_ID: &str = "linch.vfs.offload";
 /// Bytes per estimated token, as in the compaction estimate.
 const BYTES_PER_TOKEN: u64 = 4;
 
+/// Most bytes of the preview, whatever the line count.
+const PREVIEW_MAX_BYTES: usize = 2000;
+
 /// When and where [`ResultOffload`] moves tool results.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffloadConfig {
@@ -95,7 +98,14 @@ impl ResultOffload {
     fn pointer(&self, text: &str, path: &str, tokens: u64) -> String {
         let lines = self.config.preview_lines;
         let preview: Vec<&str> = text.split('\n').take(lines).collect();
-        let (preview, bytes, prefix) = (preview.join("\n"), text.len(), &self.prefix);
+        let mut preview = preview.join("\n");
+        // One very long line (minified text) would otherwise be previewed whole.
+        let mut cut = PREVIEW_MAX_BYTES.min(preview.len());
+        while !preview.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        preview.truncate(cut);
+        let (bytes, prefix) = (text.len(), &self.prefix);
         format!(
             "{preview}\n\n[Tool result truncated: ~{tokens} tokens ({bytes} bytes) offloaded to \
              '{path}'. Showing the first {lines} lines. Use read_file(path=\"{path}\", \
