@@ -16,8 +16,8 @@ use linch_mcp::McpServer;
 use linch_postgres::{PgMailbox, PgRunStore, PgSessionStore, PgToolCache};
 use linch_providers::{
     Anthropic, AnthropicOptions, ApiKey, DeepSeek, DeepSeekOptions, Gemini, GeminiOptions,
-    OpenAiChat, OpenAiChatOptions, OpenAiResponses, ReasoningSummary, ResponsesOptions, Server,
-    ServerOptions, anthropic, deepseek, gemini, openai,
+    HttpClients, OpenAiChat, OpenAiChatOptions, OpenAiResponses, ReasoningSummary, RequestOptions,
+    ResponsesOptions, Server, ServerOptions, anthropic, deepseek, gemini, openai,
 };
 use linch_tools::{
     DEFAULT_LEDGER_CHARS, ExecutionBackend, LocalFs, Processes, ReadTracker, RemoteExec,
@@ -151,7 +151,7 @@ impl AgentConfig {
                 max,
             )
         });
-        let provider = provider(self.provider, true)?;
+        let provider = provider(self.provider, true, Some(&pools.clients()))?;
         // A self-hosted server reports its context window here, before the
         // offload threshold and the skill listing are derived from it.
         provider.prepare().await;
@@ -538,7 +538,7 @@ impl ProviderConfig {
     /// Raises:
     ///     OpenError: The key is missing or the HTTP client cannot be built.
     pub fn build(&self) -> Result<Arc<dyn Provider>, OpenError> {
-        provider(self.clone(), true)
+        provider(self.clone(), true, None)
     }
 
     /// Like [`Self::build`], but the environment is never read for a key:
@@ -552,11 +552,28 @@ impl ProviderConfig {
     /// Raises:
     ///     OpenError: The HTTP client cannot be built.
     pub fn build_keyless(&self) -> Result<Arc<dyn Provider>, OpenError> {
-        provider(self.clone(), false)
+        provider(self.clone(), false, None)
     }
 }
 
-fn provider(config: ProviderConfig, keyed: bool) -> Result<Arc<dyn Provider>, OpenError> {
+/// The request options of `request`, sharing the HTTP clients of `clients`
+/// when the provider is opened by an agent (see [`PgPools`]).
+fn request_options(
+    request: &RequestConfig,
+    clients: Option<&HttpClients>,
+) -> Result<RequestOptions, OpenError> {
+    let options = request.options().map_err(OpenError::Provider)?;
+    Ok(match clients {
+        Some(clients) => options.shared_clients(clients.clone()),
+        None => options,
+    })
+}
+
+fn provider(
+    config: ProviderConfig,
+    keyed: bool,
+    clients: Option<&HttpClients>,
+) -> Result<Arc<dyn Provider>, OpenError> {
     let built: Arc<dyn Provider> = match config {
         ProviderConfig::Scripted {
             turns,
@@ -582,7 +599,7 @@ fn provider(config: ProviderConfig, keyed: bool) -> Result<Arc<dyn Provider>, Op
                 DeepSeekOptions::new(key("deepseek", deepseek::API_KEY_ENV, keyed, &request)?);
             override_url(&mut options.base_url, base_url);
             options.context_window = context_window;
-            options.request = request.options().map_err(OpenError::Provider)?;
+            options.request = request_options(&request, clients)?;
             options.chat = chat.options();
             Arc::new(DeepSeek::new(options).map_err(OpenError::Provider)?)
         }
@@ -596,7 +613,7 @@ fn provider(config: ProviderConfig, keyed: bool) -> Result<Arc<dyn Provider>, Op
                 OpenAiChatOptions::new(key("openai-chat", openai::API_KEY_ENV, keyed, &request)?);
             override_url(&mut options.base_url, base_url);
             options.context_window = context_window;
-            options.request = request.options().map_err(OpenError::Provider)?;
+            options.request = request_options(&request, clients)?;
             options.chat = chat.options();
             Arc::new(OpenAiChat::new(options).map_err(OpenError::Provider)?)
         }
@@ -613,7 +630,7 @@ fn provider(config: ProviderConfig, keyed: bool) -> Result<Arc<dyn Provider>, Op
             options.reasoning_summary = reasoning_summary.map(summary);
             options.store = store;
             options.native_catalog_changes = native_catalog_changes;
-            options.request = request.options().map_err(OpenError::Provider)?;
+            options.request = request_options(&request, clients)?;
             Arc::new(OpenAiResponses::new(options).map_err(OpenError::Provider)?)
         }
         ProviderConfig::Anthropic {
@@ -633,14 +650,14 @@ fn provider(config: ProviderConfig, keyed: bool) -> Result<Arc<dyn Provider>, Op
             };
             override_url(&mut options.base_url, base_url);
             options.native_catalog_changes = native_catalog_changes;
-            options.request = request.options().map_err(OpenError::Provider)?;
+            options.request = request_options(&request, clients)?;
             Arc::new(Anthropic::new(options).map_err(OpenError::Provider)?)
         }
         ProviderConfig::Gemini { base_url, request } => {
             let mut options =
                 GeminiOptions::new(key("gemini", gemini::API_KEY_ENV, keyed, &request)?);
             override_url(&mut options.base_url, base_url);
-            options.request = request.options().map_err(OpenError::Provider)?;
+            options.request = request_options(&request, clients)?;
             Arc::new(Gemini::new(options).map_err(OpenError::Provider)?)
         }
         ProviderConfig::Vllm {
@@ -656,6 +673,7 @@ fn provider(config: ProviderConfig, keyed: bool) -> Result<Arc<dyn Provider>, Op
             &chat,
             "VLLM_API_KEY",
             keyed,
+            clients,
         )?,
         ProviderConfig::SgLang {
             base_url,
@@ -670,6 +688,7 @@ fn provider(config: ProviderConfig, keyed: bool) -> Result<Arc<dyn Provider>, Op
             &chat,
             "SGLANG_API_KEY",
             keyed,
+            clients,
         )?,
         ProviderConfig::LlamaCpp {
             base_url,
@@ -684,6 +703,7 @@ fn provider(config: ProviderConfig, keyed: bool) -> Result<Arc<dyn Provider>, Op
             &chat,
             "LLAMA_API_KEY",
             keyed,
+            clients,
         )?,
     };
     Ok(built)
@@ -763,11 +783,12 @@ fn server(
     chat: &ChatConfig,
     env: &'static str,
     keyed: bool,
+    clients: Option<&HttpClients>,
 ) -> Result<Arc<dyn Provider>, OpenError> {
     let mut options = ServerOptions::new(server, base_url);
     options.api_key = ApiKey::from_env(env).filter(|_| keyed);
     options.context_window = context_window;
-    options.request = request.options().map_err(OpenError::Provider)?;
+    options.request = request_options(request, clients)?;
     options.chat = chat.options();
     Ok(Arc::new(
         OpenAiChat::server(options).map_err(OpenError::Provider)?,

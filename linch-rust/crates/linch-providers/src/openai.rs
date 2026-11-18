@@ -120,7 +120,7 @@ impl OpenAiChatOptions {
 /// A Chat Completions provider for OpenAI or one OpenAI-compatible server.
 #[derive(Debug, Clone)]
 pub struct OpenAiChat {
-    client: reqwest::Client,
+    client: crate::clients::SharedClient,
     profile: &'static ChatProfile,
     base_url: String,
     api_key: Option<ApiKey>,

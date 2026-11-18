@@ -671,6 +671,21 @@ config = {
   thuộc [hợp đồng của run](./agent.md#hợp-đồng-của-run), nên đổi nó không bao giờ làm
   kẹt một run đang tạm dừng.
 
+## Một HTTP client cho mỗi bộ cài đặt
+
+Một HTTP client giữ một pool kết nối và một cấu hình TLS, khoảng 90 KB. Server mở các
+agent của một kết nối (hoặc của một tenant) với một nơi giữ client chung, nên các agent
+có provider cùng timeout kết nối và đọc, cùng `request.default_headers` dùng chung một
+client, cùng các kết nối và phiên TLS của nó: 50 lần mở một agent vLLM tốn một client,
+không phải năm mươi. Client mất đi khi không agent nào đang mở còn giữ nó. Key được gửi theo
+từng request và endpoint là một phần của URL, nên không cái nào làm tách client, và agent
+của một tenant không bao giờ dùng chung client với tenant khác: nơi giữ là theo tenant.
+Đo trên `linch-server` bản release, mỗi lần mở thêm một agent loại vLLM tốn khoảng 95 KB
+bộ nhớ thường trú trước đây và khoảng 7 KB sau đó. Host dùng thư viện có được điều tương
+tự từ `PgPools`: các agent mở với cùng một `PgPools` dùng chung,
+`AgentConfig::open` (mỗi lần một cái mới) không chia sẻ gì, và `PgPools::http_clients`
+cho biết các agent đang mở giữ bao nhiêu client.
+
 ## Chi phí
 
 Các event usage và result mang `cost_usd`, `cumulative_cost_usd` và

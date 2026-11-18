@@ -126,7 +126,7 @@ impl ResponsesOptions {
 /// The OpenAI Responses provider.
 #[derive(Debug, Clone)]
 pub struct OpenAiResponses {
-    client: reqwest::Client,
+    client: crate::clients::SharedClient,
     options: ResponsesOptions,
 }
 

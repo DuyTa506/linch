@@ -11,6 +11,7 @@ mod api_key;
 mod base_url;
 #[cfg(test)]
 mod capabilities_tests;
+mod clients;
 mod context;
 #[cfg(test)]
 mod cut_stream_tests;
@@ -35,6 +36,7 @@ mod wire_tests;
 pub use anthropic::{Anthropic, AnthropicOptions};
 pub use api_key::ApiKey;
 pub use base_url::{BaseUrlError, check_base_url};
+pub use clients::HttpClients;
 pub use deepseek::{DeepSeek, DeepSeekOptions};
 pub use gemini::{Gemini, GeminiOptions};
 pub use openai::{OpenAiChat, OpenAiChatOptions};

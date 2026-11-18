@@ -679,6 +679,22 @@ config = {
   the [run contract](./agent.md#the-run-contract), so changing it never
   strands a suspended run.
 
+## One HTTP client per settings
+
+An HTTP client holds a connection pool and a TLS configuration, about 90 KB. A
+server opens the agents of one connection (or of one tenant) with one holder
+of clients, so agents whose providers have the same connect and read timeouts
+and the same `request.default_headers` share one client, and with it its
+connections and TLS sessions: 50 opens of a vLLM agent cost one client, not
+fifty. A client goes once no open agent holds it. The key is sent per request
+and the endpoint is part of the URL, so neither splits clients, and a tenant's
+agents never share a client with another tenant's: the holder is per tenant.
+Measured on a release `linch-server`, each extra open of a vLLM-kind agent
+cost about 95 KB of resident memory before and about 6 KB after. A library
+host gets the same from `PgPools`: agents opened with one
+`PgPools` share, `AgentConfig::open` (a fresh one each time) shares nothing,
+and `PgPools::http_clients` says how many clients the open agents hold.
+
 ## Cost
 
 Usage and result events carry `cost_usd`, `cumulative_cost_usd` and

@@ -12,6 +12,8 @@ use linch_core::{JsonObject, JsonValue, ProviderError, ProviderStream};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
 use crate::ApiKey;
+use crate::HttpClients;
+use crate::clients::SharedClient;
 
 /// Body fields an adapter owns: `extra_body` never replaces them. The
 /// request's own `temperature` always wins, as in Python.
@@ -103,6 +105,8 @@ pub struct RequestOptions {
     /// call fails; `None` keeps the adapter's own limit.
     pub timeout: Option<Duration>,
     headers: HeaderMap,
+    /// Where the HTTP client comes from, when a holder shares them.
+    clients: Option<HttpClients>,
 }
 
 impl RequestOptions {
@@ -212,14 +216,27 @@ impl RequestOptions {
         }
     }
 
+    /// Take the HTTP client from `clients` instead of building one: every
+    /// provider of that holder with the same timeouts and default headers
+    /// then uses the same client.
+    pub fn shared_clients(mut self, clients: HttpClients) -> Self {
+        self.clients = Some(clients);
+        self
+    }
+
     /// The HTTP client for an adapter: its default headers, and its read
     /// timeout unless [`RequestOptions::timeout`] sets one.
     pub(crate) fn client(
         &self,
         connect: Duration,
         read: Duration,
-    ) -> reqwest::Result<reqwest::Client> {
-        crate::transport::client(connect, self.timeout.unwrap_or(read), &self.headers)
+    ) -> reqwest::Result<SharedClient> {
+        let read = self.timeout.unwrap_or(read);
+        let build = || crate::transport::client(connect, read, &self.headers);
+        match &self.clients {
+            Some(clients) => clients.get(connect, read, &self.headers, build),
+            None => build().map(SharedClient::new),
+        }
     }
 }
 

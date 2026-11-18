@@ -92,7 +92,7 @@ impl DeepSeekOptions {
 /// The DeepSeek provider.
 #[derive(Debug, Clone)]
 pub struct DeepSeek {
-    client: reqwest::Client,
+    client: crate::clients::SharedClient,
     options: DeepSeekOptions,
 }
 

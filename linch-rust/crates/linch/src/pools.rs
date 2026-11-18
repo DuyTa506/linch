@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use linch_core::{ProviderGate, WeakProviderGate};
 use linch_postgres::{MigrateError, PgPool, SchemaError};
+use linch_providers::HttpClients;
 use sqlx::ConnectOptions;
 use sqlx::postgres::PgConnectOptions;
 use tokio::sync::OnceCell;
@@ -48,6 +49,16 @@ use crate::error::OpenError;
 /// keeps one per tenant. It does not cross processes; a worker or a second
 /// server has its own gates.
 ///
+/// It holds the HTTP clients of the providers too. Agents opened with one
+/// `PgPools` whose providers have the same timeouts and default headers
+/// share one client, and with it one connection pool and TLS sessions: a
+/// client costs about 90 KB, so 50 opens of one provider no longer build 50.
+/// A client goes once no open agent holds it. The client holds no key (a
+/// key is sent per request) and no endpoint, so two keys or two endpoints
+/// of one tenant share it; a server keeps one `PgPools` per tenant, so a
+/// tenant boundary never shares one, and [`AgentConfig::open`] uses a fresh
+/// `PgPools`, so it shares none.
+///
 /// [`AgentConfig::open_with`]: crate::AgentConfig::open_with
 /// [`AgentConfig::open`]: crate::AgentConfig::open
 /// [`OpenedAgent`]: crate::OpenedAgent
@@ -55,6 +66,7 @@ use crate::error::OpenError;
 pub struct PgPools {
     pools: Mutex<HashMap<Target, Weak<Shared>>>,
     gates: Mutex<HashMap<GateKey, WeakProviderGate>>,
+    clients: HttpClients,
 }
 
 /// What a provider gate is shared by: the variable the provider reads its
@@ -149,6 +161,17 @@ impl PgPools {
         let pool = shared.0.get_or_try_init(|| connect(dsn, max_connections));
         let pool = pool.await?.clone();
         Ok((shared, pool))
+    }
+
+    /// The HTTP clients the agents opened with these pools share.
+    pub(crate) fn clients(&self) -> HttpClients {
+        self.clients.clone()
+    }
+
+    /// How many HTTP clients an open agent of these pools holds: agents
+    /// with the same timeouts and default headers hold one between them.
+    pub fn http_clients(&self) -> usize {
+        self.clients.live()
     }
 
     /// The gate for `key`, or a new one of `max` places when no open agent

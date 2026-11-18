@@ -122,7 +122,7 @@ impl AnthropicOptions {
 /// The Anthropic Messages provider.
 #[derive(Debug, Clone)]
 pub struct Anthropic {
-    client: reqwest::Client,
+    client: crate::clients::SharedClient,
     options: AnthropicOptions,
 }
 
