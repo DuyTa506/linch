@@ -130,7 +130,9 @@ class ToolCallEndEvent:
     result went; for a failed call, the error's `details` object, such as a
     `Bash` command's `status` and `exit_code`); `None` for a tool that set
     none. `error_code` is a failed call's machine-readable code, `None`
-    without one.
+    without one; `tool_interrupted` marks the stand-in end of a call that a
+    crash interrupted after its start: its effect is unknown and it is not
+    run again, so reconcile it with `ToolContext.idempotency_key`.
     `cache_hit` is set when `spec.tool_cache` served the result: the tool
     did not run, and the call has no durable start.
     """

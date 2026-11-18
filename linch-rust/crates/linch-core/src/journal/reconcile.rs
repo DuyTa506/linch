@@ -20,7 +20,11 @@ use session::{appended, cleared, projected, prompt_appended, unchanged};
 
 /// Result text for a tool that started but has no durable end.
 pub const INTERRUPTED_TOOL_TEXT: &str = "Tool execution was interrupted before a result was \
-     recorded; not re-running automatically on resume.";
+     recorded; its effect is unknown, and it is not re-run automatically on resume.";
+
+/// `error_code` of the `tool_call_end` that stands in for a call that started
+/// and has no durable end, so a host can find the calls to reconcile.
+pub const INTERRUPTED_TOOL_CODE: &str = "tool_interrupted";
 
 /// What a resumed run does next. `appended` says whether the phase's pending
 /// session message is already in the session log.

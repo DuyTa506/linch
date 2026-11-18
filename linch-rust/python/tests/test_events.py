@@ -130,6 +130,12 @@ def test_the_stream_names_the_provider_the_served_model_and_a_tool_error_code() 
     assert isinstance(plain, CompactionEvent) and plain.clipped_bytes is None
 
 
+def test_an_interrupted_tool_call_end_carries_its_error_code() -> None:
+    end = decode_event({**END, "error_code": "tool_interrupted"})
+
+    assert isinstance(end, ToolCallEndEvent) and end.error_code == "tool_interrupted"
+
+
 def test_a_resumed_init_names_the_turn_it_continues_in() -> None:
     fields = {"type": "init", "session_id": "s1", "run_id": "r1", "model": "m"}
     fields |= {"provider": "scripted", "tools": []}

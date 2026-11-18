@@ -13,7 +13,7 @@ use crate::events::kinds::{
 };
 use crate::events::{Envelope, Event};
 use crate::hooks::ApprovalResponse;
-use crate::journal::ToolRecovery;
+use crate::journal::{INTERRUPTED_TOOL_CODE, ToolRecovery};
 use crate::json::JsonObject;
 use crate::message::{ContentBlock, Message, Role, ToolUseBlock};
 use crate::policy::PermissionDecision;
@@ -53,7 +53,7 @@ impl Runner {
                     duration_ms: 0,
                     canonical_output: None,
                     metadata: None,
-                    error_code: None,
+                    error_code: Some(INTERRUPTED_TOOL_CODE.to_owned()),
                     cache_hit: false,
                 }));
             }
