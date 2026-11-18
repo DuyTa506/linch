@@ -268,6 +268,7 @@ fn recovery_cache_and_risk_events_are_counted() {
             strategy: "summary".into(),
             duration_ms: 0,
             forced: false,
+            rejected: None,
         })
     };
     let verification = |action| {

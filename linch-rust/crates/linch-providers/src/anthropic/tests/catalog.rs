@@ -80,7 +80,7 @@ fn the_wire_prefix_keeps_its_bytes_across_an_addition() {
             text: "You help.".into(),
             cacheable: true,
         }];
-        request.cache_control = Some(linch_core::CacheControl { ttl: None });
+        request.cache_control = Some(linch_core::CacheControl::default());
     }
     let (first, later) = (
         payload::build(&first, true).unwrap(),

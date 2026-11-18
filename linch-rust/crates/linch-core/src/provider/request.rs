@@ -204,12 +204,17 @@ pub enum ThinkingDisplay {
 ///
 /// `None` means caching is not requested; `Some` requests it, optionally
 /// with an explicit lifetime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CacheControl {
     /// Requested cache lifetime; `None` uses the provider's default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl: Option<CacheTtl>,
+    /// Trailing messages the message breakpoint skips, so it lands on the
+    /// last message before them, where an earlier request wrote its cache
+    /// (the summary call's instruction is such a tail).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub uncached_tail: usize,
 }
 
 /// Requested prompt-cache lifetime.

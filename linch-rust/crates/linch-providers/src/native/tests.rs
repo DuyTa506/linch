@@ -10,8 +10,8 @@ use linch_core::provider::scripted::TurnBuilder;
 use linch_core::{
     AgentBuilder, AgentSpec, CompactionSpec, JsonObject, JsonValue, MemoryRunStore,
     MemorySessionStore, PermissionEngine, PermissionMode, PermissionPolicy, ProviderRequest,
-    Registration, RunOptions, ScriptedProvider, ScriptedTurn, Tool, ToolChoice, ToolContext,
-    ToolOutput, ToolRegistry, ToolResult, ToolScope, Usage,
+    Registration, RunOptions, ScriptedProvider, ScriptedTurn, Tool, ToolContext, ToolOutput,
+    ToolRegistry, ToolResult, ToolScope, Usage,
 };
 use serde_json::json;
 
@@ -169,8 +169,12 @@ async fn requests(
     }
     let requests = provider.requests();
     assert_eq!(requests.len(), 4, "turn 0, turn 1, the summary, the answer");
-    let summary = &requests[2].tool_choice;
-    assert_eq!(summary, &Some(ToolChoice::Disabled {}), "the summary call");
+    let summary = requests[2].messages.last().unwrap().text();
+    assert!(
+        summary.starts_with("The conversation to summarize ends above"),
+        "the summary call"
+    );
+    assert_eq!(requests[2].tool_choice, requests[1].tool_choice);
     requests
 }
 

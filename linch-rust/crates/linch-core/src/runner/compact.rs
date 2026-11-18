@@ -45,7 +45,7 @@ use crate::agent::RunError;
 use crate::compaction::{self, estimate_tokens};
 use crate::events::Event;
 use crate::events::kinds::CompactionEvent;
-use crate::events::model_call::ModelCallReceiptEvent;
+use crate::events::model_call::{CallDisposition, ModelCallReceiptEvent};
 use crate::message::{ContentBlock, Message};
 use crate::provider::ProviderError;
 use crate::provider::call::ModelCall;
@@ -128,19 +128,18 @@ impl Runner {
         let started = Instant::now();
         self.snapshot = agent.snapshot();
         // With micro on, the summary reads the folded part with its old
-        // tool results cleared, as Python's does after its micro step.
+        // tool results cleared, as Python's does after its micro step. At a
+        // turn's start it reads the whole view, so its prefix is the last
+        // primary call's (the kept turns are in it as well as after it); a
+        // forced one reads only the folded part, since the view does not fit.
         let source = (spec.micro)
             .then(|| compaction::cleared_before(&view, keep_from))
             .flatten();
-        let older = (source.as_deref().unwrap_or(&view)[..keep_from].iter())
+        let end = if forced { keep_from } else { view.len() };
+        let older = (source.as_deref().unwrap_or(&view)[..end].iter())
             .map(|m| Message::clone(m))
             .collect();
-        let (tools, appended) = match &self.catalog {
-            Some(catalog) => (catalog.tools(None), catalog.appended(None)),
-            None => (self.snapshot.definitions(), Vec::new()),
-        };
-        let mut request = compaction::summary_request(&agent.spec, spec, tools, older);
-        request.appended_tools = appended;
+        let mut request = compaction::summary_request(self.request(older), spec);
         if self.standing.fallbacks > 0 {
             // A run that failed over summarizes on the model it now calls.
             request.model = self.model().to_owned();
@@ -168,19 +167,19 @@ impl Runner {
         self.settle(&mut receipt);
         let (usage, cost) = (receipt.usage, receipt.cost_usd);
         let served = receipt.actual_model.clone();
-        self.journal.stage(Event::ModelCallReceipt(receipt));
         // Paid whether or not it gave a summary, unless it failed before
         // costing anything.
-        if !(outcome.result.as_ref()).is_err_and(|failure| failure.free) {
-            self.stage_usage(usage, cost, served);
-        }
-        let text = match outcome.result {
-            Ok(assembly) => assembly.message.text(),
-            Err(failure) if matches!(failure.error, ProviderError::Cancelled) => {
-                self.abort().await?;
-                return Ok(None);
+        let free = (outcome.result.as_ref()).is_err_and(|failure| failure.free);
+        let cancelled = (outcome.result.as_ref())
+            .is_err_and(|failure| matches!(failure.error, ProviderError::Cancelled));
+        // A reply that is not a summary has no text to use, or a tool call.
+        let (text, called, answered) = match outcome.result {
+            Ok(assembly) => {
+                let called = (assembly.message.content.iter())
+                    .any(|block| matches!(block, ContentBlock::ToolUse(_)));
+                (assembly.message.text(), called, true)
             }
-            Err(_) => String::new(),
+            Err(_) => (String::new(), false, false),
         };
         // A summary is model output the model reads back: redact it too.
         let text = match agent.response_redactor() {
@@ -188,19 +187,7 @@ impl Runner {
             None => text,
         };
         let text = text.trim();
-        if text.is_empty() {
-            if forced {
-                // One terminal write: the receipt, usage, error and result.
-                self.unshortened().await?;
-                return Ok(None);
-            }
-            self.save(Phase::CompactionPending { attempt }).await?;
-            let ready = self.journal.flush().await?;
-            self.event_emit(&ready).await;
-            self.outbox.deliver(ready).await;
-            return Ok(Some(next));
-        }
-        let mut summary = compaction::summary_message(text);
+        let mut summary = compaction::checkpoint(text, &view[1..keep_from], spec.keep_user_tokens);
         if agent.skills.is_some() {
             // The bodies the model loaded, which the summary folds away.
             let reminders = skills::reminders(&self.log.full_history());
@@ -211,6 +198,55 @@ impl Runner {
             summary
                 .content
                 .extend(restated.map(ContentBlock::CatalogChange));
+        }
+        // A reply that called a tool, is empty, or is no smaller than the
+        // part it replaces is rejected: the view stays as it was, and the
+        // receipt and the `compaction` event say why. The model's text is
+        // what is measured, not the header, the verbatim user messages or
+        // the reminders added to it.
+        let plain = Message::user_text(text);
+        let rejection = answered
+            .then(|| compaction::rejection(called, text, &plain, &view[1..keep_from]))
+            .flatten();
+        if rejection.is_some() {
+            receipt.disposition = CallDisposition::Rejected;
+        }
+        self.journal.stage(Event::ModelCallReceipt(receipt));
+        if !free {
+            self.stage_usage(usage, cost, served);
+        }
+        if cancelled {
+            self.abort().await?;
+            return Ok(None);
+        }
+        if rejection.is_some() || text.is_empty() {
+            if let Some(reason) = rejection {
+                let (messages, tokens) = (view.len() as u64, tokens_before);
+                self.journal.stage(Event::Compaction(CompactionEvent {
+                    messages_before: messages,
+                    messages_after: messages,
+                    tokens_before: tokens,
+                    tokens_after: tokens,
+                    strategy: strategy.into(),
+                    duration_ms: super::end::millis(started.elapsed()),
+                    forced,
+                    rejected: Some(if forced {
+                        format!("{reason}: the prompt still does not fit, so the run ends")
+                    } else {
+                        format!("{reason}: the next due turn asks again")
+                    }),
+                }));
+            }
+            if forced {
+                // One terminal write: the receipt, usage, error and result.
+                self.unshortened().await?;
+                return Ok(None);
+            }
+            self.save(Phase::CompactionPending { attempt }).await?;
+            let ready = self.journal.flush().await?;
+            self.event_emit(&ready).await;
+            self.outbox.deliver(ready).await;
+            return Ok(Some(next));
         }
         let compacted = compaction::replacement(&view, summary.clone(), keep_from);
         let (messages_before, messages_after) = (view.len() as u64, compacted.len() as u64);
@@ -223,6 +259,7 @@ impl Runner {
             strategy: strategy.into(),
             duration_ms: super::end::millis(started.elapsed()),
             forced,
+            rejected: None,
         }));
         let keep_from = keep_from as u64;
         self.save(Phase::Compacted {
@@ -330,6 +367,7 @@ impl Runner {
             strategy: strategy.into(),
             duration_ms: super::end::millis(started.elapsed()),
             forced,
+            rejected: None,
         }));
         let before = before as u64;
         self.save(Phase::Cleared { before, attempt }).await?;

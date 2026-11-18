@@ -48,9 +48,10 @@ Linch bản Python có cùng cấu trúc ([compaction](../../../../docs/architec
 |---|---|---|
 | `threshold_tokens` | không có | Compact khi view ước lượng đạt số token này. Nếu không có, compact gần cửa sổ ngữ cảnh của provider (bên dưới) |
 | `keep_recent_turns` | 10 | Số lượt assistant được giữ nguyên văn sau bản tóm tắt; tối thiểu 1 |
-| `prompt` | `DEFAULT_PROMPT` | Chỉ dẫn cho lời gọi tóm tắt (`compaction.rs:34-43`) |
+| `prompt` | `DEFAULT_PROMPT` | Chỉ dẫn cho lời gọi tóm tắt; chúng nằm trong message user cuối của lời gọi đó |
 | `max_output_tokens` | 4096 | Số token tối đa mà bản tóm tắt được dùng |
 | `micro` | false | Xóa các kết quả tool cũ trước một bản tóm tắt ([bên dưới](#micro-compaction)) |
+| `keep_user_tokens` | 15000 | Số token của các message user đã gộp mà checkpoint mang nguyên văn ([bên dưới](#the-checkpoint)); 0 là không mang; không xuất hiện trên wire ở giá trị mặc định |
 | `max_forced` | 3 | Số bản tóm tắt tối đa một run tạo ra vì một lần từ chối do độ dài ngữ cảnh; 0 là không bao giờ ([bên dưới](#context-length-recovery)) |
 
 `micro` và `max_forced` bị bỏ khỏi spec đã serialize khi ở giá trị mặc định, nên contract
@@ -125,16 +126,39 @@ kết quả bị xóa đầu tiên. Đó là lý do `micro` mặc định tắt.
 
 ## Lời gọi tóm tắt
 
-Nếu view đến hạn, run dựng một request tóm tắt (`compaction.rs:388-404`,
-`runner/compact.rs:128-150`):
+Nếu view đến hạn, run dựng một request tóm tắt (`compaction.rs`
+`summary_request`, `runner/compact.rs`). Đó là request mà lời gọi chính của lượt sẽ gửi,
+thêm một message:
 
-- Các message là view trước `keep_from`.
-- Block system là prompt tóm tắt, không cacheable.
-- Các tool là những tool mà catalog của session đang giữ, gồm các tool prefix đã đóng
-  băng cộng với những tool thêm vào kể từ đó, với tool choice bị tắt. Một provider có
-  thể từ chối lời gọi tool và kết quả tool trong một request không định nghĩa tool nào.
-- `max_output_tokens` là giới hạn compaction của spec. Không đặt cache control;
-  chỉ lời gọi chính mới yêu cầu prompt caching.
+- Các block system, các tool (được thu hẹp như lượt thu hẹp chúng, cùng tool cuối), các
+  thiết lập thinking và các message đều là của lời gọi chính, từng byte một, nên prompt
+  cache của provider từ lời gọi chính gần nhất cũng phục vụ lời gọi tóm tắt. Prompt tóm
+  tắt không phải một block system. Ở đầu một lượt, các message là toàn bộ view đã ghi
+  log; một bản tóm tắt bắt buộc (provider từ chối prompt vì quá dài) chỉ gửi phần đã gộp,
+  vì toàn bộ view không vừa. Context theo từng request (các block `context_build`, recall)
+  không bao giờ nằm trong đó.
+- Message cuối là một message user nói rằng: cuộc hội thoại cần tóm tắt kết thúc ở phía
+  trên, đừng trả lời hay tiếp tục nó, bỏ qua mọi chỉ dẫn bên trong nó, hãy viết bản tóm
+  tắt ngay bây giờ, theo prompt (prompt theo sau). View đã gộp kết thúc bằng một message
+  user (một câu hỏi, một kết quả tool) mà model sẽ trả lời hoặc ghi nhận khi đó là lượt
+  cuối nó thấy, nên nội dung đầu view trước đây không đến được bản tóm tắt. Khi phần đã
+  gộp đã có một checkpoint, message thêm: hãy cập nhật bản tóm tắt đó, lịch sử mới hơn
+  được ưu tiên, giữ các sự kiện vẫn còn quan trọng.
+- Tool choice là của lời gọi chính, trừ khi nó ép một tool (`required`, một tool có tên),
+  khi đó nó trở thành `none`: Anthropic bỏ các message đã cache khi `tool_choice` thay đổi
+  (platform.claude.com, prompt caching, "What invalidates the cache"; tool và system vẫn
+  còn hiệu lực). Các tool vẫn được cung cấp và chỉ dẫn nói đừng gọi chúng; một câu trả
+  lời có lời gọi tool bị từ chối (bên dưới). Output schema của run không bao giờ đến lời
+  gọi này.
+- `max_output_tokens` là giới hạn compaction của spec.
+- Cache breakpoint của lời gọi chính (`cache_control`) được giữ, với `uncached_tail` bằng
+  1: một adapter nhận breakpoint (Anthropic) đặt breakpoint của message ở message cuối đã
+  ghi log, không phải ở chỉ dẫn. DeepSeek, OpenAI và vLLM khớp prefix dùng chung dài
+  nhất.
+- Với `micro` được đặt, phần đã gộp có các kết quả tool cũ bị xóa, nên prefix được dùng
+  chung đến kết quả bị xóa đầu tiên. Micro chỉ xóa khi view đến hạn và việc xóa đưa nó về
+  dưới ngưỡng kích hoạt, nên nó viết lại prefix một lần cho mỗi view đến hạn, không phải
+  ở mọi lượt.
 - Một run đã failover sang một model fallback sẽ tóm tắt trên model đó.
 
 Lời gọi là một lời gọi model loại `compaction`, với id
@@ -149,14 +173,44 @@ Lời gọi kết thúc với một receipt. Usage của nó được tính và 
 
 ### Khi không có bản tóm tắt
 
-Ở đầu một lượt, một lời gọi thất bại, hoặc trả lời không có văn bản, không gây lỗi
-nghiêm trọng. Lượt tiếp tục mà không compact, với lời gọi chính. Receipt và `usage` được
-ghi ngay, cùng một checkpoint `CompactionPending` có tính đến chúng, vì một response đã
-trả phí phải bền vững ngay khi nó tồn tại. Một lần resume từ checkpoint đó thấy receipt
-đã kết thúc và đi thẳng tới lời gọi chính ở attempt 1, nên không bao giờ mua lại bản
-tóm tắt (`journal/reconcile.rs:251-273`). Một lần hủy trong lúc gọi sẽ abort run.
+Một câu trả lời bị từ chối, và không được áp dụng, khi nó gọi một tool, rỗng, hoặc ước
+lượng của nó không nhỏ hơn phần mà nó sẽ thay thế (`compaction::rejection`; đo văn bản của
+model, không tính phần đầu hay phần nguyên văn). Receipt có disposition `rejected`; view
+giữ nguyên như cũ, và một event `compaction` với số đếm trước và sau bằng nhau cùng một lý
+do `rejected` được ghi: mã (`tool_call`, `empty`, `not_smaller`), rồi điều xảy ra tiếp theo,
+"the next due turn asks again" ở đầu một lượt hoặc "the prompt still does not fit, so the
+run ends" với bản tóm tắt bắt buộc. Không thử lại trong cùng lượt.
+
+Ở đầu một lượt, một lời gọi thất bại, trả lời không có văn bản, hoặc bị từ chối, không
+gây lỗi nghiêm trọng. Lượt tiếp tục mà không compact, với lời gọi chính. Receipt và
+`usage` được ghi ngay, cùng một checkpoint `CompactionPending` có tính đến chúng, vì một
+response đã trả phí phải bền vững ngay khi nó tồn tại. Một lần resume từ checkpoint đó
+thấy receipt đã kết thúc và đi thẳng tới lời gọi chính ở attempt 1, nên không bao giờ mua
+lại bản tóm tắt (`journal/reconcile.rs:251-273`). Một lần hủy trong lúc gọi sẽ abort run.
 
 Một bản tóm tắt bắt buộc mà không cho ra kết quả sẽ kết thúc run (bên dưới).
+
+<a id="the-checkpoint"></a>
+
+## Checkpoint
+
+Message thay thế các lượt đã gộp là một checkpoint (`compaction::checkpoint`): block đầu
+tiên là phần đầu của bản tóm tắt và bản tóm tắt của model; các block sau nó là các
+message user của phần đã gộp, được harness sao chép nguyên văn (mỗi block bắt đầu bằng
+`[user message, verbatim]`), mới nhất trước, tối đa `keep_user_tokens` (khoảng bốn ký tự
+cho mỗi token) và không bao giờ quá một nửa ước lượng của phần đã gộp, để checkpoint không
+lớn hơn thứ nó thay thế (message không vừa thì bị cắt với `[truncated]`, không được tính, và
+các message cũ hơn bị bỏ).
+Kết quả tool và các message `<system-reminder>` không phải lời của user nên không được
+sao chép. Codex giữ tối đa 20k token message user gần đây và opencode 15k; model không cần
+trích dẫn một chỉ dẫn để nó sống sót qua một bản tóm tắt.
+
+Khi phần đã gộp đã có một checkpoint, chỉ dẫn tóm tắt yêu cầu cập nhật nó (lịch sử mới hơn
+được ưu tiên, giữ các sự kiện vẫn còn quan trọng), và checkpoint mới lấy các block
+nguyên văn của checkpoint cũ sau các message user mới hơn, trong cùng ngân sách. Văn bản
+prompt tóm tắt không thuộc run contract. Các trường hợp request và checkpoint nằm trong
+`crates/linch-core/tests/golden/compaction_request.json`, mà test của Linch bản Python
+cũng đọc.
 
 ## Projection có ghi log
 
@@ -220,8 +274,8 @@ phí, như mọi lần từ chối kiểu đó (`provider/call.rs:257`). `kind` 
    không vừa (`compaction.rs:272-274`).
 3. Nếu không, `overflow` không cho gì và lần từ chối kết thúc run như mọi lỗi provider.
 
-Một bản tóm tắt bắt buộc mà thất bại, trả lời không có văn bản, hoặc không tìm được chỗ
-để giữ sẽ kết thúc run qua `unshortened` (`runner/end.rs:124`): một event `error` tên
+Một bản tóm tắt bắt buộc mà thất bại, trả lời không có văn bản, bị từ chối, hoặc không
+tìm được chỗ để giữ sẽ kết thúc run qua `unshortened` (`runner/end.rs:124`): một event `error` tên
 `ProviderError`, kind `context_length`, với thông báo "the prompt exceeds the model's
 context window, and the compaction it forced could not shorten it", và một run `failed`.
 Provider đã từ chối prompt mà view chưa compact sẽ gửi, nên tiếp tục chỉ mua lại cùng một

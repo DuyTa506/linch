@@ -272,9 +272,7 @@ async fn a_compaction_after_failing_over_asks_the_fallback() {
         "{:?}",
         kinds(&envelopes)
     );
-    let summary = provider.requests().into_iter().find(|request| {
-        (request.system.first()).is_some_and(|b| b.text.starts_with("Summarize the conversation"))
-    });
+    let summary = (provider.requests().into_iter()).find(is_summary_call);
     assert_eq!(summary.expect("a summary call").model, FIRST);
 }
 

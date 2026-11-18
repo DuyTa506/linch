@@ -264,7 +264,7 @@ impl AgentInner {
     ) -> ProviderRequest {
         let mut request = self.spec.request(tools, messages);
         request.system = system;
-        request.cache_control = Some(CacheControl { ttl: None });
+        request.cache_control = Some(CacheControl::default());
         request
     }
 

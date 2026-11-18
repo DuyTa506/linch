@@ -20,7 +20,7 @@ use linch_core::store::faulty::{FaultTiming, Faulty};
 use linch_core::{
     Agent, CallbackError, CompactionSpec, Envelope, Event, Hook, Hooks, PermissionMode, Provider,
     ProviderError, ProviderRequest, ProviderStream, Role, RunId, RunOptions, RunStatus, RunStore,
-    ScriptedTurn, SessionStore, ToolChoice, ToolScope, Usage,
+    ScriptedTurn, SessionStore, ToolScope, Usage,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -72,7 +72,7 @@ impl Provider for Summaries {
         request: ProviderRequest,
         _cancel: CancellationToken,
     ) -> Result<ProviderStream, ProviderError> {
-        let summarizing = request.tool_choice == Some(ToolChoice::Disabled {});
+        let summarizing = is_summary_call(&request);
         let kind = if summarizing { "summary" } else { "primary" };
         *self.calls.lock().unwrap().entry(kind).or_default() += 1;
         if !summarizing {

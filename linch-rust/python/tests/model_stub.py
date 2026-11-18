@@ -70,8 +70,9 @@ def last_call(messages: list[dict[str, Any]]) -> tuple[str, dict[str, Any], str]
 def decide(body: dict[str, Any]) -> tuple[str, Any]:
     """`("text", text)` or `("call", (name, arguments))`."""
     messages = body["messages"]
-    system = "".join(text_of(m) for m in messages if m.get("role") == "system")
-    if SUMMARY_PROMPT in system:
+    # The summary request ends with the instruction, as a user message.
+    final = messages[-1] if messages else {}
+    if final.get("role") == "user" and SUMMARY_PROMPT in text_of(final):
         return "text", "Summary: the report is built in /report.md; the ledger has the rest."
     ledger = ledger_of(messages)
     if ledger is None:
