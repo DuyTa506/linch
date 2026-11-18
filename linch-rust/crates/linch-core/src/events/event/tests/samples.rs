@@ -117,6 +117,7 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
             forced: false,
             rejected: None,
             measured_tokens: None,
+            clipped_bytes: None,
         }),
         Event::LoopGuard(LoopGuardEvent {
             reason: LoopGuardReason::MaxTurns,

@@ -188,6 +188,68 @@ fn a_forced_summary_resumes_forced() {
     );
 }
 
+/// The `compaction` event that records a forced summary refused as too long.
+fn refusal() -> Event {
+    Event::Compaction(crate::events::kinds::CompactionEvent {
+        messages_before: 9,
+        messages_after: 9,
+        tokens_before: 100,
+        tokens_after: 100,
+        strategy: "summary".into(),
+        duration_ms: 0,
+        forced: true,
+        rejected: Some("context_length: the summary request was refused".into()),
+        measured_tokens: None,
+        clipped_bytes: Some(10),
+    })
+}
+
+/// A forced summary the provider refused as too long goes again, on less of
+/// the older part, until it has made all its tries; a refusal of any other
+/// kind ends the run.
+#[test]
+fn a_forced_summary_refused_as_too_long_goes_again_until_its_tries_are_spent() {
+    let cp = checkpoint(Phase::CompactionPending { attempt: 1 });
+    let log = session(LEN, None);
+    let mut events = vec![
+        delivery(2, "p1"),
+        receipt("p1", CallDisposition::Failed),
+        summary_delivery(2, "c1"),
+        summary_receipt("c1", CallDisposition::Failed),
+    ];
+    // Failed with no refusal recorded: the run ends.
+    assert_eq!(
+        reconcile(&cp, &envelopes(events.clone()), &log),
+        Ok(Recovery::Unshortened)
+    );
+    events.push(refusal());
+    assert_eq!(
+        reconcile(&cp, &envelopes(events.clone()), &log),
+        Ok(Recovery::Recompact {
+            attempt: 2,
+            abandoned: None,
+            redispatch: Some(2),
+        })
+    );
+    // Three more refused tries: the fourth is the last.
+    for n in 2..=4 {
+        let id = format!("c{n}");
+        events.push(summary_delivery(2, &id));
+        events.push(summary_receipt(&id, CallDisposition::Failed));
+        events.push(refusal());
+        let cp = checkpoint(Phase::CompactionPending { attempt: n });
+        let expected = match n {
+            4 => Ok(Recovery::Unshortened),
+            _ => Ok(Recovery::Recompact {
+                attempt: n + 1,
+                abandoned: None,
+                redispatch: Some(2),
+            }),
+        };
+        assert_eq!(reconcile(&cp, &envelopes(events.clone()), &log), expected);
+    }
+}
+
 #[test]
 fn a_forced_summary_is_followed_by_the_next_primary_attempt() {
     let summary = Message::user_text("<summary>");
@@ -212,16 +274,44 @@ fn a_forced_summary_is_followed_by_the_next_primary_attempt() {
     );
 }
 
+/// A clip's projection carries its own reason, and its budget rides the
+/// recovery so a resume clips the same way.
+#[test]
+fn a_clipped_view_is_projected_once() {
+    let cp = checkpoint(Phase::Cleared {
+        before: 5,
+        attempt: 2,
+        clip: Some(4000),
+    });
+    let clipped = |appended| {
+        Ok(Recovery::Cleared {
+            before: 5,
+            attempt: 2,
+            clip: Some(4000),
+            appended,
+        })
+    };
+    let mut log = session(LEN, None);
+    assert_eq!(reconcile(&cp, &[], &log), clipped(false));
+    log.push(LogEntry::Projection(ProjectionEntry {
+        replacement: vec![Arc::new(Message::user_text("m0"))],
+        reason: "clip".into(),
+    }));
+    assert_eq!(reconcile(&cp, &[], &log), clipped(true));
+}
+
 #[test]
 fn a_cleared_view_is_projected_once() {
     let cp = checkpoint(Phase::Cleared {
         before: 5,
         attempt: 2,
+        clip: None,
     });
     let cleared = |appended| {
         Ok(Recovery::Cleared {
             before: 5,
             attempt: 2,
+            clip: None,
             appended,
         })
     };

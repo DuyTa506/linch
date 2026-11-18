@@ -143,19 +143,50 @@ impl Runner {
 
     /// The terminal for a prompt the provider refused as longer than the
     /// model's context window, when the summary that refusal forced gave
-    /// none: calling again would send the refused prompt.
+    /// none: calling again would send the refused prompt. A summary request
+    /// that was refused too, however small it was cut, says what the run
+    /// could measure of the window instead (see [`Self::overflow_message`]).
     pub(super) async fn unshortened(&mut self) -> Result<(), RunError> {
+        let message = match self.size_refused {
+            true => self.overflow_message(),
+            false => "the prompt exceeds the model's context window, and the compaction it \
+                      forced could not shorten it"
+                .to_owned(),
+        };
         let error = json!({
             "name": "ProviderError",
             "kind": "context_length",
-            "message": "the prompt exceeds the model's context window, and the compaction \
-                        it forced could not shorten it",
+            "message": message,
             "retryable": false,
         });
         let error = error.as_object().cloned().unwrap_or_default();
         self.journal.stage(Event::Error(ErrorEvent { error }));
         let (subtype, stop) = (ResultSubtype::Error, StopReason::Error);
         self.end(RunStatus::Failed, subtype, stop, None).await
+    }
+
+    /// What the run can say of a prompt that does not fit and that nothing
+    /// shortens: the window, and the estimated tokens of the system prompt
+    /// and tools (which every request carries) and of the conversation left
+    /// after summarizing and clipping. An estimate leaves the provider's
+    /// own count out, so these are the harness's numbers, not the
+    /// provider's.
+    pub(super) fn overflow_message(&self) -> String {
+        let window = self.agent.context_window();
+        let request = self.request(Vec::new());
+        let system: usize = request.system.iter().map(|block| block.text.len()).sum();
+        let tools: usize = (request.tools.iter())
+            .map(|tool| serde_json::to_string(tool).map_or(0, |json| json.len()))
+            .sum();
+        let fixed = (system + tools) as u64 / 4;
+        let conversation = crate::compaction::estimate_tokens(&self.log.provider_view());
+        format!(
+            "the prompt exceeds the model's context window of {window} tokens and nothing is \
+             left to shorten: the system prompt and tools take about {fixed} estimated tokens \
+             and the conversation {conversation}, after summarizing and clipping it as far as \
+             it goes. Shrink the system prompt or the tool set, or use a model with a larger \
+             window"
+        )
     }
 
     /// The `max_turns` terminal, as Python's `_max_turns_tail` emits it.

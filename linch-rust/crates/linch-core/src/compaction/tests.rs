@@ -785,12 +785,15 @@ mod forced {
         }
     }
 
-    fn forced(spent: u32, summary_calls: u32, primary_calls: u32, latest: bool) -> Forced {
+    fn forced(counts: [u32; 4], latest: bool) -> Forced {
+        let [spent, summary_calls, primary_calls, tries] = counts;
         Forced {
             spent,
             summary_calls,
             primary_calls,
             latest_forced: latest,
+            tries,
+            refused: false,
         }
     }
 
@@ -803,15 +806,15 @@ mod forced {
             .map(|(seq, (kind, turn))| delivery(seq as u64, kind, turn))
             .collect();
         let at = |turn, upto: usize| Forced::of(&events[..upto], turn);
-        assert_eq!(at(0, 2), forced(0, 1, 1, false));
-        assert_eq!(at(1, 4), forced(1, 1, 1, true));
+        assert_eq!(at(0, 2), forced([0, 1, 1, 0], false));
+        assert_eq!(at(1, 4), forced([1, 1, 1, 1], true));
         assert_eq!(
             at(1, 5),
-            forced(1, 2, 1, true),
+            forced([1, 2, 1, 2], true),
             "a second attempt of one summary is not another"
         );
-        assert_eq!(at(1, 6), forced(1, 2, 2, true));
-        assert_eq!(at(2, 7), forced(1, 1, 0, false));
+        assert_eq!(at(1, 6), forced([1, 2, 2, 0], true));
+        assert_eq!(at(2, 7), forced([1, 1, 0, 1], false));
     }
 }
 
@@ -845,6 +848,7 @@ fn compaction_event(rejected: Option<&str>) -> Event {
         forced: false,
         rejected: rejected.map(Into::into),
         measured_tokens: Some(250),
+        clipped_bytes: None,
     })
 }
 

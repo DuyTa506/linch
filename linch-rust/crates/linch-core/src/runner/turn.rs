@@ -69,11 +69,13 @@ pub(super) enum Step {
         appended: bool,
         attempt: u32,
     },
-    /// Append the projection of a durable micro-compaction unless
-    /// `appended`, then dispatch `attempt`.
+    /// Append the projection of a durable micro-compaction (or, with
+    /// `clip`, of a clip to that budget) unless `appended`, then dispatch
+    /// `attempt`.
     Cleared {
         before: u64,
         attempt: u32,
+        clip: Option<u64>,
         appended: bool,
     },
     /// A forced summary settled without a summary: end the run failed.
@@ -177,6 +179,15 @@ pub(super) struct Runner {
     /// Summary deliveries of the current turn, so the next one takes the
     /// next attempt id.
     pub(super) summary_calls: u32,
+    /// Summary deliveries since the turn's last primary delivery: a forced
+    /// summary's tries, which set how much of the older part the next one
+    /// reads (see [`crate::compaction::folded_budget`]). Counted from the
+    /// durable deliveries on a resume.
+    pub(super) summary_tries: u32,
+    /// Whether the last summary of the turn was refused by the provider as
+    /// longer than its context window, read back from the durable events on a
+    /// resume.
+    pub(super) size_refused: bool,
     /// The summaries the run asked for and had rejected in a row (see
     /// [`crate::compaction::Rejections`]), counted from its durable events on a
     /// resume.
@@ -257,6 +268,8 @@ impl Runner {
             verify_retries: 0,
             forced: 0,
             summary_calls: 0,
+            summary_tries: 0,
+            size_refused: false,
             rejections: crate::compaction::Rejections::default(),
             anchor: crate::compaction::Anchor::default(),
             truncations: 0,
@@ -332,8 +345,9 @@ impl Runner {
                 Step::Cleared {
                     before,
                     attempt,
+                    clip,
                     appended,
-                } => self.cleared(before, attempt, appended).await?,
+                } => self.cleared(before, attempt, clip, appended).await?,
                 Step::Unshortened => {
                     self.unshortened().await?;
                     None
@@ -366,7 +380,8 @@ impl Runner {
                                 // next turn's start.
                                 self.post_turn(self.stop_reason).await;
                                 self.turn += 1;
-                                self.summary_calls = 0;
+                                (self.summary_calls, self.summary_tries) = (0, 0);
+                                self.size_refused = false;
                                 Some(self.turn_start().await)
                             }
                         },
@@ -518,6 +533,7 @@ impl Runner {
         };
         self.stage_context(&request, context);
         let call = ModelCall::prepare(&self.run.run_id, self.turn, attempt, &request.model);
+        (self.summary_tries, self.size_refused) = (0, false);
         self.stage_seen(Event::ModelCallDelivery(call.delivery().clone()));
         self.save(Phase::ProviderPending { attempt }).await?;
         let ready = self.journal.flush().await?;
@@ -605,7 +621,18 @@ impl Runner {
             Recovered::Failed => {}
         }
         // One terminal write: receipt, usage, error, status and result.
-        self.journal.stage(Event::Error(failure.event));
+        let mut event = failure.event;
+        // A refusal nothing shortened, with compaction on: the run says
+        // what it could measure, after the provider's own words.
+        if matches!(failure.error, ProviderError::ContextLength { .. })
+            && self.agent.spec.compaction.is_some()
+        {
+            let said = event.error.get("message").and_then(|m| m.as_str());
+            let said = said.map(|said| format!(" (the provider said: {said})"));
+            let message = format!("{}{}", self.overflow_message(), said.unwrap_or_default());
+            event.error.insert("message".into(), message.into());
+        }
+        self.journal.stage(Event::Error(event));
         let (subtype, stop) = (ResultSubtype::Error, StopReason::Error);
         self.end(RunStatus::Failed, subtype, stop, None).await?;
         Ok(None)

@@ -156,12 +156,18 @@ pub enum Phase {
     /// not be in the session yet. Delivery `attempt` of the turn's primary
     /// call follows: 1 at a turn's start, the next one after a prompt the
     /// provider refused as too long. Written only by an agent whose
-    /// compaction sets `micro`.
+    /// compaction sets `micro`, or, with `clip`, after a refusal the kept
+    /// turns are too long for (see [`crate::compaction`]).
     Cleared {
-        /// Index in the provider view where the kept turns start.
+        /// Index in the provider view where the kept turns start; with
+        /// `clip`, where the tool results to clip start.
         before: u64,
         /// Delivery attempt of the primary call that follows, from 1.
         attempt: u32,
+        /// Set when the tool results from `before` on were clipped instead of
+        /// cleared: the budget in estimated tokens they were clipped to.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clip: Option<u64>,
     },
     /// The run was cancelled (see [`crate::Agent::cancel`]): `message`,
     /// the results that pair the last response's tool calls, goes into
@@ -274,10 +280,19 @@ mod tests {
         let phase = Phase::Cleared {
             before: 5,
             attempt: 2,
+            clip: None,
         };
         let wire = serde_json::json!({"phase": "cleared", "before": 5, "attempt": 2});
         assert_eq!(serde_json::to_value(&phase).unwrap(), wire);
         assert_eq!(serde_json::from_value::<Phase>(wire).unwrap(), phase);
+        let clipped = Phase::Cleared {
+            before: 5,
+            attempt: 2,
+            clip: Some(4000),
+        };
+        let wire = serde_json::json!({"phase": "cleared", "before": 5, "attempt": 2, "clip": 4000});
+        assert_eq!(serde_json::to_value(&clipped).unwrap(), wire);
+        assert_eq!(serde_json::from_value::<Phase>(wire).unwrap(), clipped);
         let compacted = serde_json::json!({
             "phase": "compacted",
             "summary": Message::user_text("s"),

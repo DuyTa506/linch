@@ -436,10 +436,12 @@ pub(super) async fn continue_run(
         Recovery::Cleared {
             before,
             attempt,
+            clip,
             appended,
         } => Step::Cleared {
             before,
             attempt,
+            clip,
             appended,
         },
         Recovery::Unshortened => Step::Unshortened,
@@ -522,6 +524,7 @@ pub(super) async fn continue_run(
     runner.gates = (runner.agent.gates.clone()).map(|rules| Gates::of(rules, &events));
     let forced = crate::compaction::Forced::of(&events, checkpoint.turn);
     (runner.forced, runner.summary_calls) = (forced.spent, forced.summary_calls);
+    (runner.summary_tries, runner.size_refused) = (forced.tries, forced.refused);
     runner.anchor = crate::compaction::Anchor::of(&events);
     runner.rejections = match &runner.agent.spec.compaction {
         Some(spec) => {

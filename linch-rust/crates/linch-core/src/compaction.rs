@@ -463,6 +463,14 @@ pub(crate) struct Forced {
     pub(crate) primary_calls: u32,
     /// Whether the latest summary of turn `turn` is a forced one.
     pub(crate) latest_forced: bool,
+    /// Summary deliveries of turn `turn` since its last primary delivery: a
+    /// forced summary's tries, each reading less of the folded part than the
+    /// one before.
+    pub(crate) tries: u32,
+    /// Whether the last thing the run recorded of turn `turn` is a summary
+    /// the provider refused as longer than its window (a `compaction` event
+    /// whose `rejected` starts with [`SIZE_REFUSED`]).
+    pub(crate) refused: bool,
 }
 
 impl Forced {
@@ -471,13 +479,23 @@ impl Forced {
         let mut forced = Self::default();
         let mut previous: Option<(ModelCallKind, Option<u64>)> = None;
         for envelope in events {
+            if let Event::Compaction(event) = &envelope.event {
+                forced.refused = is_size_refusal(event);
+            }
             let Event::ModelCallDelivery(delivery) = &envelope.event else {
                 continue;
             };
             let this_turn = delivery.turn_index == Some(u64::from(turn));
+            forced.refused &= !this_turn;
             match delivery.kind {
-                ModelCallKind::Primary => forced.primary_calls += u32::from(this_turn),
+                ModelCallKind::Primary => {
+                    forced.primary_calls += u32::from(this_turn);
+                    if this_turn {
+                        forced.tries = 0;
+                    }
+                }
                 ModelCallKind::Compaction => {
+                    forced.tries += u32::from(this_turn);
                     let after = previous.filter(|(_, at)| *at == delivery.turn_index);
                     let begins = after.is_none_or(|(kind, _)| kind == ModelCallKind::Primary);
                     let is_forced = matches!(after, Some((ModelCallKind::Primary, _)));
@@ -495,6 +513,12 @@ impl Forced {
         }
         forced
     }
+}
+
+/// Whether `event` records a summary the provider refused as longer than its
+/// window.
+pub(crate) fn is_size_refusal(event: &CompactionEvent) -> bool {
+    (event.rejected.as_deref()).is_some_and(|reason| reason.starts_with(SIZE_REFUSED))
 }
 
 /// Consecutive useless summaries after which a run stops asking at every
@@ -535,8 +559,11 @@ impl Rejections {
     pub(crate) fn of(events: &[Envelope], due: impl Fn(u64) -> bool) -> Self {
         let mut rejections = Self::default();
         for envelope in events {
+            // A refusal as too long is no reply to judge: a smaller request
+            // answers it.
             if let Event::Compaction(event) = &envelope.event
                 && event.strategy == STRATEGY
+                && !is_size_refusal(event)
             {
                 match event.rejected {
                     Some(_) => rejections.rejected(event.tokens_after),
@@ -776,6 +803,12 @@ pub(crate) fn replacement(
     messages.extend(view.iter().skip(keep_from).cloned());
     messages
 }
+
+mod clip;
+pub(crate) use clip::{
+    CLIP_REASON, CLIP_STRATEGY, MAX_SUMMARY_TRIES, SIZE_REFUSED, Scope, clip, clip_from,
+    folded_budget, kept_budget,
+};
 
 #[cfg(test)]
 mod tests;

@@ -98,6 +98,13 @@ pub struct CompactionEvent {
     /// until a provider has reported usage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measured_tokens: Option<u64>,
+    /// Bytes this compaction clipped out of text to make a prompt fit, the
+    /// markers left in their place counted: for a forced summary, what the
+    /// summary request read less of the older part; for strategy `clip`, what
+    /// the view lost of tool results (the session's log keeps them whole).
+    /// Omitted when nothing was clipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clipped_bytes: Option<u64>,
 }
 
 /// Why a [`LoopGuardEvent`] tripped.
