@@ -7,8 +7,12 @@
 //! - `linch-server --config FILE` serves the Unix socket and HTTP
 //!   listeners FILE names (see the `linch_server` crate docs), and runs a
 //!   worker when FILE has a `worker` section, until SIGINT or SIGTERM,
-//!   then ends every connection, waits for the worker's jobs in flight,
-//!   and exits. A stdio server never runs a worker.
+//!   then ends every connection, waits for the worker's jobs in flight
+//!   (at most `worker.drain_timeout_ms`; the rest are handed back), and
+//!   exits. A stdio server never runs a worker.
+//! - `linch-server --migrate` and `linch-server --check` apply or read the
+//!   database schema and exit (`--dsn-env NAME` or `--config FILE`; see
+//!   the `linch_server` crate docs for the output and exit status).
 //!
 //! Provider keys come from its environment and are not passed to the
 //! processes it starts (MCP servers, Bash), but they stay in its own
@@ -22,19 +26,62 @@
 //! `LINCH_LOG=info` or `LINCH_LOG=linch_worker=debug,warn`.
 //!
 //! Exit status: 0 after stdin closes or a stop signal, 1 if I/O fails, 2
-//! for a bad command line or config (the reason goes to stderr).
+//! for a bad command line or config, or a worker database a newer release
+//! migrated (the reason goes to stderr). `--migrate` and `--check` add 3
+//! (the database holds a migration this binary does not know) and 4 (`--check`:
+//! the schema is behind).
 
 #![forbid(unsafe_code)]
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use linch_server::{BackgroundWorker, Listeners, PATH, ServerConfig};
+use linch_server::{
+    BackgroundWorker, Listeners, PATH, SchemaAction, ServerConfig, TokenSource, run_schema,
+};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::unix::pipe;
 use tokio_util::sync::CancellationToken;
 
-const USAGE: &str = "usage: linch-server [--config FILE]";
+const USAGE: &str = "usage: linch-server [--config FILE]\n       \
+                      linch-server (--migrate | --check) (--dsn-env NAME | --config FILE)";
+
+/// What the command line asks for.
+enum Command {
+    /// Speak on stdio, or serve the listeners and worker `FILE` names.
+    Serve(Option<PathBuf>),
+    /// Apply or read the database schema, then exit.
+    Schema(SchemaAction, DsnSource),
+}
+
+/// Where a schema command reads the DSN.
+enum DsnSource {
+    /// An environment variable.
+    Env(String),
+    /// The `worker` section of a config file.
+    Config(PathBuf),
+}
+
+fn parse(args: &[String]) -> Option<Command> {
+    let action = |flag: &str| match flag {
+        "--migrate" => Some(SchemaAction::Migrate),
+        "--check" => Some(SchemaAction::Check),
+        _ => None,
+    };
+    match args {
+        [] => Some(Command::Serve(None)),
+        [flag, path] if flag == "--config" => Some(Command::Serve(Some(PathBuf::from(path)))),
+        [flag, source, value] => {
+            let source = match source.as_str() {
+                "--dsn-env" => DsnSource::Env(value.clone()),
+                "--config" => DsnSource::Config(PathBuf::from(value)),
+                _ => return None,
+            };
+            Some(Command::Schema(action(flag)?, source))
+        }
+        _ => None,
+    }
+}
 
 fn main() -> ExitCode {
     #[cfg(target_os = "linux")]
@@ -46,10 +93,10 @@ fn main() -> ExitCode {
     }
     linch_server::init_logging(|name| std::env::var(name).ok());
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let config = match args.as_slice() {
-        [] => None,
-        [flag, path] if flag == "--config" => Some(PathBuf::from(path)),
-        _ => {
+    let config = match parse(&args) {
+        Some(Command::Serve(config)) => config,
+        Some(Command::Schema(action, source)) => return schema(action, source),
+        None => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
         }
@@ -66,6 +113,53 @@ fn main() -> ExitCode {
         Err(error) => {
             eprintln!("linch-server: cannot start the runtime: {error}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// Apply or read the schema of the database `source` names; the exit
+/// status says whether it is current.
+fn schema(action: SchemaAction, source: DsnSource) -> ExitCode {
+    let fail = |message: String| {
+        eprintln!("linch-server: {message}");
+        ExitCode::from(2)
+    };
+    let dsn = match dsn_of(&source) {
+        Ok(dsn) => dsn,
+        Err(message) => return fail(message),
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build();
+    let runtime = match runtime {
+        Ok(runtime) => runtime,
+        Err(error) => return fail(format!("cannot start the runtime: {error}")),
+    };
+    let outcome = runtime.block_on(run_schema(action, &dsn));
+    if !outcome.stdout.is_empty() {
+        println!("{}", outcome.stdout);
+    }
+    if !outcome.stderr.is_empty() {
+        eprintln!("linch-server: {}", outcome.stderr);
+    }
+    ExitCode::from(outcome.code)
+}
+
+fn dsn_of(source: &DsnSource) -> Result<String, String> {
+    match source {
+        DsnSource::Env(name) => std::env::var(name)
+            .map_err(|_| format!("environment variable {name} is unset or not UTF-8")),
+        DsnSource::Config(path) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+            let config = ServerConfig::from_json(&text).map_err(|error| error.to_string())?;
+            let section = (config.worker.as_ref())
+                .ok_or("the config has no worker section: pass --dsn-env NAME instead")?;
+            match &section.dsn {
+                TokenSource::Value(dsn) => Ok(dsn.clone()),
+                TokenSource::Env(name) => std::env::var(name)
+                    .map_err(|_| format!("environment variable {name} is unset or not UTF-8")),
+            }
         }
     }
 }

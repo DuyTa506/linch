@@ -29,6 +29,13 @@ const LISTEN_RETRY: Duration = Duration::from_secs(1);
 /// How long ended jobs stay in the history by default: 7 days.
 pub const HISTORY_RETENTION: Duration = Duration::from_secs(7 * 24 * 3600);
 
+/// How long a worker drains its jobs after the stop token by default: 30 s.
+pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long handed-back jobs get to release their run leases and settle,
+/// before they are aborted: the release wait (5 s) plus a settle.
+const HANDBACK_GRACE: Duration = Duration::from_secs(10);
+
 /// Least time between two prunes of the history.
 const PRUNE_EVERY: Duration = Duration::from_secs(600);
 
@@ -63,12 +70,16 @@ pub struct WorkerConfig {
     /// (the default) deletes none. A pass runs in a task of its own, so it
     /// never delays a poll, and one pass at a time runs across the fleet.
     pub retention: Option<Retention>,
+    /// How long [`Worker::run`] waits for the jobs in flight after the stop
+    /// token fires, before it hands them back. Keep a supervisor's
+    /// termination grace period above it plus about 5 s for the releases.
+    pub drain_timeout: Duration,
 }
 
 impl WorkerConfig {
     /// Settings for `owner`: queue `default`, 32 jobs at once, a 30 s
-    /// visibility timeout, a 1 s poll, a 5 s retry delay and 7 days of job
-    /// history.
+    /// visibility timeout, a 1 s poll, a 5 s retry delay, 7 days of job
+    /// history and a 30 s drain timeout.
     pub fn new(owner: impl Into<String>) -> Self {
         Self {
             owner: owner.into(),
@@ -79,6 +90,7 @@ impl WorkerConfig {
             retry_delay: Duration::from_secs(5),
             history_retention: Some(HISTORY_RETENTION),
             retention: None,
+            drain_timeout: DRAIN_TIMEOUT,
         }
     }
 
@@ -100,6 +112,11 @@ impl WorkerConfig {
         if self.visibility_timeout < ms * 3 || self.poll_interval < ms {
             let text = "the visibility timeout must be at least 3 ms and the poll interval 1 ms";
             return Err(WorkerError::Invalid(text.into()));
+        }
+        if self.drain_timeout < ms {
+            return Err(WorkerError::Invalid(
+                "the drain timeout must be at least 1 ms".into(),
+            ));
         }
         Ok(())
     }
@@ -165,8 +182,14 @@ impl Worker {
         self
     }
 
-    /// Serve until `shutdown` is cancelled, then wait for the jobs in
-    /// flight to finish.
+    /// Serve until `shutdown` is cancelled, then wait up to
+    /// [`WorkerConfig::drain_timeout`] for the jobs in flight to finish.
+    ///
+    /// A job still running then is handed back: its attempt is dropped, so
+    /// its run's lease is released (the wait is bounded at 5 s), and the job
+    /// is visible again at once with no failure counted; another worker
+    /// resumes the run from its last durable state. `run` returns after at
+    /// most the drain timeout, those releases and a grace of 10 s.
     ///
     /// Dropping the returned future instead abandons the jobs in flight,
     /// like a crash: their runs stay resumable and the jobs become visible
@@ -201,6 +224,7 @@ impl Worker {
             owner: self.config.owner.clone(),
             timeout: self.config.visibility_timeout,
             retry_delay: self.config.retry_delay,
+            handback: CancellationToken::new(),
         });
         let mut jobs = JoinSet::new();
         let mut fired = None;
@@ -243,10 +267,37 @@ impl Worker {
                 () = tokio::time::sleep(self.config.poll_interval) => {}
             }
         }
-        while let Some(joined) = jobs.join_next().await {
-            report(joined);
-        }
+        drain(&mut jobs, &shared.handback, self.config.drain_timeout).await;
         Ok(())
+    }
+}
+
+/// Wait up to `timeout` for the jobs in flight. Those left are handed back:
+/// each stops, releases its run's lease and its own hold, and becomes
+/// visible at once. A job that cannot settle in [`HANDBACK_GRACE`] is aborted
+/// and falls back on its visibility timeout.
+async fn drain(jobs: &mut JoinSet<()>, handback: &CancellationToken, timeout: Duration) {
+    if tokio::time::timeout(timeout, join_all(jobs)).await.is_ok() {
+        return;
+    }
+    tracing::warn!(
+        jobs = jobs.len(),
+        ?timeout,
+        "the drain timeout ran out; handing back the jobs in flight"
+    );
+    handback.cancel();
+    if tokio::time::timeout(HANDBACK_GRACE, join_all(jobs))
+        .await
+        .is_err()
+    {
+        tracing::warn!(jobs = jobs.len(), "jobs did not settle; aborting them");
+        jobs.shutdown().await;
+    }
+}
+
+async fn join_all(jobs: &mut JoinSet<()>) {
+    while let Some(joined) = jobs.join_next().await {
+        report(joined);
     }
 }
 
@@ -380,5 +431,9 @@ mod tests {
         let mut fast = WorkerConfig::new("w1");
         fast.visibility_timeout = Duration::from_millis(2);
         assert!(fast.check().is_err());
+        let mut undrained = WorkerConfig::new("w1");
+        assert_eq!(undrained.drain_timeout, DRAIN_TIMEOUT);
+        undrained.drain_timeout = Duration::ZERO;
+        assert!(undrained.check().is_err());
     }
 }

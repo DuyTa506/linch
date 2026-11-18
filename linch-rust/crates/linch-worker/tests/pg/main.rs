@@ -1,6 +1,7 @@
 //! Worker tests on Postgres. Each skips cleanly without `LINCH_TEST_PG_DSN`.
 
 mod common;
+mod drain;
 mod exclusive;
 mod fixtures;
 mod isolation;
@@ -9,6 +10,7 @@ mod retention;
 mod retry;
 mod schedule;
 mod scheduler;
+mod schema;
 mod session;
 mod suspend;
 mod takeover;

@@ -47,7 +47,7 @@ fn row((id, content, tags, created): Row) -> Memory {
 }
 
 fn backend(error: sqlx::Error) -> MemoryError {
-    MemoryError::Backend(Box::new(error))
+    MemoryError::Backend(crate::exhausted::backend_source(error))
 }
 
 /// The prefix of every indexed word of one namespace and scope: 16 hex

@@ -54,12 +54,29 @@ worker (không có `socket` hay `http`); khi đó các tenant của nó không c
 | `visibility_timeout_ms` | 30000 | Một job đã được nhận vẫn bị ẩn bao lâu khi không có heartbeat. Hãy giữ `stores.lease_ttl_ms` của các agent không dài hơn mức này |
 | `retry_delay_ms` | 5000 | Thời gian chờ trước lần thử kế tiếp của một job thất bại; nhân đôi mỗi lần, tối đa 5 phút |
 | `history_retention_ms` | 7 ngày | Các job đã kết thúc và job thất bại còn đọc được bao lâu bằng `job` và `jobs`; job của một run chưa terminal được giữ lâu hơn ([cái gì bị dọn](#cái-gì-bị-dọn)) |
+| `drain_timeout_ms` | 30000 | Worker chờ các job đang chạy bao lâu sau SIGTERM hoặc SIGINT trước khi trả chúng lại ([Dừng một worker](#dừng-một-worker)); tối thiểu 1, giá trị 0 bị từ chối khi cấu hình được nạp |
 | `retention` | vắng: không xóa gì | Xóa những gì run đã kết thúc và session nhàn rỗi để lại, theo từng lô nhỏ: `{"terminal_runs_days": 30, "idle_sessions_days": 90}`, thêm tùy chọn `tombstone_days` (30), `batch_size` (500) và `interval_secs` (3600). Mỗi lúc chỉ một đợt chạy trên mọi worker của database. [Stores: Retention](./stores.md#retention) nói cái gì bị xóa và cái gì được giữ |
 | `local_namespaces` | không có | Các namespace root nằm ngoài mọi tenant mà nó cũng chạy job của, không kiểm tra (các lịch do một client stdio tạo); `dev` bao gồm `dev` và `dev/...` |
 
 Bạn có thể chạy bao nhiêu server như vậy trên một cơ sở dữ liệu tùy ý: mỗi lần kích hoạt
 được đưa vào hàng đợi một lần và mỗi job chạy trên một worker tại một thời điểm. Một server
 không có phần `worker` không chạy vòng lặp nào và không gửi truy vấn nào cho nó.
+
+### Dừng một worker
+
+Khi nhận SIGTERM hoặc SIGINT, server ngừng nhận job và chờ tối đa `drain_timeout_ms`
+(mặc định 30 s) để các job đang chạy hoàn tất. Một job vẫn còn chạy lúc đó sẽ được trả lại:
+run của nó dừng ngay chỗ đang đứng, lease của run được giải phóng (server chờ tối đa 5 s cho
+việc này), và job lại hiển thị ngay lập tức mà không tính là một lần thất bại, nên một worker
+khác tiếp tục run từ trạng thái bền vững cuối cùng của nó. Sau đó server thoát. Một job bị
+kẹt không thể giữ tiến trình: tiến trình kết thúc sau drain timeout, các lần giải phóng và,
+tối đa, 10 giây nữa.
+
+Hãy cho supervisor của bạn một khoảng grace period cho việc kết thúc dài hơn
+`drain_timeout_ms` cộng thêm khoảng 15 s. Mặc định của Kubernetes là 30 s, bằng drain timeout
+mặc định, nên hãy hạ `drain_timeout_ms` (chẳng hạn xuống 10000) hoặc tăng
+`terminationGracePeriodSeconds`. Một worker bị kill bằng SIGKILL không trả lại gì: các job
+của nó chờ hết `visibility_timeout_ms` và các run của nó chờ hết lease TTL.
 
 Một lịch hoặc run trong hàng đợi được lưu trong cơ sở dữ liệu và schema của agent đã tạo
 ra nó, và một worker chỉ phục vụ những cái thuộc `dsn` của chính nó, nơi nó cũng chạy chúng.

@@ -30,6 +30,9 @@ pub(crate) enum Outcome {
     Fenced(String),
     /// Another worker holds the job now: leave it alone.
     Lost,
+    /// The worker's drain timeout ran out: the attempt was dropped, so give
+    /// the job back at once, without counting a failure.
+    HandedBack,
 }
 
 /// The store error inside `error`, whichever layer reported it.

@@ -88,9 +88,38 @@ def _field(data: Any, name: str) -> str:
         return ""
 
 
+def _int_field(data: Any, name: str) -> int:
+    try:
+        return int(data[name])
+    except (TypeError, KeyError, ValueError):
+        return 0
+
+
 class OpenError(RpcError):
-    """The agent could not open: a bad config, provider, store or MCP server
-    (-32010 to -32015)."""
+    """The agent could not open: a bad config, provider, store, schema or MCP
+    server (-32010 to -32016)."""
+
+
+class SchemaNewer(OpenError):
+    """The database holds a migration this server does not know (-32016): a
+    newer release migrated it. Nothing was read or written; upgrade this
+    server (a rolling deploy: finish upgrading before the old servers open a
+    new tenant)."""
+
+    @property
+    def table(self) -> str:
+        """The migration table that holds it."""
+        return _field(self.data, "table")
+
+    @property
+    def applied(self) -> int:
+        """The newest migration the database has applied."""
+        return _int_field(self.data, "applied")
+
+    @property
+    def latest(self) -> int:
+        """The newest migration this server embeds."""
+        return _int_field(self.data, "latest")
 
 
 class RunError(RpcError):
@@ -454,6 +483,7 @@ _BY_CODE: dict[int, type[RpcError]] = {
     -32048: WorkflowNotFound,
     -32049: WorkflowNoJournal,
     -32050: RunPruned,
+    -32016: SchemaNewer,
     -32022: LeaseLost,
     -32025: ContractMismatch,
     -32026: RunTerminal,
@@ -475,7 +505,7 @@ def error_from(obj: dict[str, Any]) -> RpcError:
     if cls is None:
         if -32700 <= code <= -32600:
             cls = ProtocolError
-        elif -32015 <= code <= -32010:
+        elif -32016 <= code <= -32010:
             cls = OpenError
         elif -32034 <= code <= -32020:
             cls = RunError

@@ -538,6 +538,7 @@
 //! | -32013 | provider unavailable | key unset (`data.env` names it), client build |
 //! | -32014 | store unavailable | Postgres connect (or its 5 s timeout) or migrate (or its 30 s timeout) |
 //! | -32015 | MCP server unavailable | first connect failed; `data.server` names it |
+//! | -32016 | schema newer than this server | the database holds a migration this server does not embed (a newer release migrated it); nothing was read or written; `data: {table, applied, latest}`; upgrade this server |
 //! | -32020 | store error | `RunError::Store`, other store failures |
 //! | -32021 | not found | `StoreError::NotFound`: no such run or session |
 //! | -32022 | lease lost | `StoreError::LeaseLost`, from a claim or a journal write: another claim (another process's, or a `fail`) fenced the run out, and it stopped here without writing |
@@ -569,7 +570,7 @@
 //! | -32049 | workflow has no journal | `workflow.start` carried `resume` answers for a workflow whose journal holds nothing (it never ran, or a memory-store agent's journal ended with its connection); nothing was claimed; `data: {run_id}` |
 //! | -32050 | run pruned | `StoreError::NotFound` of a run that a retention pass deleted (its record and events); `data: {run_id}`; the server remembers it for the tombstone period, then the run reads as not found (`-32021`) |
 //!
-//! Codes from -32010 to -32015 answer `agent.open`. Codes from -32020 on
+//! Codes from -32010 to -32016 answer `agent.open`. Codes from -32020 on
 //! come in `run.end` for a run and as the error of `run.events`.
 //!
 //! # End of input

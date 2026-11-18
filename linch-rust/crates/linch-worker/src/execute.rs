@@ -18,6 +18,7 @@ use linch_core::{Agent, Phase, Principal, RunOptions, RunRecord, RunStore, RunSt
 use linch_core::{SessionId, StoreError};
 use linch_postgres::{LeaseLine, PgPool, PgRunStore};
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::chain;
 use crate::factory::{AgentFactory, FactoryError, JobAgent};
@@ -37,6 +38,9 @@ pub(crate) struct Shared {
     pub(crate) owner: String,
     pub(crate) timeout: Duration,
     pub(crate) retry_delay: Duration,
+    /// Cancelled when the drain timeout runs out: every job in flight stops
+    /// and is handed back.
+    pub(crate) handback: CancellationToken,
 }
 
 impl Shared {
@@ -59,6 +63,7 @@ pub(crate) async fn execute(shared: Arc<Shared>, lease: JobLease) {
     let outcome = tokio::select! {
         outcome = attempt(&shared, &lease, &mut opened) => outcome,
         () = keep_alive(&shared, &lease) => Outcome::Lost,
+        () = shared.handback.cancelled() => Outcome::HandedBack,
     };
     let agent = match &opened {
         Some(opened) => Some(&opened.agent),

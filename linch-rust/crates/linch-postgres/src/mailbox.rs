@@ -95,7 +95,7 @@ impl PgMailbox {
 }
 
 fn backend(error: sqlx::Error) -> MailboxError {
-    MailboxError(Box::new(error))
+    MailboxError(crate::exhausted::backend_source(error))
 }
 
 fn message(row: &PgRow) -> Result<(i64, MailboxMessage), sqlx::Error> {

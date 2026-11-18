@@ -63,7 +63,8 @@ Server ─────── one linch-server child process, or a connection to 
 | [Structured output](./structured-output.md) | Một JSON Schema mà câu trả lời cuối cùng phải thỏa: trên agent hoặc một run, retry, callback, mỗi provider nhận gì, `tool_choice` và final tool |
 | [Memory](./memory.md) | Compaction và micro-compaction, prompt dài hơn context window, câu trả lời bị cắt, bộ nhớ dạng tệp, bộ nhớ dài hạn có sẵn, bộ nhớ ngoài qua `context_build` |
 | [Bảo mật](./security.md) | Permission mode và auto-allow, redact response, kết quả tool và prompt, verifier của câu trả lời cuối cùng và ngân sách của chúng, thứ tự tool và cổng hoàn thành |
-| [Kho lưu trữ](./stores.md) | Kho memory và Postgres, DSN, schema, migration, namespace, pool |
+| [Kho lưu trữ](./stores.md) | Kho memory và Postgres, DSN, schema, migration như một bước deploy, namespace, pool và ngân sách kết nối |
+| [Nhúng](./embedding.md) | SDK làm gì cho ứng dụng của bạn và ứng dụng của bạn phải cung cấp gì: health, metrics, TLS, backup, nâng cấp, signal, định cỡ |
 | [CLI](./cli.md) | `linch-rust new`, `linch-rust add tool`, `linch-rust docs path`, `linch-rust skill install` |
 | [Khắc phục sự cố](./troubleshooting.md) | Các lỗi từ server binary đến run, tool, lịch, workflow và câu hỏi về provider, cùng nguyên nhân và cách khắc phục |
 | [Skill](./skills.md) | Tool `Skill`, skill `verify` tích hợp sẵn, các skill trong `config_dir/skills` |

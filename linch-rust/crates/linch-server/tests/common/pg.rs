@@ -50,6 +50,11 @@ impl TestDb {
         })
     }
 
+    /// The test schema's name.
+    pub fn schema(&self) -> &str {
+        &self.schema
+    }
+
     /// Connections open now through [`Self::dsn`].
     pub async fn connections(&self) -> i64 {
         let sql = "SELECT count(*) FROM pg_stat_activity WHERE application_name = $1";

@@ -89,6 +89,7 @@ from .errors import (
     ScheduleExists,
     ScheduleNotFound,
     SchedulerError,
+    SchemaNewer,
     SessionBusy,
     Unauthenticated,
     WorkflowBudgetExceeded,
@@ -161,6 +162,7 @@ from .provider import (
 )
 from .run import Run
 from .schedule import CHECK_IN, Job, JobState, Schedule
+from .schema import SchemaStatus, SchemaVersion, migrate, schema_status
 from .server import Server
 from .tools import HostTool, Scope, ToolContext, ToolError, ToolOutput, tool
 from .workflow import (
@@ -306,6 +308,9 @@ __all__ = [
     "ScheduleExists",
     "ScheduleNotFound",
     "SchedulerError",
+    "SchemaNewer",
+    "SchemaStatus",
+    "SchemaVersion",
     "Scope",
     "Server",
     "SessionBusy",
@@ -348,5 +353,7 @@ __all__ = [
     "callback",
     "tool_middleware",
     "find_server",
+    "migrate",
+    "schema_status",
     "tool",
 ]

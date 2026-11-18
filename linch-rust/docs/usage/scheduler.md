@@ -56,12 +56,31 @@ no token.
 | `visibility_timeout_ms` | 30000 | How long a taken job stays hidden without a heartbeat. Keep the agents' `stores.lease_ttl_ms` no longer |
 | `retry_delay_ms` | 5000 | Wait before a failed job's next attempt; doubles each time, at most 5 minutes |
 | `history_retention_ms` | 7 days | How long ended and failed jobs stay readable with `job` and `jobs`; a job of a run that is not terminal stays longer ([what is pruned](#what-is-pruned)) |
+| `drain_timeout_ms` | 30000 | How long the worker waits for its jobs in flight after SIGTERM or SIGINT before it hands them back ([Stopping a worker](#stopping-a-worker)); at least 1, a 0 is refused when the config loads |
 | `retention` | absent: nothing is deleted | Delete what ended runs and idle sessions leave behind, in small batches: `{"terminal_runs_days": 30, "idle_sessions_days": 90}`, with optional `tombstone_days` (30), `batch_size` (500) and `interval_secs` (3600). One pass runs at a time across all workers on the database. [Stores: Retention](./stores.md#retention) says what goes and what stays |
 | `local_namespaces` | none | Namespace roots outside every tenant whose jobs it also runs, without checks (schedules a stdio client made); `dev` covers `dev` and `dev/...` |
 
 Run as many such servers on one database as you like: each fire is queued
 once and each job runs on one worker at a time. A server without a `worker`
 section runs no loop and sends no query for it.
+
+### Stopping a worker
+
+On SIGTERM or SIGINT the server stops taking jobs and waits up to
+`drain_timeout_ms` (30 s by default) for the jobs in flight to finish. A job
+still running then is handed back: its run stops where it stands, the run's
+lease is released (the server waits up to 5 s for that), and the job is
+visible again at once with no failure counted, so another worker resumes the
+run from its last durable state. The server then exits. A stuck job cannot
+hold the process: it ends after the drain timeout, the releases and, at the
+very most, 10 more seconds.
+
+Give your supervisor a termination grace period longer than
+`drain_timeout_ms` plus about 15 s. Kubernetes' default is 30 s, the same as
+the default drain timeout, so lower `drain_timeout_ms` (to 10000, say) or
+raise `terminationGracePeriodSeconds`. A worker killed with SIGKILL hands
+nothing back: its jobs wait out `visibility_timeout_ms` and its runs the
+lease TTL.
 
 A schedule or queued run is stored in the database and schema of the
 agent that made it, and a worker serves only those of its own `dsn`, where
