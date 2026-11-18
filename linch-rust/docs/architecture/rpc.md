@@ -60,7 +60,7 @@ to its handler. Params types refuse unknown fields; `OpenParams` takes
 | `agent.open` | `OpenParams` | `Server::open` (`crates/linch-rpc/src/server/agents.rs:20-49`) | `AgentOpened` `{agent, contract, skipped?}` |
 | `agent.close` | `CloseParams` | `agents.rs:52-80`; `-32002` while the connection drives a run of it | `{}` once its MCP servers are gone |
 | `session.close` | `SessionCloseParams` | `agents.rs:81-92`: `Agent::close_session` (forgets the session's reads, kills its background `Bash` commands) | `{}` |
-| `run.start` | `StartParams` (`protocol.rs:191`) | `Server::start` (`crates/linch-rpc/src/server/run.rs:20-43`) | `RunAccepted` `{run_id}`, then notifications |
+| `run.start` | `StartParams` (`protocol.rs:191`) | `Server::start` (`crates/linch-rpc/src/server/run.rs:20-43`) | `RunAccepted` `{run_id}`, sent only once the run is stored (`Server::until_stored`: the stream's `init`, which follows the create commit) or has ended with an error, then notifications. `run.resume`, `run.approve` and `run.answer` answer at once |
 | `run.resume` | `ResumeParams` (`protocol.rs:215`) | `run.rs:45-50`, through `claim` | the same |
 | `run.approve` | `ApproveParams` (`protocol.rs:228`) | `run.rs:52-58`, through `claim` | the same |
 | `run.answer` | `AnswerParams` (`protocol.rs:256`) `{agent, run_id, answers, principal?}`, `answers` keyed by `request_id` | `run.rs:61-67`, through `claim` | the same |
@@ -125,8 +125,8 @@ docs (`lib.rs:518-569`) and the codes in `crates/linch-rpc/src/error.rs:24-183`.
 | -32016 | `SCHEMA_NEWER` | `OpenError::SchemaNewer` | The database holds a migration this server does not embed (a newer release migrated it); nothing was read or written; `data: {table, applied, latest}` |
 | -32020 | `STORE` | `RunError` | A store failure not listed below (also a dropped database connection in the middle of a run) |
 | -32021 | `NOT_FOUND` | `RunNotFound` | No such run or session; also `run.report` and `workflow.status` of an id the agent's namespace does not hold |
-| -32022 | `LEASE_LOST` | `LeaseLost` | From a claim or a fenced journal write: another process took the run over, or failed it. The run stopped here without writing |
-| -32023 | `CONFLICT` | `RunExists` | A chosen run id that is already stored |
+| -32022 | `LEASE_LOST` | `LeaseLost` | From a claim, a fenced journal write, or a session append that found the session longer than this run left it after another owner claimed the run (the runner checks the run's epoch on that conflict): another process took the run over, or failed it. The run stopped here without writing |
+| -32023 | `CONFLICT` | `RunExists` | A chosen run id that is already stored (also a session append conflict while this run still holds its lease, which only another writer of the same session can cause) |
 | -32024 | `JOURNAL` | `RunError` | A journal write failed |
 | -32025 | `CONTRACT_MISMATCH` | `ContractMismatch` | The agent's contract differs from the run's; `data.expected` is the contract the run started under and `data.found` this agent's |
 | -32026 | `TERMINAL` | `RunTerminal` | The run has finished; `data.status` is its final status |

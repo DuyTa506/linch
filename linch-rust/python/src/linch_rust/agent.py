@@ -156,7 +156,10 @@ class Agent:
                 keeps it. None keeps the agent's.
 
         Returns:
-            The started run; iterate it or await `Run.result()`.
+            The started run; iterate it or await `Run.result()`. The call
+            returns once the run is stored, so its id exists after any crash
+            that follows (a refused start returns too, and the refusal ends
+            the stream).
 
         Raises:
             RunBusy: This server already drives a run with `run_id`.

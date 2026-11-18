@@ -95,6 +95,17 @@ busy with True
   never returned (a timeout, a crash of your process). The server picks a UUID
   when you do not. An id already stored ends the run with `RunExists` (code
   -32023) and writes nothing.
+- **An acknowledged run id is durable.** `run()` returns only once the run is
+  stored (with Postgres, once its create has committed), so the id it hands you
+  exists after any crash that follows: `resume` finds it, and `agent.events`
+  never says `RunNotFound` for it. Until `run()` returns the run may or may not
+  exist (the create can commit while the answer is on its way, or after your
+  process stopped waiting): `resume` the id you chose, retrying `RunNotFound`
+  for a moment, and start it again with the same id only if it stays missing
+  (`RunExists` then means it landed meanwhile). `run_or_resume`
+  ([Workflows](./workflows.md#run_or_resume)) does this. A refused start (a
+  busy session, a blocked prompt) still returns, and the refusal arrives as
+  the end of the stream. `resume`, `approve` and `answer` return at once.
 - Many runs of one server stream at once; each `Run` gets only its own
   envelopes.
 
@@ -108,8 +119,8 @@ Postgres the rule holds across every server on the database.
 
 ## Errors arrive at the end of the stream
 
-`run()`, `resume()`, `approve()` and `answer()` return before the server has done
-anything but accept the call. A refusal (a busy session, an unknown run, a
+`run()` returns once the run is stored or refused; `resume()`, `approve()` and
+`answer()` return before the server has done anything but accept the call. A refusal (a busy session, an unknown run, a
 contract that differs) and a failure to continue durably arrive as the end of
 the stream: iterating, or `result()`, raises a `RunError` subclass.
 
@@ -128,7 +139,7 @@ the stream: iterating, or `result()`, raises a `RunError` subclass.
 | `InvalidAnswer` | -32032 | The answers do not fit the pending `AskUser` questions; `.reason` says why. Nothing was written: the run still waits ([below](#answer)) |
 | `InvalidSteer` | -32038 | The steer's text is blank or longer than 16 KiB, its id is not usable, or the run is idle; `.reason` says why. Nothing was written |
 | `RunLeased` | -32033 | Another server drives the run (Postgres); `.owner` and `.expires_in` (seconds) say whose lease and for how long. Nothing was written ([Stores](./stores.md#run-leases)) |
-| `LeaseLost` | -32022 | Another server took the run over, or failed it, while this one drove it; the run stopped here without writing |
+| `LeaseLost` | -32022 | Another server took the run over, or failed it, while this one drove it; the run stopped here without writing. A write that finds the session longer than this run left it (the new driver's entries) after a takeover reports this too, not `RunExists` |
 | `RunError` | -32020 to -32028 | A store or journal write failed, or the stored state does not fit together; the run stays at its last durable state |
 | `ConnectionClosed` | none | The server went away mid-stream |
 
@@ -395,7 +406,7 @@ asyncio.run(main())
 ```text
 lost the server: the server closed its output
 success Recovered.
-Tool execution was interrupted before a result was recorded; not re-running automatically on resume.
+Tool execution was interrupted before a result was recorded; its effect is unknown, and it is not re-run automatically on resume.
 ```
 
 A tool call whose start was recorded but whose end was not is never run again:
@@ -403,6 +414,62 @@ the model gets an error result saying it was interrupted, and decides what to
 do. Make host tools that change things safe to call twice anyway, or check
 before acting, since the crash may have come after the effect and before the
 record.
+
+### Tools run at most once, never exactly once
+
+A resumed run gives each tool call one of three fates, by what was durable when
+the process died:
+
+| Durable at the crash | What a resume does | Effect of the tool |
+|---|---|---|
+| Neither start nor end | Plans the call again and runs it (permission is asked again unless a recorded decision covers it) | Happens once, now |
+| The start, not the end | Never runs it. It writes the call's `tool_call_end` as an error with `error_code` `tool_interrupted`, and the model reads the error result `Tool execution was interrupted before a result was recorded; its effect is unknown, and it is not re-run automatically on resume.` for that `tool_use_id`, so the transcript stays paired for providers that require a result for every tool use | Happened (the crash came after it, before its end was written) or did not (the crash came before it): unknown |
+| Both | Reuses the recorded result | Happened once |
+
+So a tool runs at most once per call, and linch never claims exactly once: the
+window between the effect and the write of its end cannot be closed from
+outside the tool. A host closes it in its own tools:
+
+- Use `ctx.idempotency_key` (`run_id:tool_use_id`) as the idempotency key of the
+  effect. The `tool_use_id` is the provider's and is the same after a resume, so
+  a side effect keyed by it is done once however often the call is attempted.
+- Find the calls to reconcile with the `tool_call_end` events whose
+  `error_code` is `tool_interrupted`, and ask the system the tool talks to
+  whether the key was applied.
+- Ask the model to check before it acts again: its error result already says
+  the effect is unknown.
+- After a connection loss, `resume` the run first (retry `RunLeased` as above);
+  re-issue `run` with the same `run_id` only when the run does not exist
+  (`RunNotFound` stays), never to repeat a run that does.
+
+```python
+import asyncio
+
+from linch_rust import Agent, ToolCallEndEvent, ToolContext, tool
+
+charged: dict[str, str] = {}  # your payment system's idempotency records
+
+
+@tool(scope="write")
+async def charge(order: str, ctx: ToolContext) -> str:
+    """Charge an order once, however often the call is attempted."""
+    key = ctx.idempotency_key
+    if key not in charged:  # the real check is the payment API's own key
+        charged[key] = f"receipt-{order}"
+    return charged[key]
+
+
+async def interrupted_calls(agent: Agent, run_id: str) -> list[str]:
+    """The tool_use_ids whose effect a crash left unknown, to reconcile."""
+    ends = [e.event for e in await agent.events(run_id)]
+    return [
+        end.tool_use_id
+        for end in ends
+        if isinstance(end, ToolCallEndEvent) and end.error_code == "tool_interrupted"
+    ]
+```
+
+`charged.get(f"{run_id}:{tool_use_id}")` then tells whether the effect landed.
 
 ## Approve
 
@@ -641,6 +708,7 @@ effect outside the run happens before the state that led to it is written:
 
 | Point | What is durable once it passes |
 |---|---|
+| `run()` returning | The run itself (its create), so the run id you hold exists after any crash |
 | Before each model call | The run so far and a record that the call was sent |
 | After each model response | The assistant message, its usage and cost |
 | After each model response, before its callbacks (only when an `after_provider_call` callback is attached) | The response's usage and cost, without the message |
@@ -664,7 +732,7 @@ What that means for you:
   event, and calls the model again (a new `model_call_receipt` of the same
   turn, not a retry). The message itself is written only after the
   callbacks, so a callback that redacts it is never bypassed.
-- A tool whose start was recorded is never run again on resume ([above](#resume)).
+- A tool whose start was recorded is never run again on resume: at most once, never exactly once ([above](#tools-run-at-most-once-never-exactly-once)).
 - A steer is written at a step boundary, before its call answers; a resumed run reads the pending ones back ([Steer](#steer)).
 - Closing the `Server` block, or the server dying, leaves each run at its last
   durable state; a Postgres run is resumable, a memory run is gone.
