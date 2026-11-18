@@ -3,14 +3,12 @@
 //! across restarts and processes, differs between tenants, and does not
 //! name the tenant on the wire or let anyone who sees it compute another's.
 
+use hmac::{Hmac, KeyInit, Mac};
 use linch::providers::CacheSalt;
-use sha2::{Digest as _, Sha256};
+use sha2::Sha256;
 
 /// Keeps this derivation apart from any other use of the same secret.
 const DOMAIN: &str = "linch.cache_salt:";
-
-/// SHA-256's block size, which HMAC pads its key to.
-const BLOCK: usize = 64;
 
 /// The least bytes an operator's secret may have: a shorter one could be
 /// guessed, and with it every tenant's salt.
@@ -21,7 +19,7 @@ pub const MIN_SECRET_BYTES: usize = 16;
 pub(super) fn derive(secret: &[u8], tenant: &str) -> Option<CacheSalt> {
     let mut message = String::from(DOMAIN);
     message.push_str(tenant);
-    let mac = hmac_sha256(secret, message.as_bytes());
+    let mac = hmac_sha256(secret, message.as_bytes())?;
     CacheSalt::new(
         mac.iter()
             .map(|byte| format!("{byte:02x}"))
@@ -29,24 +27,14 @@ pub(super) fn derive(secret: &[u8], tenant: &str) -> Option<CacheSalt> {
     )
 }
 
-/// RFC 2104 HMAC over SHA-256.
-fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
-    let mut block = [0u8; BLOCK];
-    if key.len() > BLOCK {
-        let hashed: [u8; 32] = Sha256::digest(key).into();
-        block[..32].copy_from_slice(&hashed);
-    } else {
-        block[..key.len()].copy_from_slice(key);
-    }
-    let pad = |fill: u8| block.map(|byte| byte ^ fill);
-    let mut inner = Sha256::new();
-    inner.update(pad(0x36));
-    inner.update(message);
-    let inner: [u8; 32] = inner.finalize().into();
-    let mut outer = Sha256::new();
-    outer.update(pad(0x5c));
-    outer.update(inner);
-    outer.finalize().into()
+/// RFC 2104 HMAC over SHA-256, from the `hmac` crate the Postgres driver
+/// already pulls in.
+fn hmac_sha256(key: &[u8], message: &[u8]) -> Option<[u8; 32]> {
+    // HMAC takes a key of any length, so this is `Some`; never a constant
+    // fallback, which would give every tenant one salt.
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).ok()?;
+    mac.update(message);
+    Some(mac.finalize().into_bytes().into())
 }
 
 #[cfg(test)]
@@ -78,7 +66,7 @@ mod tests {
             ),
         ];
         for (key, data, expected) in cases {
-            assert_eq!(hex(hmac_sha256(key, data)), expected);
+            assert_eq!(hex(hmac_sha256(key, data).unwrap()), expected);
         }
     }
 
