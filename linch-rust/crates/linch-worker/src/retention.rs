@@ -12,7 +12,6 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use linch_postgres::PgPool;
-use sqlx::{Postgres, Transaction};
 use tokio::time::Instant;
 
 use crate::error::WorkerError;
@@ -122,10 +121,14 @@ pub struct Pruned {
     pub contended: bool,
 }
 
-/// One pruner at a time per database and schema: a transaction-scoped
-/// try-lock, taken by every batch, so it needs no connection of its own and
-/// dies with a crashed pruner.
-const LOCK: &str = "SELECT pg_try_advisory_xact_lock(hashtextextended(\
+/// One pruner at a time per database and schema: a session-level try-lock
+/// held on one connection for the whole pass, so a second pass cannot start
+/// in the pauses between batches, and a crashed pruner's connection drops it.
+const LOCK: &str = "SELECT pg_try_advisory_lock(hashtextextended(\
+    'linch_retention:' || current_database() || ':' || coalesce(current_schema(), ''), 0))";
+
+/// Release the lock taken by [`LOCK`] on the same connection.
+const UNLOCK: &str = "SELECT pg_advisory_unlock(hashtextextended(\
     'linch_retention:' || current_database() || ':' || coalesce(current_schema(), ''), 0))";
 
 /// Give the runs that were terminal before migration 10 an end time of now,
@@ -202,12 +205,12 @@ const DELETE_SESSIONS: &str = "WITH k AS (SELECT * FROM unnest($1::text[], $2::t
     SELECT (SELECT count(*) FROM gone), (SELECT count(*) FROM en)";
 
 /// How a batch ended.
-enum Batch<K> {
-    /// Another pruner holds the lock.
-    Contended,
-    /// The batch's rows were deleted: the last key picked (the next
-    /// batch's cursor), and what the delete counted.
-    Done(Option<K>, i64, i64),
+struct Batch<K> {
+    /// The last key picked (the next batch's cursor); `None` when nothing
+    /// was left to pick.
+    last: Option<K>,
+    /// What the delete counted: parents, then children.
+    counts: (i64, i64),
 }
 
 fn millis(period: Duration) -> f64 {
@@ -218,11 +221,6 @@ fn count(n: i64) -> u64 {
     u64::try_from(n).unwrap_or(0)
 }
 
-/// Take the pruner lock in `tx`; whether it is ours.
-async fn lock(tx: &mut Transaction<'static, Postgres>) -> Result<bool, WorkerError> {
-    Ok(sqlx::query_scalar(LOCK).fetch_one(&mut **tx).await?)
-}
-
 /// One batch of terminal runs older than `window` after `cursor`.
 async fn runs_batch(
     pool: &PgPool,
@@ -231,9 +229,6 @@ async fn runs_batch(
     cursor: &(DateTime<Utc>, String, String),
 ) -> Result<Batch<(DateTime<Utc>, String, String)>, WorkerError> {
     let mut tx = crate::begin(pool).await?;
-    if !lock(&mut tx).await? {
-        return Ok(Batch::Contended);
-    }
     let picked: Vec<(DateTime<Utc>, String, String)> = sqlx::query_as(PICK_RUNS)
         .bind(millis(window))
         .bind(cursor.0)
@@ -244,7 +239,10 @@ async fn runs_batch(
         .await?;
     let Some(last) = picked.last().cloned() else {
         tx.commit().await?;
-        return Ok(Batch::Done(None, 0, 0));
+        return Ok(Batch {
+            last: None,
+            counts: (0, 0),
+        });
     };
     let (namespaces, ids): (Vec<String>, Vec<String>) = picked
         .into_iter()
@@ -256,7 +254,10 @@ async fn runs_batch(
         .fetch_one(&mut *tx)
         .await?;
     tx.commit().await?;
-    Ok(Batch::Done(Some(last), runs, events))
+    Ok(Batch {
+        last: Some(last),
+        counts: (runs, events),
+    })
 }
 
 /// One batch of sessions idle longer than `window` after `cursor`.
@@ -267,9 +268,6 @@ async fn sessions_batch(
     cursor: &(String, String),
 ) -> Result<Batch<(String, String)>, WorkerError> {
     let mut tx = crate::begin(pool).await?;
-    if !lock(&mut tx).await? {
-        return Ok(Batch::Contended);
-    }
     let picked: Vec<(String, String)> = sqlx::query_as(PICK_SESSIONS)
         .bind(millis(window))
         .bind(&cursor.0)
@@ -279,7 +277,10 @@ async fn sessions_batch(
         .await?;
     let Some(last) = picked.last().cloned() else {
         tx.commit().await?;
-        return Ok(Batch::Done(None, 0, 0));
+        return Ok(Batch {
+            last: None,
+            counts: (0, 0),
+        });
     };
     let (namespaces, ids): (Vec<String>, Vec<String>) = picked.into_iter().unzip();
     let (sessions, entries): (i64, i64) = sqlx::query_as(DELETE_SESSIONS)
@@ -289,35 +290,27 @@ async fn sessions_batch(
         .fetch_one(&mut *tx)
         .await?;
     tx.commit().await?;
-    Ok(Batch::Done(Some(last), sessions, entries))
+    Ok(Batch {
+        last: Some(last),
+        counts: (sessions, entries),
+    })
 }
 
-/// Stamp one batch of runs that were terminal before the migration; how
-/// many, or `None` when another pruner holds the lock.
-async fn stamp(pool: &PgPool, batch: u32) -> Result<Option<u64>, WorkerError> {
+/// Stamp one batch of runs that were terminal before the migration; how many.
+async fn stamp(pool: &PgPool, batch: u32) -> Result<u64, WorkerError> {
     let mut tx = crate::begin(pool).await?;
-    if !lock(&mut tx).await? {
-        return Ok(None);
-    }
     let stamped = sqlx::query(STAMP)
         .bind(i64::from(batch))
         .execute(&mut *tx)
         .await?
         .rows_affected();
     tx.commit().await?;
-    Ok(Some(stamped))
+    Ok(stamped)
 }
 
 /// Delete the tombstones older than `period`, a batch at a time.
-async fn tombstones(
-    pool: &PgPool,
-    period: Duration,
-    batch: u32,
-) -> Result<Option<u64>, WorkerError> {
+async fn tombstones(pool: &PgPool, period: Duration, batch: u32) -> Result<u64, WorkerError> {
     let mut tx = crate::begin(pool).await?;
-    if !lock(&mut tx).await? {
-        return Ok(None);
-    }
     let deleted = sqlx::query(
         "DELETE FROM linch_pruned_runs WHERE (namespace, run_id) IN ( \
              SELECT namespace, run_id FROM linch_pruned_runs \
@@ -330,7 +323,7 @@ async fn tombstones(
     .await?
     .rows_affected();
     tx.commit().await?;
-    Ok(Some(deleted))
+    Ok(deleted)
 }
 
 /// Pause as long as the batch took, so a pass keeps the database at most
@@ -347,9 +340,10 @@ async fn rest(started: Instant) {
 /// Each batch is followed by a pause as long as the batch took, so a pass
 /// leaves the database at least half free for the runs that are committing.
 /// A pass walks each table once in key order, so a row it could not delete
-/// (a child of a live run, say) is not read again until the next pass. A
-/// pass stops early, with `contended` set, when another pruner (another
-/// server's worker) holds the database's pruner lock.
+/// (a child of a live run, say) is not read again until the next pass. One
+/// connection of the pool holds the database's pruner lock for the whole
+/// pass; a pass that finds another one (another server's worker) running
+/// deletes nothing and returns with `contended` set.
 ///
 /// Args:
 ///     pool: Pool for the database and schema of the stores.
@@ -364,35 +358,45 @@ async fn rest(started: Instant) {
 ///         deleted stays deleted.
 pub async fn prune_retained(pool: &PgPool, retention: &Retention) -> Result<Pruned, WorkerError> {
     retention.check()?;
+    let mut held = pool.acquire().await?;
+    if !sqlx::query_scalar::<_, bool>(LOCK)
+        .fetch_one(&mut *held)
+        .await?
+    {
+        return Ok(Pruned {
+            contended: true,
+            ..Pruned::default()
+        });
+    }
+    let done = pass(pool, retention).await;
+    if sqlx::query(UNLOCK).execute(&mut *held).await.is_err() {
+        // The lock goes with the connection: close it rather than pool it.
+        drop(held.detach());
+    }
+    done
+}
+
+/// The batches of a pass, with the pruner lock held by the caller.
+async fn pass(pool: &PgPool, retention: &Retention) -> Result<Pruned, WorkerError> {
     let mut done = Pruned::default();
     if let Some(window) = retention.terminal_runs {
         loop {
             let started = Instant::now();
-            match stamp(pool, retention.batch_size).await? {
-                None => {
-                    done.contended = true;
-                    return Ok(done);
-                }
-                Some(0) => break,
-                Some(n) => done.stamped += n,
+            let stamped = stamp(pool, retention.batch_size).await?;
+            if stamped == 0 {
+                break;
             }
+            done.stamped += stamped;
             rest(started).await;
         }
         let mut cursor = (DateTime::<Utc>::UNIX_EPOCH, String::new(), String::new());
         loop {
             let started = Instant::now();
-            match runs_batch(pool, window, retention.batch_size, &cursor).await? {
-                Batch::Contended => {
-                    done.contended = true;
-                    return Ok(done);
-                }
-                Batch::Done(None, ..) => break,
-                Batch::Done(Some(last), runs, events) => {
-                    done.runs += count(runs);
-                    done.events += count(events);
-                    cursor = last;
-                }
-            }
+            let batch = runs_batch(pool, window, retention.batch_size, &cursor).await?;
+            let Some(last) = batch.last else { break };
+            done.runs += count(batch.counts.0);
+            done.events += count(batch.counts.1);
+            cursor = last;
             rest(started).await;
         }
     }
@@ -400,31 +404,21 @@ pub async fn prune_retained(pool: &PgPool, retention: &Retention) -> Result<Prun
         let mut cursor = (String::new(), String::new());
         loop {
             let started = Instant::now();
-            match sessions_batch(pool, window, retention.batch_size, &cursor).await? {
-                Batch::Contended => {
-                    done.contended = true;
-                    return Ok(done);
-                }
-                Batch::Done(None, ..) => break,
-                Batch::Done(Some(last), sessions, entries) => {
-                    done.sessions += count(sessions);
-                    done.entries += count(entries);
-                    cursor = last;
-                }
-            }
+            let batch = sessions_batch(pool, window, retention.batch_size, &cursor).await?;
+            let Some(last) = batch.last else { break };
+            done.sessions += count(batch.counts.0);
+            done.entries += count(batch.counts.1);
+            cursor = last;
             rest(started).await;
         }
     }
     loop {
         let started = Instant::now();
-        match tombstones(pool, retention.tombstones, retention.batch_size).await? {
-            None => {
-                done.contended = true;
-                break;
-            }
-            Some(0) => break,
-            Some(n) => done.tombstones += n,
+        let deleted = tombstones(pool, retention.tombstones, retention.batch_size).await?;
+        if deleted == 0 {
+            break;
         }
+        done.tombstones += deleted;
         rest(started).await;
     }
     Ok(done)

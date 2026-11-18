@@ -31,8 +31,10 @@ fn a_retention_must_delete_something_and_stay_in_range() {
     assert!(invalid(|r| r.batch_size = 0));
     assert!(invalid(|r| r.batch_size = MAX_BATCH_SIZE + 1));
     assert!(invalid(|r| r.interval = Duration::from_secs(59)));
-    let mut idle = Retention::default();
-    idle.idle_sessions = Some(Duration::from_secs(86_400));
+    let idle = Retention {
+        idle_sessions: Some(Duration::from_secs(86_400)),
+        ..Retention::default()
+    };
     assert!(idle.check().is_ok(), "either window is enough");
 }
 

@@ -17,7 +17,7 @@ use linch_worker::{
 use tokio_util::sync::CancellationToken;
 
 use crate::common::*;
-use crate::schedule::{fire_all, hourly};
+use crate::schedule::hourly;
 use crate::scheduler::{AdminsOnly, allow_call_0, suspended_past_the_history};
 
 const DAY: Duration = Duration::from_secs(24 * 3600);
@@ -500,6 +500,45 @@ async fn one_pruner_runs_at_a_time() {
     db.finish().await;
 }
 
+/// The pruner lock is held for the whole pass, pauses included: a second
+/// pass started while the first is between batches deletes nothing.
+#[tokio::test]
+async fn a_second_pass_cannot_start_between_the_batches_of_the_first() {
+    let Some(db) = TestDb::new("ret_pause").await else {
+        return;
+    };
+    for i in 0..40 {
+        run(&db, NS, &format!("old{i}"), "completed", Some(5), 1).await;
+    }
+    let slow = Retention {
+        terminal_runs: Some(DAY),
+        batch_size: 1,
+        ..Retention::default()
+    };
+    let first = tokio::spawn({
+        let (pool, slow) = (db.pool.clone(), slow.clone());
+        async move { prune_retained(&pool, &slow).await.unwrap() }
+    });
+    // Wait until the first pass has deleted something: it holds the lock now.
+    while sqlx::query_scalar::<_, i64>("SELECT count(*) FROM linch_pruned_runs")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+        == 0
+    {
+        tokio::task::yield_now().await;
+    }
+    let mut refused = 0;
+    while !first.is_finished() {
+        let second = prune_retained(&db.pool, &slow).await.unwrap();
+        assert_eq!(second.runs, 0, "a second pass deleted while the first ran");
+        refused += i32::from(second.contended);
+    }
+    assert!(refused > 0, "the first pass was never seen running");
+    assert_eq!(first.await.unwrap().runs, 40);
+    db.finish().await;
+}
+
 /// A statement of a batch that fails rolls the whole batch back: every run is
 /// whole or gone with its tombstone, whichever write dies.
 #[tokio::test]
@@ -651,7 +690,7 @@ async fn pruning_the_runs_of_a_schedule_leaves_its_fires_and_jobs_alone() {
     assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 0);
     db.sql("UPDATE linch_worker_schedules SET next_fire = now() - interval '1 second'")
         .await;
-    assert_eq!(fire_all(&db).await, 1);
+    // The running worker fires it (a fire_all here would race with the worker).
     wait_until("the second fire runs once", || async {
         probe.started() == 2 && db.jobs().await == 0
     })
