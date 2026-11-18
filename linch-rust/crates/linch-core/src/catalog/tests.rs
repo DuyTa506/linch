@@ -9,7 +9,7 @@ fn tool(name: &str, description: &str, field: &str) -> ToolDefinition {
     ToolDefinition {
         name: name.into(),
         description: description.into(),
-        input_schema: schema.as_object().unwrap().clone(),
+        input_schema: schema.as_object().unwrap().clone().into(),
     }
 }
 

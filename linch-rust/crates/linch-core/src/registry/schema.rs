@@ -79,7 +79,7 @@ impl RegisteredTool {
         let definition = ToolDefinition {
             name,
             description: tool.description().to_owned(),
-            input_schema,
+            input_schema: Arc::new(input_schema),
         };
         Ok(Self {
             tool,

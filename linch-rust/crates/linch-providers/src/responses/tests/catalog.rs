@@ -15,7 +15,11 @@ fn row(name: &str) -> ToolDefinition {
     ToolDefinition {
         name: name.into(),
         description: format!("{name} tool."),
-        input_schema: json!({"type": "object"}).as_object().unwrap().clone(),
+        input_schema: json!({"type": "object"})
+            .as_object()
+            .unwrap()
+            .clone()
+            .into(),
     }
 }
 
@@ -104,7 +108,7 @@ fn a_late_tool_goes_at_its_notice_as_its_row() {
     // Late's schema changed after it was added: its row has the new one.
     let mut request = changed(MODEL);
     let schema = json!({"type": "object", "properties": {"r": {"type": "string"}}});
-    request.tools[2].input_schema = schema.as_object().unwrap().clone();
+    request.tools[2].input_schema = schema.as_object().unwrap().clone().into();
     let body = payload::build_payload(&request, &native_options()).unwrap();
     assert_eq!(body["tools"], json!([function("Read"), function("Write")]));
     let mut late = function("Late");

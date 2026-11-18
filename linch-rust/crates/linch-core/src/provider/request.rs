@@ -1,5 +1,7 @@
 //! The normalized request sent to a provider for one call.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 use crate::json::JsonObject;
@@ -76,8 +78,10 @@ pub struct ToolDefinition {
     pub name: String,
     /// Description shown to the model.
     pub description: String,
-    /// JSON Schema describing accepted input.
-    pub input_schema: JsonObject,
+    /// JSON Schema describing accepted input. Shared with the registry
+    /// entry it came from, so a request, the catalog and the logged prefix
+    /// of N sessions hold one copy, not N.
+    pub input_schema: Arc<JsonObject>,
 }
 
 /// JSON Schema specification for constrained structured output.

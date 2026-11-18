@@ -71,6 +71,14 @@ giây. Hãy đo workload của bạn.
 | Resume sau một sự cố, từ lúc server khởi động đến event đầu tiên được resume (lease đã hết hạn) | p50 59 ms |
 | Tiếp quản sau `kill -9` | trung bình 2,7 s với lease 3 s; 28,6 s với mặc định 30 s (bị chặn bởi lease) |
 | Kho memory | khoảng 110 KB bộ nhớ server cho mỗi run, giữ trong suốt thời gian agent còn tồn tại |
+| 1000 session chạy cùng lúc trên một agent (Postgres, 4 lượt mỗi session), bộ nhớ đỉnh của process | 268 MB (khoảng 0,25 MB mỗi session; 207 MB với `MALLOC_ARENA_MAX=2`) |
+
+Schema của tool được giữ một bản cho mỗi agent và dùng chung cho mọi session, nên mỗi session
+chỉ tốn transcript và trạng thái run của nó, không còn một bản sao của cả danh mục tool. Trên
+glibc, bộ nhớ đã giải phóng vẫn nằm lại trong các arena theo từng thread: với process phục vụ
+nhiều session cùng lúc, hãy đặt `MALLOC_ARENA_MAX=2` trong môi trường của server (đỉnh thấp hơn
+23 % trong cùng cell, đo 3 lần mỗi bên). Một global allocator như jemalloc là lựa chọn khác;
+nó tiết kiệm khoảng 9 % khi còn các bản sao cũ và đã không được dùng.
 
 Hãy dùng kho Postgres cho bất cứ thứ gì sống lâu; kho memory giữ lịch sử của mọi run trong
 server trong suốt thời gian agent còn tồn tại.

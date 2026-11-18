@@ -26,7 +26,11 @@ fn weather_tool() -> ToolDefinition {
     ToolDefinition {
         name: "get_weather".into(),
         description: "Weather.".into(),
-        input_schema: json!({"type": "object"}).as_object().unwrap().clone(),
+        input_schema: json!({"type": "object"})
+            .as_object()
+            .unwrap()
+            .clone()
+            .into(),
     }
 }
 

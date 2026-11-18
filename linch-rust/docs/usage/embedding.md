@@ -75,6 +75,15 @@ call takes seconds. Measure your workload.
 | Resume after a crash, server start to first resumed event (lease already expired) | p50 59 ms |
 | Takeover after `kill -9` | 2.7 s on average at a 3 s lease; 28.6 s at the 30 s default (bounded by the lease) |
 | Memory stores | about 110 KB of server memory per run, kept for as long as the agent lives |
+| 1000 sessions in flight at once on one agent (Postgres, 4 turns each), peak process memory | 268 MB (about 0.25 MB per session; 207 MB with `MALLOC_ARENA_MAX=2`) |
+
+The tool schemas are held once per agent and shared by every session, so a
+session costs its own transcript and run state, not a copy of the catalogue. On
+glibc, freed memory stays in per-thread arenas: for a process that serves many
+sessions at once, set `MALLOC_ARENA_MAX=2` in the server's environment (23 %
+lower peak in the same cell, measured 3 times each). A global allocator such as
+jemalloc is another option; it saved about 9 % on top of the old per-session
+copies and was not adopted.
 
 Use Postgres stores for anything long-lived; memory stores keep every run's
 history in the server for as long as the agent lives.

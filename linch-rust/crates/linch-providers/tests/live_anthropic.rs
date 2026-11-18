@@ -126,7 +126,8 @@ async fn tool_round_trip(test: &str, thinking: bool) {
         })
         .as_object()
         .unwrap()
-        .clone(),
+        .clone()
+        .into(),
     };
     let mut messages = vec![Message::user_text(
         "Use the get_weather tool to get the weather in Paris, then tell me in one sentence.",
