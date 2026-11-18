@@ -11,7 +11,7 @@ use crate::canonical::{CanonicalError, Digest, digest_with_domain};
 use crate::compaction::CompactionSpec;
 use crate::json::JsonObject;
 use crate::message::SystemBlock;
-use crate::provider::{ProviderRequest, ReasoningEffort, Thinking, ToolDefinition};
+use crate::provider::{OutputSchema, ProviderRequest, ReasoningEffort, Thinking, ToolDefinition};
 use crate::reliability::ProviderRetry;
 use crate::tool::ToolScope;
 
@@ -78,6 +78,26 @@ pub struct AgentSpec {
     /// Empty (the default) fails the run instead.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fallback_models: Vec<String>,
+    /// The JSON Schema the final answer of each run must satisfy (Python's
+    /// `Agent.output_schema`); `None` (the default) takes any text. It is
+    /// sent with every primary request, so the provider can constrain the
+    /// answer, and the answer is checked against it before the run
+    /// completes; the parsed object is the result's `structured_output`.
+    /// A subagent's runs do not take it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<OutputSchema>,
+    /// How many times an answer that breaks `output_schema` goes back to
+    /// the model with the error before the run fails (Python's
+    /// `structured_output_retries`, default 0: the first such answer fails
+    /// the run). Each retry is a turn, so `max_turns` bounds them too. It
+    /// also bounds a run's own schema (`RunOptions::output_schema`), so it
+    /// may be set without `output_schema`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub structured_output_retries: u32,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 impl AgentSpec {
@@ -97,6 +117,8 @@ impl AgentSpec {
             budget: None,
             provider_retry: ProviderRetry::default(),
             fallback_models: Vec::new(),
+            output_schema: None,
+            structured_output_retries: 0,
         }
     }
 
@@ -216,6 +238,34 @@ mod tests {
         let mut features = JsonObject::new();
         features.insert("skills".into(), json!([]));
         assert_ne!(base, contract_digest(&spec, &[], hooks, &features).unwrap());
+    }
+
+    /// The contract of a spec with no output schema is the one it had
+    /// before structured output existed, so its runs still resume.
+    #[test]
+    fn a_spec_without_an_output_schema_keeps_its_contract() {
+        let hooks = crate::hooks::Hooks::default().policy_digest();
+        let none = JsonObject::new();
+        let spec = AgentSpec::new("m");
+        let digest = contract_digest(&spec, &[], hooks, &none).unwrap();
+        assert_eq!(
+            digest.to_string(),
+            "a80570d2a77d5d1600656180319cb890b0a31a879948779ba862b3303bfec300"
+        );
+        let mut schema = json!({"name": "answer", "schema": {"type": "object"}});
+        let mut shaped = spec.clone();
+        shaped.output_schema = Some(serde_json::from_value(schema.clone()).unwrap());
+        let with = contract_digest(&shaped, &[], hooks, &none).unwrap();
+        assert_ne!(digest, with, "the schema is part of the contract");
+        schema["schema"]["required"] = json!(["x"]);
+        shaped.output_schema = Some(serde_json::from_value(schema).unwrap());
+        assert_ne!(with, contract_digest(&shaped, &[], hooks, &none).unwrap());
+        shaped.structured_output_retries = 2;
+        let retrying = contract_digest(&shaped, &[], hooks, &none).unwrap();
+        assert_ne!(with, retrying, "the retry bound is part of the contract");
+        let wire = serde_json::to_value(&shaped).unwrap();
+        assert_eq!(wire["structured_output_retries"], 2);
+        assert_eq!(serde_json::from_value::<AgentSpec>(wire).unwrap(), shaped);
     }
 
     #[test]

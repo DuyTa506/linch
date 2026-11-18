@@ -202,7 +202,7 @@
 //! again. Nothing is written; the session and its runs stay, and a run of
 //! it still in progress just has to read again before it writes.
 //!
-//! **`run.start`** `{agent, session_id, prompt, run_id?, principal?, trace_id?}`
+//! **`run.start`** `{agent, session_id, prompt, run_id?, principal?, trace_id?, output_schema?}`
 //! ([`StartParams`](protocol::StartParams)) starts a run; the session is
 //! created when missing. `run_id` names the new run (a fresh uuid when
 //! absent), so a client can resume it even if it never saw the answer; an
@@ -213,6 +213,11 @@
 //! `{tenant, user, roles?}`. `trace_id` is the host's trace id: stored with
 //! the run and echoed on every `init` and `result` of it, its tool calls'
 //! context and its subagents' runs, a resume or approve included.
+//! `output_schema` (`{name, schema, strict?, description?}`) replaces the
+//! agent's `spec.output_schema` for this run: the `init` event stores it
+//! and a resume or approve uses it again. One that does not compile, or
+//! whose root is not an object, ends the run with `-32031` and writes
+//! nothing. The result's `structured_output` is the checked answer.
 //!
 //! **`run.resume`** `{agent, run_id, principal?}`
 //! ([`ResumeParams`](protocol::ResumeParams)) continues a run after a crash
@@ -287,7 +292,7 @@
 //! | `context_build` | `messages` (the provider view) | `{"blocks"?: [{"text"}], "metadata"?: {..}}`; `metadata` lands on the call's `context_build` event, a later callback's key winning |
 //! | `before_provider_call` | `turn, request` (the provider request about to be sent) | `{"action": "continue"}`, `{"action": "rewrite", "request"}`, `{"action": "block", "reason"}` |
 //! | `after_provider_call` | `turn, assembly` (the response just assembled) | `{"action": "continue"}`, `{"action": "rewrite", "assembly"}`, `{"action": "retry", "feedback"}` (or `"force_continue"`), `{"action": "block", "reason"}` |
-//! | `stop` | `text` | `{"action": "allow"}`, `{"action": "continue", "feedback"}` (or `"force_continue"`), `{"action": "retry", "feedback"}`, `{"action": "rewrite", "text"}`, `{"action": "block", "reason"}` |
+//! | `stop` | `text`, `structured_output` (only with an output schema: `text` parsed and checked) | `{"action": "allow"}`, `{"action": "continue", "feedback"}` (or `"force_continue"`), `{"action": "retry", "feedback"}`, `{"action": "rewrite", "text"}`, `{"action": "block", "reason"}` |
 //! | `post_turn` | `turn, stop_reason` | `{}` |
 //!
 //! An `after_provider_call` `retry` keeps the response, runs none of its
@@ -295,7 +300,9 @@
 //! `stop`, `continue` is bounded only by `max_turns`, and `retry` (Python's
 //! `before_final_answer` retry) is honoured once per run call, after which
 //! it counts as `allow`. Every other point refuses `retry` and
-//! `force_continue`.
+//! `force_continue`. With an output schema, `stop` runs only on an answer
+//! that satisfies it; a `rewrite` is checked again, and one that does not
+//! satisfy the schema fails the run.
 //!
 //! A `pre_tool_use` rewrite feeds the next callback and is validated
 //! against the tool's schema again; a block or resolve stops the chain,
@@ -368,6 +375,7 @@
 //! | -32028 | reconcile | `RunError::Reconcile` |
 //! | -32029 | prompt blocked | `RunError::PromptBlocked`; `data: {reason}` |
 //! | -32030 | session busy | `StoreError::SessionBusy`: the session has a live run, so `run.start` wrote nothing; `data: {session_id, run_id}` names that run |
+//! | -32031 | invalid output schema | `RunError::InvalidOutputSchema`: the `output_schema` of `run.start` does not compile or is not an object schema, so nothing was written; `data: {reason}` |
 //!
 //! Codes from -32010 to -32015 answer `agent.open`. Codes from -32020 on
 //! come in `run.end` for a run and as the error of `run.events`.

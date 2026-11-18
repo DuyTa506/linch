@@ -182,7 +182,7 @@ impl HookChain<ContextBuild> {
 pub struct Stop;
 
 /// The model gave a text-only response, so the run may stop.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StopRequest {
     /// Session being served.
     pub session_id: SessionId,
@@ -190,6 +190,12 @@ pub struct StopRequest {
     pub run_id: RunId,
     /// The final response text.
     pub text: String,
+    /// `text` parsed and checked against the run's output schema; `None`
+    /// when the run has none. The chain only runs on an answer that
+    /// passed, and after a [`StopResponse::Rewrite`] this is the rewrite's
+    /// value, or `None` when the rewrite does not satisfy the schema (the
+    /// run then fails once the chain allows the stop).
+    pub structured_output: Option<JsonObject>,
 }
 
 /// A `stop` hook's answer.
@@ -287,20 +293,24 @@ impl HookChain<Stop> {
     /// Run the hooks in order. A rewrite feeds the next hook. The first
     /// hook that keeps the run going, or asks for another answer, stops the
     /// chain. A block or a closed failure stops it too, and fails the run.
+    /// A rewrite clears `structured_output`, since the chain alone cannot
+    /// check it against a schema.
     pub async fn run(&self, request: StopRequest) -> ChainResult<StopOutcome> {
         let mut records = Vec::new();
-        let outcome = self.run_into(request, true, &mut records).await;
+        let outcome = self.run_into(request, true, &|_| None, &mut records).await;
         ChainResult { outcome, records }
     }
 
     /// [`Self::run`], pushing each record into `records` as its hook
     /// returns, so a dropped chain keeps the records of the hooks that did.
     /// Without `retry`, a [`StopResponse::Retry`] counts as an allow: the
-    /// run spent its retries.
+    /// run spent its retries. `check` gives a rewritten text's
+    /// `structured_output` for the hooks after it.
     pub(crate) async fn run_into(
         &self,
         mut request: StopRequest,
         retry: bool,
+        check: &(dyn Fn(&str) -> Option<JsonObject> + Sync),
         records: &mut Vec<HookRecord>,
     ) -> StopOutcome {
         for entry in self.entries().iter() {
@@ -308,6 +318,7 @@ impl HookChain<Stop> {
                 Step::Skip | Step::Answer(StopResponse::Allow) => {}
                 Step::Answer(StopResponse::Retry { .. }) if !retry => {}
                 Step::Answer(StopResponse::Rewrite { text }) => {
+                    request.structured_output = check(&text);
                     request.text = text;
                 }
                 Step::Answer(StopResponse::Continue { feedback }) => {

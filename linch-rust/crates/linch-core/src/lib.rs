@@ -40,6 +40,7 @@ pub mod scheduler;
 pub mod session_log;
 pub mod skills;
 pub mod store;
+mod structured;
 pub mod subagents;
 pub mod tool;
 pub mod tool_search;

@@ -11,7 +11,7 @@ the run's events then stream in as `Envelope`s.
 
 | Call | Does |
 |---|---|
-| `await agent.run(session_id, prompt, *, run_id=None, principal=None, trace_id=None)` | Start a run; the session is created when missing. `trace_id` is yours, echoed on the run's `init` and `result` events ([Observability](./observability.md#correlate-logs-and-traces)) |
+| `await agent.run(session_id, prompt, *, run_id=None, principal=None, trace_id=None, output_schema=None)` | Start a run; the session is created when missing. `trace_id` is yours, echoed on the run's `init` and `result` events ([Observability](./observability.md#correlate-logs-and-traces)). `output_schema` replaces the agent's for this run ([Structured output](./structured-output.md#give-one-run-its-own-schema)) |
 | `await agent.resume(run_id, *, principal=None)` | Continue a run after a crash or a dropped stream |
 | `await agent.approve(run_id, decisions, *, principal=None)` | Answer a suspended run's pending calls and continue it |
 | `async for envelope in run` | Every envelope of this call, in order, ending after `result` or `suspended` |
@@ -117,6 +117,7 @@ the stream: iterating, or `result()`, raises a `RunError` subclass.
 | `NotSuspended` | -32027 | `approve` on a run that is not waiting for approval ([below](#approve)) |
 | `PromptBlocked` | -32029 | A `user_prompt_submit` callback refused the prompt; `.reason` says why. No run or session was created |
 | `SessionBusy` | -32030 | The session has a live run |
+| `InvalidOutputSchema` | -32031 | The run's `output_schema` does not compile or its root is not an object; `.reason` says why. No run or session was created |
 | `RunError` | -32020 to -32028 | A store or journal write failed, or the stored state does not fit together; the run stays at its last durable state |
 | `ConnectionClosed` | none | The server went away mid-stream |
 

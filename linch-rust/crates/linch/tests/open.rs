@@ -261,6 +261,38 @@ async fn closing_a_session_forgets_what_it_read() {
     assert_eq!(kept, "alpha\n");
 }
 
+/// A config's `spec.output_schema` holds each run's answer to the schema;
+/// one that does not compile fails to open.
+#[tokio::test]
+async fn a_spec_output_schema_shapes_the_result() {
+    let turns = json!([
+        TurnBuilder::new("scripted-model").text("total: 2").build(),
+        TurnBuilder::new("scripted-model")
+            .text("{\"total\": 2}")
+            .build(),
+    ]);
+    let mut value = serde_json::to_value(scripted(turns, None)).unwrap();
+    value["spec"]["output_schema"] = json!({"name": "invoice", "schema": {
+        "type": "object", "properties": {"total": {"type": "integer"}}, "required": ["total"]}});
+    value["spec"]["structured_output_retries"] = json!(1);
+    let opened = config(value.clone()).open().await.unwrap();
+    let mut stream = opened.agent().run("bill", RunOptions::new("s1"));
+    let mut last = None;
+    while let Some(item) = stream.next().await {
+        last = Some(item.unwrap().event);
+    }
+    let Some(Event::Result(result)) = last else {
+        panic!("ends with a result")
+    };
+    let total = json!({"total": 2});
+    assert_eq!(result.structured_output, total.as_object().cloned());
+    value["spec"]["output_schema"]["schema"] = json!({"type": "string"});
+    assert!(matches!(
+        config(value).open().await,
+        Err(OpenError::Build(BuildError::Invalid(_)))
+    ));
+}
+
 #[tokio::test]
 async fn a_missing_workspace_or_blank_model_fails_to_open() {
     let missing = scripted(json!([]), Some("/nonexistent/linch-p11"));

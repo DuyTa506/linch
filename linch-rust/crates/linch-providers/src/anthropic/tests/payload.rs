@@ -329,7 +329,40 @@ fn tool_results_lead_the_user_message_with_images_and_error_flags() {
 }
 
 #[test]
-fn misplaced_blocks_and_output_schema_fail_locally() {
+fn an_output_schema_is_native_json_output_beside_effort() {
+    let schema = json!({"type": "object", "properties": {"total": {"type": "number"}},
+                        "required": ["total"], "additionalProperties": false});
+    let output = OutputSchema {
+        name: "invoice".into(),
+        schema: schema.as_object().unwrap().clone(),
+        strict: true,
+        description: Some("the bill".into()),
+    };
+    let body = build(&ProviderRequest {
+        output_schema: Some(output.clone()),
+        effort: Some(ReasoningEffort::High),
+        tools: vec![weather_tool()],
+        ..request()
+    });
+    assert_eq!(
+        body["output_config"],
+        json!({"effort": "high", "format": {"type": "json_schema", "schema": schema}})
+    );
+    assert!(body.get("tool_choice").is_none(), "no forced final tool");
+    assert_eq!(body["tools"].as_array().unwrap().len(), 1);
+    let alone = build(&ProviderRequest {
+        output_schema: Some(output),
+        ..request()
+    });
+    assert_eq!(
+        alone["output_config"],
+        json!({"format": {"type": "json_schema", "schema": schema}})
+    );
+    assert!(build(&request()).get("output_config").is_none());
+}
+
+#[test]
+fn misplaced_blocks_fail_locally() {
     let misplaced = [
         Message::new(
             Role::Assistant,
@@ -350,15 +383,6 @@ fn misplaced_blocks_and_output_schema_fail_locally() {
             ..request()
         }));
     }
-    assert!(invalid(&ProviderRequest {
-        output_schema: Some(OutputSchema {
-            name: "s".into(),
-            schema: serde_json::Map::new(),
-            strict: true,
-            description: None,
-        }),
-        ..request()
-    }));
 }
 
 /// The system blocks an agent with host blocks sends: the breakpoint lands

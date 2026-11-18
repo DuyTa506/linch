@@ -119,6 +119,15 @@ fn the_summary_request_disables_tools_and_keeps_the_conversation() {
 }
 
 #[test]
+fn the_summary_request_is_not_held_to_the_output_schema() {
+    let mut spec = AgentSpec::new("m");
+    let schema = serde_json::json!({"name": "answer", "schema": {"type": "object"}});
+    spec.output_schema = Some(serde_json::from_value(schema).unwrap());
+    let request = summary_request(&spec, &CompactionSpec::new(1), vec![], vec![]);
+    assert_eq!(request.output_schema, None, "a summary is free text");
+}
+
+#[test]
 fn without_a_threshold_it_is_due_at_80_percent_of_the_window_less_the_reserve() {
     let by_window: CompactionSpec = serde_json::from_value(json!({})).unwrap();
     assert_eq!(by_window, CompactionSpec::default());

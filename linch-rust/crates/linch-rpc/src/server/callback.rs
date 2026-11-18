@@ -257,7 +257,12 @@ impl Wire for ContextBuild {
 
 impl Wire for Stop {
     fn encode(r: &StopRequest) -> JsonValue {
-        json!({"session_id": r.session_id, "run_id": r.run_id, "text": r.text})
+        let mut request = json!({"session_id": r.session_id, "run_id": r.run_id, "text": r.text});
+        // Only a run with an output schema sends the key.
+        if let Some(value) = &r.structured_output {
+            request["structured_output"] = value.clone().into();
+        }
+        request
     }
 
     fn decode(value: JsonValue) -> Result<StopResponse, serde_json::Error> {

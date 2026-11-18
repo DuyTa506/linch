@@ -198,6 +198,8 @@ absent, except `bash`.
 | `budget` | none: no cap | A token and USD cap for each run and its subagents, `{"max_tokens"?, "max_cost_usd"?, "warn_ratio"?}` ([below](#budget)) |
 | `provider_retry` | on: 5 attempts, from 1 s doubling to 30 s, jitter 0.2 | Call the same model again after a retryable failure, `{"max_attempts"?, "base_delay_ms"?, "max_delay_ms"?, "jitter"?}`, Python's defaults; `{"max_attempts": 1}` turns it off ([providers](./providers.md#failures-and-retries)) |
 | `fallback_models` | `[]` | Models to fail over to, in order, once a model has no retry left; the run keeps the one it fails over to ([providers](./providers.md#failures-and-retries)) |
+| `output_schema` | none | A JSON Schema the final answer must satisfy, `{"name", "schema", "strict"?, "description"?}`; the parsed answer is `result.structured_output` ([Structured output](./structured-output.md)) |
+| `structured_output_retries` | `0` | How many answers that fail `output_schema` go back to the model before the run fails; also bounds a run's own schema, so it may be set without `output_schema` |
 
 ### System blocks
 

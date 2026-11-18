@@ -13,6 +13,7 @@ use super::test_support::{
     assemble_ok, bytes, error_response, request, serve_once, sse_response, weather_tool,
 };
 use super::*;
+use crate::Server;
 use crate::test_server::{
     assert_never_connected, assert_redirect_refused, closed_url, redirect_response,
 };
@@ -130,22 +131,68 @@ fn sampling_controls_are_forwarded() {
 }
 
 #[test]
-fn output_schema_is_rejected_until_supported() {
-    let err = profile::build_payload(
+fn output_schema_is_a_json_schema_response_format() {
+    let schema = json!({"type": "object", "properties": {"total": {"type": "number"}},
+                        "required": ["total"], "additionalProperties": false});
+    let output = OutputSchema {
+        name: "invoice".into(),
+        schema: schema.as_object().unwrap().clone(),
+        strict: true,
+        description: None,
+    };
+    let body = body(&ProviderRequest {
+        output_schema: Some(output.clone()),
+        ..request(MODEL)
+    });
+    assert_eq!(
+        body["response_format"],
+        json!({"type": "json_schema",
+               "json_schema": {"name": "invoice", "strict": true, "schema": schema}})
+    );
+    assert!(body.get("tool_choice").is_none(), "no forced final tool");
+    let described = profile::build_payload(
         &profile::OPENAI,
         &JsonObject::new(),
         &ProviderRequest {
             output_schema: Some(OutputSchema {
-                name: "s".into(),
-                schema: JsonObject::new(),
-                strict: true,
-                description: None,
+                strict: false,
+                description: Some("the bill".into()),
+                ..output
             }),
             ..request(MODEL)
         },
     )
-    .unwrap_err();
-    assert!(matches!(err, ProviderError::InvalidRequest { .. }), "{err}");
+    .unwrap();
+    let format = &described["response_format"]["json_schema"];
+    assert_eq!(format["strict"], json!(false));
+    assert_eq!(format["description"], json!("the bill"));
+    assert!(body_without_schema().get("response_format").is_none());
+}
+
+fn body_without_schema() -> serde_json::Value {
+    body(&request(MODEL))
+}
+
+#[test]
+fn a_server_profile_refuses_an_output_schema() {
+    for server in [Server::Vllm, Server::SgLang, Server::LlamaCpp] {
+        let profile = server.profile();
+        let err = profile::build_payload(
+            profile,
+            &JsonObject::new(),
+            &ProviderRequest {
+                output_schema: Some(OutputSchema {
+                    name: "s".into(),
+                    schema: JsonObject::new(),
+                    strict: true,
+                    description: None,
+                }),
+                ..request(MODEL)
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, ProviderError::InvalidRequest { .. }), "{err}");
+    }
 }
 
 #[tokio::test]
@@ -276,12 +323,12 @@ async fn invalid_request_fails_before_any_http() {
     let err = provider("http://127.0.0.1:9".into())
         .stream(
             ProviderRequest {
-                output_schema: Some(OutputSchema {
-                    name: "s".into(),
-                    schema: JsonObject::new(),
-                    strict: true,
-                    description: None,
-                }),
+                messages: vec![Message::new(
+                    Role::User,
+                    vec![ContentBlock::RedactedThinking(
+                        linch_core::RedactedThinkingBlock { data: "d".into() },
+                    )],
+                )],
                 ..request(MODEL)
             },
             CancellationToken::new(),

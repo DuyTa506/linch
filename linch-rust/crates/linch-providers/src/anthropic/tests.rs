@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use futures::StreamExt;
-use linch_core::{Message, OutputSchema, ProviderError, ProviderRequest, assemble};
+use linch_core::{Message, ProviderError, ProviderRequest, assemble};
 use tokio_util::sync::CancellationToken;
 
 use super::*;
@@ -102,12 +102,12 @@ async fn invalid_request_fails_before_any_http() {
     let err = provider("http://127.0.0.1:9".into())
         .stream(
             ProviderRequest {
-                output_schema: Some(OutputSchema {
-                    name: "s".into(),
-                    schema: serde_json::Map::new(),
-                    strict: true,
-                    description: None,
-                }),
+                messages: vec![Message::new(
+                    linch_core::Role::Assistant,
+                    vec![linch_core::ContentBlock::ToolResult(
+                        linch_core::ToolResultBlock::text("c", "r", false),
+                    )],
+                )],
                 ..request()
             },
             CancellationToken::new(),

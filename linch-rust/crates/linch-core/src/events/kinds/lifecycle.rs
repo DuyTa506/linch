@@ -5,6 +5,7 @@ use crate::events::wire::serialize_finite_f64_option;
 use crate::ids::{RunId, SessionId};
 use crate::json::JsonObject;
 use crate::message::Message;
+use crate::provider::OutputSchema;
 use crate::run::StopReason;
 use crate::usage::Usage;
 use serde::{Deserialize, Serialize};
@@ -40,6 +41,11 @@ pub struct InitEvent {
     /// The turn the call starts in, from 0.
     #[serde(default, skip_serializing_if = "super::is_zero")]
     pub turn: u64,
+    /// The run's own output schema, on the `init` of a new run started
+    /// with one ([`crate::RunOptions::output_schema`]); a resume reads it
+    /// back from here. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<OutputSchema>,
 }
 
 /// Why a [`UserEvent`] was emitted.

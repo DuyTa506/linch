@@ -766,3 +766,47 @@ async fn a_callback_without_timeout_ms_waits_as_long_as_the_client_takes() {
     assert!(waited.is_err(), "the run is still waiting for the approver");
     assert!(log.hung().iter().all(|token| !token.is_cancelled()));
 }
+
+fn structured(ended: &Ended) -> Value {
+    let Event::Result(result) = ended.last() else {
+        panic!("ends with a result")
+    };
+    serde_json::to_value(&result.structured_output).unwrap()
+}
+
+/// With an output schema in the spec, `stop` sees the parsed answer and
+/// the result carries it; a run's own schema rides `run.start`, and an
+/// unusable one ends the run with -32031 before anything is written.
+#[tokio::test]
+async fn an_output_schema_reaches_stop_and_the_result() {
+    let (mut rpc, log) = client(json!({"stop": {"action": "allow"}}));
+    let extra = json!({"callbacks": [
+        {"point": "stop", "policy_id": "judge", "policy_version": 1},
+    ]});
+    let mut config = hosted(vec![text_turn("{\"total\": 3}")], "default", extra);
+    config["spec"]["output_schema"] = json!({"name": "invoice", "schema": {
+        "type": "object", "properties": {"total": {"type": "number"}}, "required": ["total"]}});
+    let agent = rpc.open(config).await;
+    let run_id = rpc.start(&agent, "s1", "Go.").await;
+    let ended = rpc.until_end(&run_id).await;
+    assert!(ended.error.is_none(), "{:?}", ended.error);
+    let request = log.params(0)["request"].clone();
+    assert_eq!(request["structured_output"], json!({"total": 3}));
+    assert_eq!(structured(&ended), json!({"total": 3}));
+
+    let (mut rpc, _) = client(json!({}));
+    let turns = vec![text_turn("{\"name\": \"Ada\"}")];
+    let agent = rpc.open(hosted(turns, "default", json!({}))).await;
+    let own = json!({"name": "person", "schema": {"type": "object", "required": ["name"]}});
+    let params = json!({"agent": agent, "session_id": "s1", "prompt": "Go.", "output_schema": own});
+    let run_id = rpc.accepted(method::RUN_START, params).await;
+    let ended = rpc.until_end(&run_id).await;
+    assert!(ended.error.is_none(), "{:?}", ended.error);
+    assert_eq!(structured(&ended), json!({"name": "Ada"}));
+    let array = json!({"name": "list", "schema": {"type": "array"}});
+    let params =
+        json!({"agent": agent, "session_id": "s2", "prompt": "Go.", "output_schema": array});
+    let run_id = rpc.accepted(method::RUN_START, params).await;
+    let error = rpc.until_end(&run_id).await.error.expect("refused");
+    assert_eq!(error.code, code::INVALID_OUTPUT_SCHEMA);
+}

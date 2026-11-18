@@ -69,6 +69,7 @@ mod progress;
 mod retry;
 mod sink;
 mod start;
+mod structured;
 mod turn;
 mod write;
 

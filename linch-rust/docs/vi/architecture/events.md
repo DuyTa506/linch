@@ -38,7 +38,7 @@ bỏ tag bằng tay (`events/kinds/mod.rs:1-9`). `Event::type_name`
 
 | `type` | Payload, trong `events/` | Stored | Delivered | Ghi chú |
 |---|---|---|---|---|
-| `init` | `InitEvent`, `kinds/lifecycle.rs:19` | yes | yes | Một event cho mỗi lần gọi của run: lúc bắt đầu, và mỗi lần resume hoặc approve, với `resumed` và `turn` mà nó tiếp tục |
+| `init` | `InitEvent`, `kinds/lifecycle.rs:19` | yes | yes | Một event cho mỗi lần gọi của run: lúc bắt đầu, và mỗi lần resume hoặc approve, với `resumed` và `turn` mà nó tiếp tục. Event của lúc bắt đầu mang `output_schema` riêng của run, thứ mà một lần resume đọc lại |
 | `user` | `UserEvent`, `kinds/lifecycle.rs:62` | yes | yes | `subtype`: `prompt`, `tool_result`, `alignment`, `notification` |
 | `assistant` | `AssistantEvent`, `kinds/lifecycle.rs:72` | yes | yes | |
 | `partial_assistant` | `PartialAssistantEvent`, `kinds/lifecycle.rs:82` | no | yes | |
@@ -62,7 +62,7 @@ bỏ tag bằng tay (`events/kinds/mod.rs:1-9`). `Event::type_name`
 | `subagent` | `SubagentEvent`, `event/mod.rs:118` | như event được bọc | như event được bọc | Xem [bọc subagent](#bọc-subagent) |
 | `child_run_status` | `ChildRunStatusEvent`, `kinds/suspend.rs:66` | yes | yes | |
 | `workflow` | `WorkflowEvent`, `kinds/skills.rs:76` | yes | yes | Không bao giờ nằm trong log của run: các workflow của `linch-ext` chuyển nó cho event sink của chúng ([extensions](./ext.md)) |
-| `verification` | `VerificationEvent`, `kinds/control.rs:191` | yes | yes | Chưa được phát ở revision này |
+| `verification` | `VerificationEvent`, `kinds/control.rs:191` | yes | yes | Việc kiểm tra output schema (`runner/structured.rs`), `verifier` là `output_schema`: `retry` với phản hồi được stage bên cạnh, hoặc `stop` trong lần ghi terminal. Một lần resume đếm các lần retry đã dùng từ những event này |
 | `hook` | `HookEvent`, `kinds/hook.rs:14` | no | yes | |
 | `error` | `ErrorEvent`, `kinds/lifecycle.rs:90` | yes | yes | |
 | `result` | `ResultEvent`, `kinds/lifecycle.rs:115` | yes | yes | Kết quả terminal |

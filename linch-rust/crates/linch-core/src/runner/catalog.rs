@@ -77,19 +77,26 @@ impl Runner {
     /// The request for `messages`: the session's frozen system blocks and
     /// tools, narrowed to this turn's tools when a skill set them, with
     /// the tools added since the prefix named. Before the prefix is logged
-    /// (never, once the prompt is in), the live ones.
+    /// (never, once the prompt is in), the live ones. It carries the
+    /// run's output schema, if any.
     pub(super) fn request(&self, messages: Vec<Message>) -> ProviderRequest {
         let agent = &self.agent;
-        let Some(catalog) = &self.catalog else {
-            let system = agent.system(None);
-            return agent.request(system, self.snapshot.definitions(), messages);
+        let mut request = match &self.catalog {
+            None => {
+                let system = agent.system(None);
+                agent.request(system, self.snapshot.definitions(), messages)
+            }
+            Some(catalog) => {
+                let snapshot = &self.snapshot;
+                let keep = |name: &str| snapshot.resolve(name).is_some();
+                let keep: Option<&dyn Fn(&str) -> bool> = self.narrowed.then_some(&keep);
+                let tools = catalog.tools(keep);
+                let mut request = agent.request(catalog.system().to_vec(), tools, messages);
+                request.appended_tools = catalog.appended(keep);
+                request
+            }
         };
-        let snapshot = &self.snapshot;
-        let keep = |name: &str| snapshot.resolve(name).is_some();
-        let keep: Option<&dyn Fn(&str) -> bool> = self.narrowed.then_some(&keep);
-        let tools = catalog.tools(keep);
-        let mut request = agent.request(catalog.system().to_vec(), tools, messages);
-        request.appended_tools = catalog.appended(keep);
+        request.output_schema = (self.output.as_ref()).map(|output| output.schema().clone());
         request
     }
 }

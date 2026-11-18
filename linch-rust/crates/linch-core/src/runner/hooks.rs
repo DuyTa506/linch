@@ -313,8 +313,13 @@ impl Runner {
         }));
     }
 
-    /// Run `stop` on a text-only response.
-    pub(super) async fn stop(&mut self, text: &str) -> Result<Stopping, RunError> {
+    /// Run `stop` on a text-only response, whose text parsed to
+    /// `structured_output` under the run's schema.
+    pub(super) async fn stop(
+        &mut self,
+        text: &str,
+        structured_output: Option<&JsonObject>,
+    ) -> Result<Stopping, RunError> {
         let chain = &self.agent.hooks.stop;
         if chain.is_empty() {
             return Ok(Stopping::Stop {
@@ -325,10 +330,13 @@ impl Runner {
             session_id: self.run.session_id.clone(),
             run_id: self.run.run_id.clone(),
             text: text.to_owned(),
+            structured_output: structured_output.cloned(),
         };
         let mut records = Vec::new();
         let retry = self.final_answer_retries < MAX_FINAL_ANSWER_RETRIES;
-        let run = chain.run_into(request, retry, &mut records);
+        let output = self.output.clone();
+        let check = move |text: &str| output.as_ref()?.check(text).ok();
+        let run = chain.run_into(request, retry, &check, &mut records);
         let outcome = self.cancel.run_until_cancelled(run).await;
         self.push_records(records, None);
         let Some(outcome) = outcome else {

@@ -155,7 +155,7 @@ lưu điều này.
 |---|---|
 | `RunOptions(profile=...)` theo từng run trên một agent | Một profile cho mỗi agent được mở |
 | `tool_allow` | Chưa có; dùng `tool_deny` |
-| `plugins`, `output_schema`, `budget` | Chưa có; budget nằm trong [`spec.budget`](./agent.md#budget) |
+| `plugins`, `output_schema`, `budget` | Chưa có; budget nằm trong [`spec.budget`](./agent.md#budget) và schema trong [`spec.output_schema`](./structured-output.md) |
 | Hợp đồng ghim `id`, `version` và `content_hash` | Hợp đồng chỉ bao gồm thay đổi về prompt và `max_turns` |
 
 `DeepAgentProfile` là một thứ khác: nó đặt độ bền vững, chế độ coordinator và chính

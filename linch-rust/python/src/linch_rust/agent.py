@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ._rpc import Connection, RunQueue
-from .config import Principal
+from .config import OutputSchema, Principal
 from .errors import LinchError
 from .events import Envelope, decode_envelope
 from .run import Observer, Run
@@ -87,6 +87,7 @@ class Agent:
         run_id: str | None = None,
         principal: Principal | None = None,
         trace_id: str | None = None,
+        output_schema: OutputSchema | None = None,
     ) -> Run:
         """Start a run of `prompt` in a session, which is created when missing.
 
@@ -105,18 +106,29 @@ class Agent:
                 stored with the run and echoed on every `InitEvent` and
                 `ResultEvent` of it, a resume or approve included, and on its
                 subagents' runs. None when absent.
+            output_schema: A JSON Schema this run's final answer must
+                satisfy, in place of the agent's `spec.output_schema`; the
+                agent's `structured_output_retries` still apply. The run
+                stores it, so a resume or approve keeps it. The checked
+                answer is `ResultEvent.structured_output`. None keeps the
+                agent's.
 
         Returns:
             The started run; iterate it or await `Run.result()`.
 
         Raises:
             RunBusy: This server already drives a run with `run_id`.
+            InvalidOutputSchema: Raised by the run, not this call: the
+                `output_schema` does not compile or its root is not an
+                object, so no run was created.
         """
         params: dict[str, Any] = {"agent": self.handle, "session_id": session_id, "prompt": prompt}
         if run_id is not None:
             params["run_id"] = run_id
         if trace_id is not None:
             params["trace_id"] = trace_id
+        if output_schema is not None:
+            params["output_schema"] = dict(output_schema)
         return await self._start("run.start", params, principal)
 
     async def resume(self, run_id: str, *, principal: Principal | None = None) -> Run:

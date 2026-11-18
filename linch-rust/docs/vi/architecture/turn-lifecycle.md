@@ -114,16 +114,32 @@ tương tự (`turn.rs:322-333`, `runner/end.rs:76-90, 130-139`).
   Sau đó `Step::Results` nối các kết quả và bắt đầu lượt kế tiếp. `stop_reason` của
   provider không quyết định điều này; các block mới quyết định.
 - **Không có**, trước hết run chờ mọi subagent chạy nền mà nó có, việc này có thể thêm
-  một thông báo và một lượt nữa (`turn.rs:433-435`, `runner/inbox.rs:137-168`). Sau đó
-  chuỗi hook `stop` chạy: một hook có thể giữ run tiếp tục bằng một phản hồi
+  một thông báo và một lượt nữa (`turn.rs:433-435`, `runner/inbox.rs:137-168`). Với một output schema (`spec.output_schema`,
+  hoặc schema riêng của run từ event `init` đầu tiên) câu trả lời được kiểm tra tiếp theo
+  (`runner/structured.rs`, `structured.rs`). Một câu trả lời không đạt, khi
+  `structured_output_retries` còn, stage một event `verification`
+  (`verifier: "output_schema"`, `action: "retry"`) và phản hồi dưới dạng một
+  `notification`, giữ dưới dạng `ToolResults`, nên cả hai nằm trong cùng một commit
+  trước lần append vào session; lượt kế tiếp bắt đầu. Số lần retry được
+  đọc lại từ các event đó khi resume, nên một lần crash không bao giờ đặt lại nó. Quá
+  giới hạn, run kết thúc thất bại trong một lần ghi terminal: `verification` với
+  `action: "stop"`, một `Error` tên `StructuredOutputError`, và một `Result`
+  với `structured_error`. Một lần resume từ `AssistantReceived` kiểm tra lại cùng
+  câu trả lời đã lưu và stage cùng retry đó; không có response đã trả tiền nào bị mua
+  hai lần. Sau đó chuỗi hook `stop` chạy, chỉ trên một câu trả lời hợp lệ và với
+  `structured_output` đã parse trong request của nó: một hook có thể giữ run tiếp tục bằng một phản hồi
   (`continue`, chỉ bị giới hạn bởi `max_turns`), đòi một câu trả lời khác (`retry`,
   được chấp nhận một lần cho mỗi lần gọi run, sau đó được tính như allow và các hook
   phía sau quyết định), viết lại văn bản trả lời cuối cùng (giá trị mà `post_turn` và
   `Result` cuối cùng sẽ thấy), hoặc block việc dừng lại, khiến run thất bại
   (`turn.rs:436-440`, `runner/hooks.rs`). Phản hồi của cả hai đến model như của
   Python, trong một message user `<system-reminder>` được stage như một
-  `notification`, và một lượt khác bắt đầu. Khi mọi hook cho phép dừng, `post_turn`
-  chạy và run kết thúc với trạng thái `completed` cùng văn bản đó (`turn.rs:441-448`).
+  `notification`, và một lượt khác bắt đầu. Với một output schema, một bản viết lại được kiểm tra lại,
+  và bản không đạt kết thúc run thất bại mà không hỏi lại model;
+  câu trả lời sau một `retry` hoặc `continue` được kiểm tra từ đầu, với
+  ngân sách riêng của nó. Khi mọi hook cho phép dừng, `post_turn`
+  chạy và run kết thúc với trạng thái `completed` cùng văn bản đó, và giá trị đã parse làm
+  `structured_output` của result (`turn.rs:441-448`).
 
 `max_turns` là điều kiện dừng của vòng lặp: lời gọi sẽ vượt quá giới hạn này không được
 thực hiện và run thất bại với `TurnLimitError` (`runner/end.rs:93-108`).

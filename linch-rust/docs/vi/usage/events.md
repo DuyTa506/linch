@@ -172,6 +172,7 @@ Run đã bắt đầu.
 | `trace_id` | `trace_id` được truyền cho `agent.run`, giữ trong cả run và các run của subagent; `None` khi không truyền ([Observability](./observability.md#correlate-logs-and-traces)) |
 | `resumed` | `True` ở `init` mở đầu một lần resume hoặc approve của run, kèm các tool hiện tại của run; `False` ở `init` đầu tiên của run |
 | `turn` | Lượt mà lời gọi tiếp tục: lượt của checkpoint run, với một `init` được resume; `0` ở lần đầu của run |
+| `output_schema` | [Output schema](./structured-output.md#give-one-run-its-own-schema) riêng của run, trên `init` đầu tiên của một run được bắt đầu với nó; `None` nếu không |
 
 Mọi stream `run`, `resume` và `approve` đều bắt đầu bằng `init`. Một `init` được
 resume là bền vững, nên các event được replay cho thấy điểm bắt đầu của mỗi lời
@@ -360,7 +361,7 @@ Run đã kết thúc; stream của nó kết thúc ở đây.
 | `usage_complete` | `False` khi usage của một lời gọi nào đó không xác định và không có trong tổng |
 | `duration_ms` | Thời gian thực của lời gọi `run`, `resume` hoặc `approve` đã kết thúc run. Khoảng thời gian của cả run là `ts_ms` của envelope này trừ `ts_ms` của envelope `init` đầu tiên (cái không phải `resumed`) |
 | `total_cost_usd` | Chi phí của các lời gọi đã có giá của run; `None` khi không lời gọi nào có giá |
-| `structured_output`, `structured_error` | Cho các run có output schema; `None` với client này |
+| `structured_output`, `structured_error` | Với một [output schema](./structured-output.md): câu trả lời đã parse, hoặc lý do câu trả lời cuối không thỏa schema (run khi đó kết thúc `error`); `None` khi không có |
 | `trace_id` | `trace_id` của run, như trên `InitEvent` |
 
 ### `SkillsLoadedEvent` (`skills_loaded`)
@@ -416,7 +417,7 @@ nhưng hiện chưa có run nào phát chúng:
 |---|---|
 | `InputRequestEvent` (`input_request`) | `request_id`, `kind` (`ask_user` hoặc `workflow_interrupt`), `prompt` |
 | `PromptCacheAdvisoryEvent` (`prompt_cache_advisory`) | `reason` (`tool_set_changed` hoặc `model_changed`), `detail` |
-| `VerificationEvent` (`verification`) | `verifier`, `action` (`retry`, `stop` hoặc `exhausted`), `feedback`, `attempt` |
+| `VerificationEvent` (`verification`) | `verifier`, `action` (`retry`, `stop` hoặc `exhausted`), `feedback`, `attempt`. Việc kiểm tra [output schema](./structured-output.md#what-the-run-checks) phát nó với `verifier` là `output_schema` |
 | `WorkflowEvent` (`workflow`) | `kind`, `title`, `call_key`, `occurrence`, `subagent_type`, `result_text`, `structured_output`, `structured_error` |
 
 ### `UnknownEvent`

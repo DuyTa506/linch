@@ -16,11 +16,6 @@ pub(crate) fn build_payload(
     request: &ProviderRequest,
     options: &ResponsesOptions,
 ) -> Result<JsonValue, ProviderError> {
-    if request.output_schema.is_some() {
-        return Err(invalid(
-            "the OpenAI Responses adapter does not support output_schema yet".into(),
-        ));
-    }
     if !request.stop_sequences.is_empty() {
         return Err(invalid(
             "the Responses API has no stop sequences; remove stop_sequences".into(),
@@ -79,6 +74,14 @@ pub(crate) fn build_payload(
     }
     if !reasoning.is_empty() {
         body["reasoning"] = reasoning.into();
+    }
+    if let Some(output) = &request.output_schema {
+        let mut format = json!({"type": "json_schema", "name": output.name,
+                                "strict": output.strict, "schema": output.schema});
+        if let Some(description) = &output.description {
+            format["description"] = description.clone().into();
+        }
+        body["text"] = json!({"format": format});
     }
     if !options.store {
         body["store"] = false.into();

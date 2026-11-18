@@ -335,7 +335,30 @@ fn consecutive_same_role_messages_become_one_content() {
 }
 
 #[test]
-fn misplaced_blocks_and_output_schema_fail_locally() {
+fn an_output_schema_is_a_json_response_with_its_schema() {
+    let schema = json!({"type": "object", "properties": {"total": {"type": "number"}},
+                        "required": ["total"]});
+    let body = build(&ProviderRequest {
+        output_schema: Some(OutputSchema {
+            name: "invoice".into(),
+            schema: schema.as_object().unwrap().clone(),
+            strict: true,
+            description: None,
+        }),
+        max_output_tokens: Some(64),
+        ..request()
+    });
+    assert_eq!(
+        body["generationConfig"],
+        json!({"maxOutputTokens": 64, "responseMimeType": "application/json",
+               "responseJsonSchema": schema})
+    );
+    assert!(body.get("toolConfig").is_none(), "no forced final tool");
+    assert!(build(&request()).get("generationConfig").is_none());
+}
+
+#[test]
+fn misplaced_blocks_fail_locally() {
     let misplaced = [
         Message::new(
             Role::Assistant,
@@ -348,13 +371,4 @@ fn misplaced_blocks_and_output_schema_fail_locally() {
     for message in misplaced {
         assert!(invalid(&with_messages(vec![message])));
     }
-    assert!(invalid(&ProviderRequest {
-        output_schema: Some(OutputSchema {
-            name: "s".into(),
-            schema: serde_json::Map::new(),
-            strict: true,
-            description: None,
-        }),
-        ..request()
-    }));
 }
