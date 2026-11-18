@@ -12,7 +12,7 @@ use sqlx::{AssertSqlSafe, PgPool};
 const DSN_VAR: &str = "LINCH_TEST_PG_DSN";
 const MODEL: &str = "scripted-model";
 
-/// A fresh schema `p10a_<name>` and a DSN whose connections use it.
+/// A fresh schema `p10a_<pid>_<name>` and a DSN whose connections use it.
 struct TestDb {
     admin: PgPool,
     schema: String,
@@ -25,7 +25,7 @@ impl TestDb {
             eprintln!("skipping {name}: {DSN_VAR} is not set");
             return None;
         };
-        let schema = format!("p10a_{name}");
+        let schema = format!("p10a_{}_{name}", std::process::id());
         let admin = PgPoolOptions::new()
             .max_connections(1)
             .connect(&dsn)

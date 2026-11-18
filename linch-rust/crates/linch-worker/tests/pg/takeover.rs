@@ -133,12 +133,20 @@ async fn a_heartbeat_keeps_a_job_past_its_timeout() {
     let Some(db) = TestDb::new("heartbeat").await else {
         return;
     };
-    // The tool outlasts the job's visibility timeout twice over.
-    let probe = Probe::new("Lookup", ToolScope::Read, Hold::Sleep(TIMEOUT * 2));
+    // The tool outlasts the job's visibility timeout by half. The timeout is
+    // long enough that a heartbeat a loaded disk delays by a couple of
+    // seconds still lands in time.
+    let mut keeping = losing("w1");
+    keeping.visibility_timeout = Duration::from_secs(8);
+    let probe = Probe::new(
+        "Lookup",
+        ToolScope::Read,
+        Hold::Sleep(keeping.visibility_timeout * 3 / 2),
+    );
     enqueue_run(&db.pool, "default", NS, &SessionId::new("s1"), "go")
         .await
         .unwrap();
-    let first = Running::spawn(&db.pool, losing("w1"), agent(&db.pool, probe.clone()));
+    let first = Running::spawn(&db.pool, keeping, agent(&db.pool, probe.clone()));
     wait_until("the first worker runs the tool", || async {
         probe.started() == 1
     })

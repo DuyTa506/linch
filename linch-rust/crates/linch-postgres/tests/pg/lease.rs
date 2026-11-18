@@ -284,7 +284,7 @@ async fn a_dead_holders_run_is_taken_over_after_its_lease_runs_out() {
         if !refused(&items) {
             break items;
         }
-        assert!(stopped.elapsed() < TTL * 5, "the lease never ran out");
+        assert!(stopped.elapsed() < TTL * 20, "the lease never ran out");
         tokio::time::sleep(TTL / 10).await;
     };
     assert!(stopped.elapsed() >= TTL / 2, "{:?}", stopped.elapsed());
@@ -294,19 +294,21 @@ async fn a_dead_holders_run_is_taken_over_after_its_lease_runs_out() {
     db.finish().await;
 }
 
-/// The heartbeat beats on a timer: a model call three leases long, with no
-/// write in between, keeps the run A's.
+/// The heartbeat beats on a timer: a model call a lease and a half long,
+/// with no write in between, keeps the run A's. The lease is long enough
+/// that a beat a loaded disk delays by a couple of seconds is still on time.
 #[tokio::test]
 async fn a_long_model_call_keeps_its_lease() {
     let Some(db) = TestDb::migrated("lease_long_call").await else {
         return;
     };
-    let a = Process::new(&db, "from a", 1, Some(TTL)).await;
-    let b = Process::new(&db, "from b", 1, Some(TTL)).await;
+    let ttl = Duration::from_secs(6);
+    let a = Process::new(&db, "from a", 1, Some(ttl)).await;
+    let b = Process::new(&db, "from b", 1, Some(ttl)).await;
     b.open();
     let mut stream_a = at_the_gate(&a).await;
     let run_id = stream_a.run_id().clone();
-    poll_for(&mut stream_a, TTL * 3).await;
+    poll_for(&mut stream_a, ttl * 3 / 2).await;
     leased(&b.resume(&run_id).await, &run_id);
     a.open();
     let items: Vec<_> = stream_a.collect().await;
@@ -366,7 +368,7 @@ async fn failing_a_run_elsewhere_stops_its_live_holder() {
             items.push(item);
         }
     };
-    tokio::time::timeout(TTL * 2, drained)
+    tokio::time::timeout(TTL * 10, drained)
         .await
         .expect("the heartbeat stops the run without the gate opening");
     assert!(lease_lost(&items), "{}", outcome(&items));

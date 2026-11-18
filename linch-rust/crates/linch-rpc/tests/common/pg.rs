@@ -15,14 +15,14 @@ pub struct TestDb {
 }
 
 impl TestDb {
-    /// An empty schema `p11c_<name>`, or `None` (with a note) when the DSN
+    /// An empty schema `p11c_<pid>_<name>`, or `None` (with a note) when the DSN
     /// is unset.
     pub async fn empty(name: &str) -> Option<Self> {
         let Ok(dsn) = std::env::var(DSN_VAR) else {
             eprintln!("skipping {name}: {DSN_VAR} is not set");
             return None;
         };
-        let schema = format!("p11c_{name}");
+        let schema = format!("p11c_{}_{name}", std::process::id());
         let admin = PgPoolOptions::new()
             .max_connections(1)
             .connect(&dsn)
