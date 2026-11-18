@@ -137,12 +137,21 @@ nothing.
   measure as `measured_tokens` (off the wire when the estimate was the
   measure), so a resume reads the same judgment back.
 
-Gaps: a summary call at a turn's start sends the whole view, so a trigger
-above what fits the window (a `threshold_tokens` near or over it) still
-meets a refusal; a forced summary sends the folded part, which can itself not
-fit, and then the run ends `failed`. The window-derived trigger leaves a
-fifth of the window for that call. A trigger below what the kept turns and
-the provider's overhead weigh is held after two summaries, as above.
+Known gap: a summary call at a turn's start sends the whole view, so a
+trigger above what fits the window (a `threshold_tokens` near or over it)
+meets a refusal of that call. The summary then goes again like a forced one
+(the folded part only, clipped, half as much at each refusal), without
+spending `max_forced`, so that refusal no longer ends a run; it does cost a
+refused request at each such due turn. What a trigger at or over the window
+still leaves to chance is a refused primary prompt (the view grew past the
+window between two measures), which forces a summary and spends
+`max_forced`: a run that compacts only that way ends `failed` at the fourth
+(default `max_forced` 3), so such a trigger wants a higher `max_forced`. The
+window-derived trigger leaves a fifth of the window for the summary call. A
+trigger below what the kept turns and the provider's overhead weigh is held
+after two summaries, as above. The only size case that ends `failed` by
+itself is a prompt whose system prompt, tools and last turn, after clipping,
+exceed the window.
 
 `keep_from` is the `keep_recent_turns`-th assistant message from the end of
 the view. The kept part starts at that message, so a tool result is never cut
@@ -361,21 +370,70 @@ event's `kind` is `context_length`.
 1. With `micro`, if any old tool result is worth clearing, `clear` records
    the cleared view (with `forced` set on the event) and goes to the next
    primary attempt of the turn.
-2. Else, while fewer than `max_forced` forced summaries were made and
+2. Else, if the last turn (from the last assistant message on, the one part
+   a summary never folds) weighs more than the clip budget, `clear` records
+   the view with its tool results clipped, as a logged projection (strategy
+   `clip`, reason `clip`, `Cleared` with a `clip`
+   budget): a summary cannot help a turn that is too big by itself. The
+   budget is half the window in estimated tokens for the turn's first forced
+   step, then a quarter, an eighth and a sixteenth for the next ones
+   (`compaction::last_turn_budget`); past that no clip follows.
+3. Else, while fewer than `max_forced` forced summaries were made and
    `forced_keep_from` finds a point to fold, the run makes a summary with
    `redispatch` set to the next primary attempt. `forced_keep_from` keeps
    `keep_recent_turns`, or only the last turn when that folds nothing, since
    the kept turns alone may be what does not fit (`compaction.rs:314-321`).
-3. Else `overflow` gives nothing and the refusal ends the run as any
-   provider failure does.
+4. Else `overflow` gives nothing and the refusal ends the run, its message
+   saying what the run could measure (below).
 
-A forced summary that fails, answers with no text, is rejected, or finds nothing to keep
-from ends the run through `unshortened` (`runner/end.rs:124`): an `error`
-event named `ProviderError`, kind `context_length`, with the message "the
-prompt exceeds the model's context window, and the compaction it forced
-could not shorten it", and a `failed` run. The provider already refused the
-prompt the uncompacted view would send, so going on would only buy the same
-refusal.
+**The forced summary request is clipped to fit.** The folded part is the one
+thing a summary has to read, and it can be bigger than the window itself (a
+giant tool result in it, or many mid-size ones in a view that never reached
+the trigger). So a forced summary reads it clipped
+(`compaction/clip.rs`): tool results first, then the text of any message,
+head and tail kept around a marker `[... N bytes omitted ...]`, cut at UTF-8
+boundaries by one cap across all the texts, the largest that brings the
+estimate under the budget (no message is dropped and every `tool_use_id`
+stays paired). The first request's budget is the window less the summary's
+`max_output_tokens` (at most half the window), and a part that fits under it is sent whole, so a forced
+summary of a view that fits is unchanged. The estimate counts up to 2x fewer
+tokens than a provider does, so the budget is not trusted: when the provider
+refuses the summary request as longer than its window too, a `compaction` event
+records it (`rejected` starting `context_length`, `forced`, `clipped_bytes`)
+durably with the receipt, and the next delivery reads half as much, up to
+four deliveries (`MAX_SUMMARY_TRIES`; each is paid and logged like any
+provider call, and counts once against `max_forced`). A request that cannot
+be cut further is not sent again. Nothing is clipped for a summary at a turn's
+start: its first request stays the bytes the cache holds
+(`tests/golden/compaction_proactive_request.json`). When the provider refuses
+that request as too long, the same chain applies to it: a `compaction` event
+(not forced) records the refusal, and the summary goes again reading only the
+folded part, clipped, with the budgets of a forced one (one more request than
+a forced summary has, since the whole-view request is the first refusal); it
+does not spend `max_forced`. Out of requests, the turn goes on uncompacted.
+
+A forced summary that fails for another reason, answers with no text, is
+rejected, or finds nothing to keep from ends the run through `unshortened`
+(`runner/end.rs`): an `error` event named `ProviderError`, kind
+`context_length`, with the message "the prompt exceeds the model's context
+window, and the compaction it forced could not shorten it", and a `failed`
+run. The provider already refused the prompt the uncompacted view would send,
+so going on would only buy the same refusal.
+
+**The one size case that still fails.** When nothing can shorten the view
+(the summary request was refused at every size, or there is nothing to fold
+or clip, `max_forced` spent), the run ends `failed` with the same `error`
+shape (`ProviderError`, `context_length`, `retryable` false, the provider's
+`status` kept) and a message that names the window and the estimated tokens of
+the system prompt and tools and of the conversation left, then the provider's
+own words: "the prompt exceeds the model's context window of 8000 tokens and
+nothing is left to shorten: the system prompt and tools take about 40
+estimated tokens and the conversation 170. Shrink the system prompt or the
+tool set, or use a model with a larger window (the provider said: ...)".
+When the history still folds but `max_forced` is spent, the same message says
+"compaction.max_forced (3) is spent" instead, and advises raising it. The
+sizes are the harness's estimates, not the provider's count
+(`Runner::overflow_message`).
 
 The next primary call is the next delivery attempt of the same turn. It is
 not a provider retry: no `provider_retry` event, and the retry policy's
@@ -386,13 +444,25 @@ bounds a turn.
 
 ### What a resume reads back
 
-Nothing new is written to remember a forced compaction. `Forced::of` reads
-it from the durable deliveries (`compaction.rs:382-445`): a summary
-delivery that comes after a primary delivery of the same turn was forced; the
-count of those is the run's spent `max_forced`; the turn's primary and summary
-delivery counts give the next attempt numbers. `runner/start.rs:523-524` sets the
-runner's counters from it, so a resumed run neither forgets a forced summary
-nor reuses a delivery id.
+Nothing is kept in memory. `Forced::of` reads it from the durable deliveries
+and events (`compaction.rs`): a summary delivery that comes after a primary
+delivery of the same turn was forced; the count of those is the run's spent
+`max_forced`; the turn's primary and summary delivery counts give the next
+attempt numbers; the `compaction` events whose `rejected` starts
+`context_length` since the turn's last primary delivery count the summary
+requests refused as too long (so which budget the next one reads; a delivery a
+crash left unsettled is not one), and one with no delivery after it says the
+last summary was refused so and goes again (`refusals`, `refused`); the
+forced compaction events that changed the view in the turn count its steps,
+which halve the clip budget whatever the provider retries in between
+(`steps`).
+`runner/start.rs` sets the runner's counters from it, so a resumed run neither
+forgets a forced summary nor reuses a delivery id, and a refusal recorded
+before a crash is not mistaken for another kind of failure. Those refusal
+events are left out of the rejection hold (`Rejections::of`): a smaller
+request answers them, they are not a useless reply. A clip is read back from
+its `Cleared` checkpoint's `clip` budget, which a resume applies to the view
+again (the checkpoint's session length proves it unchanged).
 
 ### Recovery
 
@@ -401,12 +471,15 @@ nor reuses a delivery id.
 | Checkpoint | State found | The run continues with |
 |---|---|---|
 | `CompactionPending` | No receipt for the summary delivery | Another summary call, after a cancelled receipt for the unsettled one; a forced one then goes on to its primary attempt |
-| `CompactionPending` | A receipt, turn-start summary | The primary call at attempt 1; the summary call settled without a summary |
-| `CompactionPending` | A receipt, forced summary | The run ends through `unshortened` |
+| `CompactionPending` | A receipt, turn-start summary refused as too long (its `compaction` event is durable), fewer than 5 requests | Another summary call on the folded part, clipped, then the turn goes on as before |
+| `CompactionPending` | A receipt, any other turn-start summary | The primary call at attempt 1; the summary call settled without a summary |
+| `CompactionPending` | A receipt, forced summary refused as too long (its `compaction` event is durable), fewer than 4 tries | Another summary call on half as much of the older part, then its primary attempt |
+| `CompactionPending` | A receipt, any other forced summary, or the tries spent | The run ends through `unshortened` |
 | `Compacted` | Projection not in the session | Append it, then the primary call at the turn's next attempt |
 | `Compacted` | Projection already the last entry | The primary call at the turn's next attempt |
 | `Cleared` | Projection not in the session | Clear the view again from `before`, append it, then primary attempt `attempt` |
-| `Cleared` | A trailing projection with reason `micro-compaction` | Primary attempt `attempt` |
+| `Cleared` with `clip` | Projection not in the session | Clip the view again from `before` to the `clip` budget, append it, then primary attempt `attempt` |
+| `Cleared` | A trailing projection with reason `micro-compaction` or `clip` | Primary attempt `attempt` |
 
 The check for `Compacted` is that the session has the checkpoint's length, or
 one more with a trailing `Projection` whose summary is the checkpoint's
@@ -493,6 +566,15 @@ answer counts once its feedback is durable (`truncation.rs`,
   micro first, the refusal that cannot be shortened, `max_forced`, a failing
   forced summary, redaction of a forced summary, and a crash at every write
   of each path, resumed to the same result.
+- `crates/linch-core/tests/e2e_compaction_estimator.rs`: besides the anchor,
+  a giant result in the folded part (the summary request is clipped and
+  retried), in the last turn (clipped in the view, whole in the session), a
+  trigger at the window, a summary refused at every size, an overhead that
+  alone exceeds the window, a proactive summary request pinned byte for byte
+  (`tests/golden/compaction_proactive_request.json`), and a crash at every
+  write of each, including the hold read back from `measured_tokens`.
+- `crates/linch-core/src/compaction/clip/tests.rs`: the cut (marker, UTF-8,
+  one cap, every call paired, the budget as a postcondition).
 - `crates/linch-core/tests/e2e_truncation.rs`: continued and stitched
   answers, the schema check on the whole text, a crash at every write.
 - `crates/linch/tests/compaction.rs`: a compaction makes the model read a

@@ -270,6 +270,7 @@ fn recovery_cache_and_risk_events_are_counted() {
             forced: false,
             rejected: None,
             measured_tokens: None,
+            clipped_bytes: None,
         })
     };
     let verification = |action| {

@@ -28,6 +28,22 @@
 //! again. A forced summary that gives none ends the run failed instead: the
 //! provider already refused the prompt it would leave.
 //!
+//! A forced summary reads the folded part clipped to a budget (see
+//! [`crate::compaction::folded_budget`]); when the provider refuses that
+//! request as too long as well, a `compaction` event says so, durably with
+//! the receipt, and the next request reads half as much, up to four
+//! refusals. The refusals are read back from those durable events on resume.
+//! The first request of a turn-start summary is never clipped and reads the
+//! whole view, so its bytes stay the cache's; when the provider refuses it
+//! as too long, the summary goes again like a forced one (the folded part
+//! only, clipped) without spending `max_forced`, and when that runs out of
+//! requests the turn goes on uncompacted.
+//!
+//! When the last turn is what does not fit, a summary cannot help (it folds
+//! every turn before it): the view's tool results from that turn on are
+//! clipped, a logged projection (`Cleared` with a `clip` budget, strategy
+//! `clip`), half the budget at each further forced step of the turn.
+//!
 //! Micro-compaction ([`crate::CompactionSpec::micro`]) makes no call: the
 //! `compaction` event rides a held `Cleared` checkpoint, which the session
 //! write of its projection flushes first (one run write, one session
@@ -54,6 +70,16 @@ use crate::skills;
 
 use super::gate::Slot;
 use super::turn::{Runner, Step};
+
+/// What follows a summary request the provider refused as too long.
+enum Refused {
+    /// Another request on less of the older part.
+    Again,
+    /// The turn goes on uncompacted.
+    GoOn,
+    /// The run ended.
+    Ended,
+}
 
 /// Delivery `attempt` of the turn's primary call.
 fn dispatch(attempt: u32) -> Step {
@@ -121,7 +147,10 @@ impl Runner {
                         .saturating_sub(tokens_before.saturating_sub(estimate_tokens(&cleared))),
                 )
             {
-                return self.clear(&view, before, cleared, 1, false).await.map(Some);
+                return self
+                    .clear(&view, before, cleared, 1, false, None)
+                    .await
+                    .map(Some);
             }
             // Summaries rejected twice in a row are not asked for again
             // until the view has grown (see `Rejections`).
@@ -138,22 +167,63 @@ impl Runner {
             return Ok(Some(next));
         };
         let strategy = compaction::STRATEGY;
-        self.pre_compact(self.turn, view.len() as u64, tokens_before, strategy)
-            .await;
+        // A retry of a refused summary is the same compaction: its hooks
+        // fired with the first request.
+        if self.summary_refusals == 0 {
+            self.pre_compact(self.turn, view.len() as u64, tokens_before, strategy)
+                .await;
+        }
         let started = Instant::now();
         self.snapshot = agent.snapshot();
         // With micro on, the summary reads the folded part with its old
         // tool results cleared, as Python's does after its micro step. At a
         // turn's start it reads the whole view, so its prefix is the last
         // primary call's (the kept turns are in it as well as after it); a
-        // forced one reads only the folded part, since the view does not fit.
+        // forced one reads only the folded part, since the view does not fit,
+        // and so does a turn-start one after the provider refused the whole
+        // view as too long.
         let source = (spec.micro)
             .then(|| compaction::cleared_before(&view, keep_from))
             .flatten();
-        let end = if forced { keep_from } else { view.len() };
-        let older = (source.as_deref().unwrap_or(&view)[..end].iter())
-            .map(|m| Message::clone(m))
-            .collect();
+        let narrow = forced || self.summary_refusals > 0;
+        let end = if narrow { keep_from } else { view.len() };
+        let folded_view = &source.as_deref().unwrap_or(&view)[..end];
+        let mut older: Vec<Message> = folded_view.iter().map(|m| Message::clone(m)).collect();
+        // A summary that reads only the folded part reads it clipped to a
+        // budget that halves with each refusal of it (see
+        // `compaction::folded_budget`): the folded part alone may be what
+        // does not fit. The first request of a summary at a turn's start is
+        // never clipped, so it keeps the bytes the cache holds.
+        let mut clipped_bytes = None;
+        if narrow {
+            // A turn-start summary's refusal of the whole view is not one of
+            // the folded part's.
+            let refusals = self.summary_refusals - u32::from(!forced);
+            let window = agent.context_window();
+            let budget = compaction::folded_budget(
+                window,
+                spec.max_output_tokens,
+                refusals,
+                estimate_tokens(folded_view),
+            );
+            match compaction::clip(folded_view, budget, compaction::Scope::Texts) {
+                Some(clipped) => {
+                    clipped_bytes = Some(clipped.bytes);
+                    older = clipped.messages.iter().map(|m| Message::clone(m)).collect();
+                }
+                // Nothing left to cut: the request would go as it did, which
+                // the provider refused. A turn-start summary lets the turn
+                // go on; its primary call's own refusal forces the rest.
+                None if refusals > 0 => {
+                    if forced {
+                        self.unshortened().await?;
+                        return Ok(None);
+                    }
+                    return Ok(Some(next));
+                }
+                None => {}
+            }
+        }
         let mut request = compaction::summary_request(self.request(older), spec);
         if self.standing.fallbacks > 0 {
             // A run that failed over summarizes on the model it now calls.
@@ -187,6 +257,10 @@ impl Runner {
         let free = (outcome.result.as_ref()).is_err_and(|failure| failure.free);
         let cancelled = (outcome.result.as_ref())
             .is_err_and(|failure| matches!(failure.error, ProviderError::Cancelled));
+        // The summary request itself was refused as longer than the window.
+        let refused = (outcome.result.as_ref())
+            .is_err_and(|failure| matches!(failure.error, ProviderError::ContextLength { .. }));
+        self.size_refused = refused;
         // A reply that is not a summary has no text to use, or a tool call.
         let (text, called, answered) = match outcome.result {
             Ok(assembly) => {
@@ -235,6 +309,29 @@ impl Runner {
             self.abort().await?;
             return Ok(None);
         }
+        if refused {
+            let event = CompactionEvent {
+                messages_before: view.len() as u64,
+                messages_after: view.len() as u64,
+                tokens_before,
+                tokens_after: tokens_before,
+                strategy: strategy.into(),
+                duration_ms: super::end::millis(started.elapsed()),
+                forced,
+                rejected: None,
+                measured_tokens,
+                clipped_bytes,
+            };
+            return match self.refused_summary(attempt, event).await? {
+                Refused::Again => Ok(Some(Step::Compact {
+                    attempt: self.summary_calls + 1,
+                    abandoned: None,
+                    redispatch,
+                })),
+                Refused::GoOn => Ok(Some(next)),
+                Refused::Ended => Ok(None),
+            };
+        }
         if rejection.is_some() || text.is_empty() {
             if let Some(reason) = rejection {
                 let (messages, tokens) = (view.len() as u64, tokens_before);
@@ -260,6 +357,7 @@ impl Runner {
                         format!("{reason}: the next due turn asks again")
                     }),
                     measured_tokens,
+                    clipped_bytes,
                 });
             }
             if forced {
@@ -288,6 +386,7 @@ impl Runner {
             forced,
             rejected: None,
             measured_tokens,
+            clipped_bytes,
         };
         // Judged on the trigger's measure less what the summary removed, as
         // a resume reads it back from the event.
@@ -315,6 +414,43 @@ impl Runner {
             appended: false,
             attempt: redispatch.unwrap_or(1),
         }))
+    }
+
+    /// A summary request the provider refused as longer than its window:
+    /// record it as `event` with its refusal, durably with the receipt, and
+    /// say what follows: another request on less of the older part, a turn
+    /// that goes on uncompacted (a turn-start summary out of requests), or
+    /// the end of the run (a forced summary out of requests).
+    async fn refused_summary(
+        &mut self,
+        attempt: u32,
+        mut event: CompactionEvent,
+    ) -> Result<Refused, RunError> {
+        self.summary_refusals += 1;
+        let forced = event.forced;
+        let again = self.summary_refusals < compaction::summary_requests(forced);
+        event.rejected = Some(format!(
+            "{}: the summary request was refused as longer than the context window{}",
+            compaction::SIZE_REFUSED,
+            match (again, forced) {
+                (true, _) => "; asks again on less of the older part",
+                (false, true) => ", and no smaller request is left to try, so the run ends",
+                (false, false) => ", and no smaller request is left to try: the turn goes on",
+            }
+        ));
+        self.stage_compaction(event);
+        if !again && forced {
+            self.unshortened().await?;
+            return Ok(Refused::Ended);
+        }
+        self.save(Phase::CompactionPending { attempt }).await?;
+        let ready = self.journal.flush().await?;
+        self.event_emit(&ready).await;
+        self.outbox.deliver(ready).await;
+        Ok(match again {
+            true => Refused::Again,
+            false => Refused::GoOn,
+        })
     }
 
     /// Append the projection of a durable summary unless `appended`, then
@@ -356,7 +492,22 @@ impl Runner {
                 compaction::clear_tool_results(&view, spec.keep_recent_turns)
         {
             return self
-                .clear(&view, before, cleared, next, true)
+                .clear(&view, before, cleared, next, true, None)
+                .await
+                .map(Some);
+        }
+        // The last turn alone may be what does not fit, which no summary
+        // helps (it folds every turn before it, never that one): clip its
+        // tool results in the view, to half the window, then half of that at
+        // each further refusal of the turn.
+        let start = compaction::last_turn_start(&view).unwrap_or(1);
+        let window = agent.context_window();
+        if let Some(budget) = compaction::last_turn_budget(window, self.forced_steps)
+            && let Some(clipped) = compaction::clip_from(&view, start, budget)
+        {
+            let clip = Some((budget, clipped.bytes));
+            return self
+                .clear(&view, start, clipped.messages, next, true, clip)
                 .await
                 .map(Some);
         }
@@ -375,6 +526,7 @@ impl Runner {
 
     /// Stage the `compaction` event, which also moves the anchor.
     fn stage_compaction(&mut self, event: CompactionEvent) {
+        self.forced_steps += u32::from(event.forced && event.rejected.is_none());
         let event = Event::Compaction(event);
         self.anchor.observe(&event);
         self.journal.stage(event);
@@ -384,6 +536,9 @@ impl Runner {
     /// before `before` cleared, as a logged projection, then go on to
     /// primary call `attempt`. The `compaction` event rides the held
     /// `Cleared` checkpoint, which the session write flushes first.
+    ///
+    /// With `clip` (the budget and the bytes cut), `cleared` is the view with
+    /// its tool results from `before` on clipped to that budget instead.
     async fn clear(
         &mut self,
         view: &[Arc<Message>],
@@ -391,9 +546,13 @@ impl Runner {
         cleared: Vec<Arc<Message>>,
         attempt: u32,
         forced: bool,
+        clip: Option<(u64, u64)>,
     ) -> Result<Step, RunError> {
         let started = Instant::now();
-        let strategy = compaction::MICRO_STRATEGY;
+        let (strategy, reason) = match clip {
+            Some(_) => (compaction::CLIP_STRATEGY, compaction::CLIP_REASON),
+            None => (compaction::MICRO_STRATEGY, compaction::MICRO_REASON),
+        };
         let messages = view.len() as u64;
         let tokens_before = estimate_tokens(view);
         self.pre_compact(self.turn, messages, tokens_before, strategy)
@@ -410,10 +569,17 @@ impl Runner {
             forced,
             rejected: None,
             measured_tokens: (measured > tokens_before).then_some(measured),
+            clipped_bytes: clip.map(|(_, bytes)| bytes),
         });
         let before = before as u64;
-        self.save(Phase::Cleared { before, attempt }).await?;
-        self.project(cleared, compaction::MICRO_REASON).await?;
+        let clip = clip.map(|(budget, _)| budget);
+        self.save(Phase::Cleared {
+            before,
+            attempt,
+            clip,
+        })
+        .await?;
+        self.project(cleared, reason).await?;
         self.post_compact(
             self.turn,
             messages,
@@ -434,13 +600,24 @@ impl Runner {
         &mut self,
         before: u64,
         attempt: u32,
+        clip: Option<u64>,
         appended: bool,
     ) -> Result<Option<Step>, RunError> {
         if !appended {
             let view = self.log.provider_view();
             let before = usize::try_from(before).unwrap_or(usize::MAX);
-            if let Some(cleared) = compaction::cleared_before(&view, before) {
-                self.project(cleared, compaction::MICRO_REASON).await?;
+            match clip {
+                Some(budget) => {
+                    if let Some(clipped) = compaction::clip_from(&view, before, budget) {
+                        self.project(clipped.messages, compaction::CLIP_REASON)
+                            .await?;
+                    }
+                }
+                None => {
+                    if let Some(cleared) = compaction::cleared_before(&view, before) {
+                        self.project(cleared, compaction::MICRO_REASON).await?;
+                    }
+                }
             }
         }
         Ok(Some(dispatch(attempt)))

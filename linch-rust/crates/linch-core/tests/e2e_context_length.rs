@@ -480,7 +480,12 @@ async fn forced_summaries_stop_at_the_run_bound() {
         2,
         "turn 3 is refused past the bound"
     );
-    assert_eq!(error_of(&events).unwrap()["kind"], "context_length");
+    let error = error_of(&events).unwrap();
+    assert_eq!(error["kind"], "context_length");
+    // The message names the bound that was spent, not an empty view.
+    let message = error["message"].as_str().unwrap();
+    assert!(message.contains("max_forced (1) is spent"), "{message}");
+    assert!(!message.contains("nothing is left to shorten"), "{message}");
 }
 
 /// A forced summary that gives none leaves the prompt the provider

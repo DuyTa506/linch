@@ -72,7 +72,7 @@ pub(super) fn prompt_appended(
     })
 }
 
-/// Whether a micro-compaction's projection was already appended: like
+/// Whether a micro-compaction's (or a clip's) projection was already appended: like
 /// [`appended()`], for a trailing projection recorded as one.
 pub(super) fn cleared(
     checkpoint: &Checkpoint,
@@ -85,7 +85,11 @@ pub(super) fn cleared(
     match session.last() {
         Some(LogEntry::Projection(entry))
             if found == checkpoint.session_len + 1
-                && entry.reason == crate::compaction::MICRO_REASON =>
+                && [
+                    crate::compaction::MICRO_REASON,
+                    crate::compaction::CLIP_REASON,
+                ]
+                .contains(&entry.reason.as_str()) =>
         {
             Ok(true)
         }

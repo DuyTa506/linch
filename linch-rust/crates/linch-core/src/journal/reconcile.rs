@@ -95,7 +95,10 @@ pub enum Recovery {
         appended: bool,
     },
     /// `CompactionPending` without a receipt: write `abandoned`, then
-    /// dispatch summary `attempt`.
+    /// dispatch summary `attempt`. Also a forced summary the provider refused
+    /// as too long, with tries left (the `compaction` event that says so is
+    /// durable with its receipt): `abandoned` is `None` and the next delivery
+    /// reads less of the older part.
     Recompact {
         /// The new delivery attempt number.
         attempt: u32,
@@ -126,6 +129,9 @@ pub enum Recovery {
         before: u64,
         /// Delivery attempt of the primary call that follows.
         attempt: u32,
+        /// The budget the tool results were clipped to, when they were
+        /// clipped instead of cleared.
+        clip: Option<u64>,
         /// Whether the projection is already in the session.
         appended: bool,
     },
@@ -273,8 +279,18 @@ pub fn reconcile(
             // A summary lands with its `Compacted` checkpoint, so a receipt
             // here settled a call that gave none: it is not bought again.
             // A turn-start summary lets the turn go on uncompacted; a forced
-            // one leaves a prompt the provider already refused.
+            // one leaves a prompt the provider already refused, unless it was
+            // the summary request that was refused as too long: that goes
+            // again on less of the older part while it has tries left.
             if receipt {
+                let limit = crate::compaction::summary_requests(forced.latest_forced);
+                if forced.refused && forced.refusals < limit {
+                    return Ok(Recovery::Recompact {
+                        attempt: attempt + 1,
+                        abandoned: None,
+                        redispatch: forced.latest_forced.then_some(forced.primary_calls + 1),
+                    });
+                }
                 if forced.latest_forced {
                     return Ok(Recovery::Unshortened);
                 }
@@ -295,10 +311,15 @@ pub fn reconcile(
             keep_from: *keep_from,
             attempt: Forced::of(events, checkpoint.turn).primary_calls + 1,
         }),
-        Phase::Cleared { before, attempt } => Ok(Recovery::Cleared {
+        Phase::Cleared {
+            before,
+            attempt,
+            clip,
+        } => Ok(Recovery::Cleared {
             appended: cleared(checkpoint, session)?,
             before: *before,
             attempt: *attempt,
+            clip: *clip,
         }),
         Phase::Aborting { message } => Ok(Recovery::Aborting {
             appended: appended(checkpoint, session, message)?,

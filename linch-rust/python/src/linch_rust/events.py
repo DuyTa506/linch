@@ -270,16 +270,23 @@ class ContextBuildEvent:
 class CompactionEvent:
     """The provider view was compacted, in `duration_ms`.
 
-    `strategy` is `summary`, or `micro` when old tool results were cleared
-    with no model call. `forced` is true when the provider's refusal of a
+    `strategy` is `summary`, `micro` when old tool results were cleared with
+    no model call, or `clip` when a refused prompt's last turn had its tool
+    results clipped to a budget (head and tail kept, the session's log whole).
+    `forced` is true when the provider's refusal of a
     prompt as too long caused it, rather than the view reaching the trigger.
     `rejected` is set when a summary was not applied (the counts then show an
-    unchanged view): a code, `tool_call`, `empty` or `not_smaller` (the view with
+    unchanged view): a code, `tool_call`, `empty`, `context_length` (a forced
+    summary request was refused as too long; a smaller one follows) or
+    `not_smaller` (the view with
     the whole checkpoint in it is estimated no smaller than the view now), then what follows (the
     next due turn asks again, asks again once the view has grown, or the run ends).
     `measured_tokens` is what the trigger measured the view at when that was
     more than `tokens_before`: the provider's last reported prompt tokens plus
     the estimate of what followed them; `None` until a provider has reported usage.
+    `clipped_bytes` is the bytes clipped out of text to make a prompt fit (what a
+    forced summary request read less of the older part, or what a `clip` took
+    out of the view); `None` when nothing was clipped.
     """
 
     type: ClassVar[str] = "compaction"
@@ -292,6 +299,7 @@ class CompactionEvent:
     forced: bool = False
     rejected: str | None = None
     measured_tokens: int | None = None
+    clipped_bytes: int | None = None
 
 
 @dataclass(frozen=True)

@@ -785,12 +785,14 @@ mod forced {
         }
     }
 
-    fn forced(spent: u32, summary_calls: u32, primary_calls: u32, latest: bool) -> Forced {
+    fn forced(counts: [u32; 3], latest: bool) -> Forced {
+        let [spent, summary_calls, primary_calls] = counts;
         Forced {
             spent,
             summary_calls,
             primary_calls,
             latest_forced: latest,
+            ..Forced::default()
         }
     }
 
@@ -803,15 +805,72 @@ mod forced {
             .map(|(seq, (kind, turn))| delivery(seq as u64, kind, turn))
             .collect();
         let at = |turn, upto: usize| Forced::of(&events[..upto], turn);
-        assert_eq!(at(0, 2), forced(0, 1, 1, false));
-        assert_eq!(at(1, 4), forced(1, 1, 1, true));
+        assert_eq!(at(0, 2), forced([0, 1, 1], false));
+        assert_eq!(at(1, 4), forced([1, 1, 1], true));
         assert_eq!(
             at(1, 5),
-            forced(1, 2, 1, true),
+            forced([1, 2, 1], true),
             "a second attempt of one summary is not another"
         );
-        assert_eq!(at(1, 6), forced(1, 2, 2, true));
-        assert_eq!(at(2, 7), forced(1, 1, 0, false));
+        assert_eq!(at(1, 6), forced([1, 2, 2], true));
+        assert_eq!(at(2, 7), forced([1, 1, 0], false));
+    }
+
+    /// A `compaction` event of the run's turn: a forced one, rejected or not.
+    fn outcome(seq: u64, forced: bool, rejected: Option<&str>) -> Envelope {
+        let event = Event::Compaction(crate::events::kinds::CompactionEvent {
+            messages_before: 9,
+            messages_after: 9,
+            tokens_before: 100,
+            tokens_after: 100,
+            strategy: "summary".into(),
+            duration_ms: 0,
+            forced,
+            rejected: rejected.map(Into::into),
+            measured_tokens: None,
+            clipped_bytes: None,
+        });
+        Envelope {
+            event,
+            ..delivery(seq, ModelCallKind::Primary, 0)
+        }
+    }
+
+    /// A summary the provider refused as too long makes the next one read
+    /// less; a delivery a crash left unsettled does not. A step of the turn
+    /// is a forced compaction that changed the view, whatever the primary
+    /// call's retries.
+    #[test]
+    fn refusals_and_steps_come_from_the_events_of_the_turn() {
+        use ModelCallKind::{Compaction as C, Primary as P};
+        let size = Some("context_length: refused");
+        let events = [
+            // Turn 0: an earlier forced step, then a refusal of its own.
+            delivery(0, P, 0),
+            outcome(1, true, None),
+            delivery(2, P, 0),
+            delivery(3, C, 0),
+            outcome(4, true, size),
+            delivery(5, C, 0),
+            outcome(6, true, size),
+            delivery(7, C, 0),
+        ];
+        let at = |turn, upto: usize| Forced::of(&events[..upto], turn);
+        let (one, two) = (at(0, 5), at(0, 7));
+        assert_eq!((one.refusals, one.refused, one.steps), (1, true, 1));
+        assert_eq!((two.refusals, two.refused, two.steps), (2, true, 1));
+        // A delivery after the refusal is a request nobody judged yet.
+        let sent = at(0, 8);
+        assert_eq!((sent.refusals, sent.refused, sent.steps), (2, false, 1));
+        // The turn's next primary delivery starts the count over; steps stay.
+        let mut later = events.to_vec();
+        later.push(delivery(8, P, 0));
+        later.push(outcome(9, true, None));
+        let done = Forced::of(&later, 0);
+        assert_eq!((done.refusals, done.refused, done.steps), (0, false, 2));
+        // Events of an earlier turn belong to it, not to turn 1.
+        assert_eq!(Forced::of(&events, 1).refusals, 0);
+        assert_eq!(Forced::of(&events, 1).steps, 0);
     }
 }
 
@@ -845,6 +904,7 @@ fn compaction_event(rejected: Option<&str>) -> Event {
         forced: false,
         rejected: rejected.map(Into::into),
         measured_tokens: Some(250),
+        clipped_bytes: None,
     })
 }
 

@@ -368,6 +368,12 @@ fn boundary(view: &[Arc<Message>], keep_recent_turns: u32) -> Option<usize> {
     Some(at)
 }
 
+/// Where the last turn starts: the last assistant message. It is the part of
+/// a view no summary can fold, so what does not fit in it must be clipped.
+pub(crate) fn last_turn_start(view: &[Arc<Message>]) -> Option<usize> {
+    boundary(view, 1)
+}
+
 /// Where the kept turns start: the `keep_recent_turns`-th assistant message
 /// from the end, so no tool result is cut off from its call. `None` when
 /// the part between the first message and that point holds no assistant
@@ -463,6 +469,20 @@ pub(crate) struct Forced {
     pub(crate) primary_calls: u32,
     /// Whether the latest summary of turn `turn` is a forced one.
     pub(crate) latest_forced: bool,
+    /// Summary requests of turn `turn` the provider refused as longer than
+    /// its window since the turn's last primary delivery (`compaction` events
+    /// whose `rejected` starts with [`SIZE_REFUSED`]): each makes the next
+    /// request read less of the folded part. A delivery a crash left
+    /// unsettled is not one.
+    pub(crate) refusals: u32,
+    /// Whether the last thing the run recorded of turn `turn` is such a
+    /// refusal, so the summary it left goes again.
+    pub(crate) refused: bool,
+    /// Forced compactions of turn `turn` that changed the view (a clear, a
+    /// clip or a summary): how many refusals of the turn's primary call the
+    /// run has answered, whatever the provider retries between them. Each
+    /// halves the budget a clip of the last turn allows.
+    pub(crate) steps: u32,
 }
 
 impl Forced {
@@ -470,13 +490,30 @@ impl Forced {
     pub(crate) fn of(events: &[Envelope], turn: u32) -> Self {
         let mut forced = Self::default();
         let mut previous: Option<(ModelCallKind, Option<u64>)> = None;
+        // Whether a delivery of turn `turn` was seen: the events of its forced
+        // compactions come after its primary delivery.
+        let mut started = false;
         for envelope in events {
+            if let Event::Compaction(event) = &envelope.event
+                && started
+            {
+                forced.refused = is_size_refusal(event);
+                forced.refusals += u32::from(forced.refused);
+                forced.steps += u32::from(event.forced && event.rejected.is_none());
+            }
             let Event::ModelCallDelivery(delivery) = &envelope.event else {
                 continue;
             };
             let this_turn = delivery.turn_index == Some(u64::from(turn));
+            started |= this_turn;
+            forced.refused &= !this_turn;
             match delivery.kind {
-                ModelCallKind::Primary => forced.primary_calls += u32::from(this_turn),
+                ModelCallKind::Primary => {
+                    forced.primary_calls += u32::from(this_turn);
+                    if this_turn {
+                        forced.refusals = 0;
+                    }
+                }
                 ModelCallKind::Compaction => {
                     let after = previous.filter(|(_, at)| *at == delivery.turn_index);
                     let begins = after.is_none_or(|(kind, _)| kind == ModelCallKind::Primary);
@@ -495,6 +532,12 @@ impl Forced {
         }
         forced
     }
+}
+
+/// Whether `event` records a summary the provider refused as longer than its
+/// window.
+pub(crate) fn is_size_refusal(event: &CompactionEvent) -> bool {
+    (event.rejected.as_deref()).is_some_and(|reason| reason.starts_with(SIZE_REFUSED))
 }
 
 /// Consecutive useless summaries after which a run stops asking at every
@@ -535,8 +578,11 @@ impl Rejections {
     pub(crate) fn of(events: &[Envelope], due: impl Fn(u64) -> bool) -> Self {
         let mut rejections = Self::default();
         for envelope in events {
+            // A refusal as too long is no reply to judge: a smaller request
+            // answers it.
             if let Event::Compaction(event) = &envelope.event
                 && event.strategy == STRATEGY
+                && !is_size_refusal(event)
             {
                 match event.rejected {
                     Some(_) => rejections.rejected(event.tokens_after),
@@ -776,6 +822,12 @@ pub(crate) fn replacement(
     messages.extend(view.iter().skip(keep_from).cloned());
     messages
 }
+
+mod clip;
+pub(crate) use clip::{
+    CLIP_REASON, CLIP_STRATEGY, SIZE_REFUSED, Scope, clip, clip_from, folded_budget,
+    last_turn_budget, summary_requests,
+};
 
 #[cfg(test)]
 mod tests;
