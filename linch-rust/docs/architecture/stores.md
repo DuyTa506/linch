@@ -92,9 +92,9 @@ process.
   dropped stream) releases its lease from `Held`'s `Drop`, in a spawned
   one-write task, so another process need not wait out the TTL
   (`lease.rs:108-125`). The agent keeps each release task, and
-  `Agent::released` (`crates/linch-core/src/agent.rs:452`) waits for them;
+  `Agent::released` (`crates/linch-core/src/agent.rs:473`) waits for them;
   `OpenedAgent::close` waits up to `RELEASE_WAIT` (5 s,
-  `crates/linch/src/open.rs:348`) before it disconnects, so a
+  `crates/linch/src/open.rs:375`) before it disconnects, so a
   `linch-server` that exits after dropping its runs still frees them. A
   crash releases nothing; the lease runs out.
 - **Memory stores** have no TTL: they never refuse a claim, start no timer
@@ -138,6 +138,7 @@ the tool calls and their results enter the session log.
 | `session_store_suite` | `SessionStore` | `store/conformance.rs:46` |
 | `task_store_suite` | `SessionStore + TaskStore` | `store/conformance/tasks.rs:14` |
 | `backend_suite` | `FileBackend` | `crates/linch-core/src/vfs/conformance.rs:11` |
+| `memory_store_suite` | `MemoryStore`, the long-term memory store of one namespace ([Postgres stores](#postgres-stores)) | `crates/linch-core/src/memory/conformance.rs:39` |
 
 A failed rule panics with a message naming it, so call the suites from a
 test. Each check uses its own namespace under `conformance/`; run them on a
@@ -164,7 +165,8 @@ always wins and fences the earlier lease, whichever handle asks.
 ## Postgres stores
 
 `linch-postgres` implements `PgRunStore`, `PgSessionStore` (also the
-`TaskStore`) and `PgFileBackend`. All take a `PgPool`.
+`TaskStore`), `PgFileBackend`, `PgToolCache` and `PgMemoryStore`. All take a
+`PgPool`.
 
 ### Schema and migrations
 
@@ -184,7 +186,9 @@ schema. Queries are built at run time: building the crate needs no database.
 | `0004_tasks.sql` | `linch_sessions.next_task_id`, `linch_tasks`, `linch_task_edges` |
 | `0005_mailbox.sql` | `linch_mailbox` (`PgMailbox`: peer messages by namespace and recipient, leased by a drain, deleted by its ack) |
 | `0006_run_leases.sql` | `linch_runs.lease_holder` and `lease_until`, nullable, no default, not indexed: adding them rewrites no row, and a renewal stays a heap-only update. NULL is no live lease |
+| `0007_run_principal.sql` | `linch_runs.principal`, nullable, no default (the principal a run was started for, as JSON): a resume, approve or answer that names none acts for it, so a role rule cannot be escaped by leaving the principal out of a continuation |
 | `0008_tool_cache.sql` | `linch_tool_cache` (`PgToolCache`: tool results by namespace and key digest, `expires_at` on the database's clock, `seq` to evict the oldest, `bytes` and `quota_group` for a tenant's byte cap; `output` is `TEXT`) and `linch_tool_cache_epoch` (a namespace's clear count, never deleted). A put and a clear of a namespace take one advisory lock (shared and exclusive) for their transaction, so a put whose epoch is behind is refused; a put also trims the quota group newest first and sweeps up to 100 expired rows of any namespace |
+| `0009_memories.sql` | `linch_memories` (`PgMemoryStore`: long-term memories by namespace and scope, `NULL` scope being the memory every session shares; `call_key` is the saving call's idempotency key, unique per namespace, so a replayed save stores one row; `terms` holds the words of the content and tags, each prefixed with a bucket hash of the namespace and scope, behind a GIN index, so a search reads only its own bucket's postings; a save under a cap takes an advisory lock per tenant root) |
 
 JSON payloads (checkpoints, envelopes, log entries, task metadata) are `TEXT`,
 not `JSONB`: JSONB reorders keys and rewrites numbers, and the stores must

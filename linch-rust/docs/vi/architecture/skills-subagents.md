@@ -20,10 +20,10 @@ trình bày chúng từ client Python.
 
 ## Skill
 
-`AgentBuilder::skills` (`crates/linch-core/src/agent/builder.rs:152`) bật
+`AgentBuilder::skills` (`crates/linch-core/src/agent/builder.rs:155`) bật
 skill bằng các giá trị `Skill` của host (`crates/linch-core/src/skills.rs:49`);
 facade `linch` nạp chúng từ `.linch/skills/*/SKILL.md`. Lúc build
-(`builder.rs:235-245`):
+(`builder.rs:238-248`):
 
 - skill `verify` tích hợp sẵn được thêm vào trừ khi đã có một skill mang tên đó,
   không phân biệt hoa thường, và tập được sắp xếp theo tên viết thường
@@ -106,7 +106,7 @@ bền vững: các run sau của một session không bao giờ gửi nó, kể 
 
 ## Subagent
 
-`AgentBuilder::subagents` (`builder.rs:164`) bật subagent bằng các
+`AgentBuilder::subagents` (`builder.rs:167`) bật subagent bằng các
 `SubagentDefinition` của host (`crates/linch-core/src/subagents.rs:146`);
 facade nạp chúng từ `.linch/agents/*.md`. `Roster`
 (`subagents.rs:236-278`) thêm agent `verification` tích hợp sẵn trừ khi đã có một agent
@@ -115,7 +115,7 @@ không có `subagent_type` (hoặc có giá trị trống, `general-purpose` hay
 Roster đi vào contract dưới dạng tính năng `subagents`, và cài đặt
 `Workers`, khi được đưa ra, dưới dạng `workers`.
 
-Lúc build đăng ký (`builder.rs:261-277`):
+Lúc build đăng ký (`builder.rs:266-282`):
 
 | Tool | Khi nào | Scope |
 |---|---|---|
@@ -123,7 +123,7 @@ Lúc build đăng ký (`builder.rs:261-277`):
 | `SubagentContinue` | `workers.background` hoặc `workers.retain` | `Exec` |
 | `TaskStop` | `workers.background` | `Exec` |
 
-`workers` mà không có `subagents` làm build thất bại (`builder.rs:252-254`).
+`workers` mà không có `subagents` làm build thất bại (`builder.rs:366-370`).
 
 ### Tool `Subagent`
 
@@ -249,14 +249,14 @@ phân giải một worker của session đang gọi theo id hoặc tên hiển t
 (`crates/linch-core/src/subagents/workers.rs:74-105`), từ chối worker còn
 đang chạy, và chạy lại nó trên session riêng của nó, lịch sử còn nguyên, dưới dạng một
 run con foreground mới của run đang gọi, được đặt tên theo lời gọi continue.
-`TaskStop` (`control.rs:168-252`) hủy một worker background đang chạy và
+`TaskStop` (`control.rs:169-258`) hủy một worker background đang chạy và
 đánh dấu nó đã dừng, nên phần kết thúc của nó được ghi lại mà không có thông báo; worker
 vẫn địa chỉ hóa được.
 
 Worker registry (`workers.rs:26-130`) giữ, theo từng session cha và trong
 bộ nhớ process, tên hiển thị của mỗi worker (tên định nghĩa của nó, hoặc
 `Agent #N` cho worker đa dụng thứ N) và việc nó có địa chỉ hóa được hay không.
-`Agent::close_session` (`crates/linch-core/src/agent.rs:329-345`)
+`Agent::close_session` (`crates/linch-core/src/agent.rs:329-366`)
 đóng các family đã suspend của session, các session của worker của nó, rồi
 session.
 
@@ -288,7 +288,7 @@ sống lâu hơn một stream kết thúc khi run đang suspend.
 - **Mọi cách dừng khác** (một stream bị drop, một run thất bại) drop các run con
   cùng family, giống như một sự cố.
 
-`Agent::parked_children` (`agent.rs:348-368`) trả về một future hoàn tất
+`Agent::parked_children` (`agent.rs:369-389`) trả về một future hoàn tất
 khi các run con của một run đã suspend xong. Server RPC dùng nó để giữ chỗ của một
 run đã suspend dưới `max_runs` trong khi các worker của nó chạy
 ([RPC](./rpc.md#các-giới-hạn)).
@@ -363,7 +363,7 @@ Facade bật preset từ `AgentConfig.deep_agent`: `deep::expand`
 worker (trừ khi cấu hình đặt chúng) và spec; `deep::add_roster`
 (`deep.rs:35-45`) bật skill, nên skill `verify` tích hợp sẵn được thêm vào, và
 thêm roster sau các subagent của thư mục cấu hình, lúc open
-(`crates/linch/src/open.rs:156`) và ở mỗi lần reload. Hai phần của preset Python chưa có hỗ
+(`crates/linch/src/open.rs:183`) và ở mỗi lần reload. Hai phần của preset Python chưa có hỗ
 trợ ở kernel (`deep_agent.rs:33-39`): một coordinator giữ các tool workspace
 (`COORDINATOR_EXCLUDED_TOOLS` chỉ được nêu tên), và `max_tokens` của profile
 không được thực thi.

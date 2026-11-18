@@ -177,7 +177,7 @@ Run đã bắt đầu.
 | `trace_id` | `trace_id` được truyền cho `agent.run`, giữ trong cả run và các run của subagent; `None` khi không truyền ([Observability](./observability.md#correlate-logs-and-traces)) |
 | `resumed` | `True` ở `init` mở đầu một lần resume hoặc approve của run, kèm các tool hiện tại của run; `False` ở `init` đầu tiên của run |
 | `turn` | Lượt mà lời gọi tiếp tục: lượt của checkpoint run, với một `init` được resume; `0` ở lần đầu của run |
-| `output_schema` | [Output schema](./structured-output.md#give-one-run-its-own-schema) riêng của run, trên `init` đầu tiên của một run được bắt đầu với nó; `None` nếu không |
+| `output_schema` | [Output schema](./structured-output.md#cho-một-run-schema-riêng) riêng của run, trên `init` đầu tiên của một run được bắt đầu với nó; `None` nếu không |
 | `tool_choice` | [Tool choice](./structured-output.md#choose-which-tool-the-model-calls) riêng của run, trên `init` đầu tiên của một run được bắt đầu với nó; `None` nếu không |
 | `final_tool` | Tên [final tool](./structured-output.md#the-final-tool) của run, trên `init` đầu tiên của một run có nó; `None` nếu không |
 
@@ -372,6 +372,15 @@ Run đã bỏ một model và gọi model kế tiếp trong
 `from_model`, `to_model` và `error` (lỗi đã kết thúc các lời gọi của `from_model`).
 Event của Python Linch có chuỗi `reason` thay cho `error`.
 
+### `VerificationEvent` (`verification`)
+
+Một lần kiểm tra câu trả lời cuối cùng thấy nó chưa đạt, hoặc đã hết lượt
+retry: `verifier`, `action` (`retry`, `stop` hoặc `exhausted`), `feedback` và
+`attempt`. Việc kiểm tra [output schema](./structured-output.md#run-kiểm-tra-gì)
+phát nó với `verifier` là `output_schema`; một [verifier](./security.md#verifiers)
+với `name` của nó; một lần retry của callback `stop` dưới `spec.verification`
+với `policy_id` của nó.
+
 ### `BudgetEvent` (`budget`)
 
 [Budget](./agent.md#budget) của run đã vượt tỷ lệ cảnh báo (`kind` là `warning`,
@@ -488,6 +497,11 @@ client chỉ giải mã chúng từ các envelope đọc ra từ journal.
 `ModelCallUsageSettlementEvent` có `logical_call_id`, `usage`,
 `budget_owner_id` và `cost_usd`.
 
+`SteerReceivedEvent` (`steer_received`) là một [steer](./runs.md#steer) mà run
+đã chấp nhận, với `steer_id` và `text` (sau khi redact prompt). Nó được ghi
+trước khi `steer` trả lời và không bao giờ được stream; event `user` có subtype
+`alignment` cùng `steer_id` đánh dấu nó đã được giao cho model.
+
 ### Các loại mà server chưa phát
 
 Phần lõi khai báo các loại này và client giải mã mỗi loại thành class của nó,
@@ -496,7 +510,6 @@ nhưng hiện chưa có run nào phát chúng:
 | Class (`type`) | Trường |
 |---|---|
 | `PromptCacheAdvisoryEvent` (`prompt_cache_advisory`) | `reason` (`tool_set_changed` hoặc `model_changed`), `detail` |
-| `VerificationEvent` (`verification`) | `verifier`, `action` (`retry`, `stop` hoặc `exhausted`), `feedback`, `attempt`. Việc kiểm tra [output schema](./structured-output.md#what-the-run-checks) phát nó với `verifier` là `output_schema`; một [verifier](./security.md#verifiers) với `name` của nó; một lần retry của callback `stop` dưới `spec.verification` với `policy_id` của nó |
 | `WorkflowEvent` (`workflow`) | `kind`, `title`, `call_key`, `occurrence`, `subagent_type`, `result_text`, `structured_output`, `structured_error` |
 
 ### `UnknownEvent`

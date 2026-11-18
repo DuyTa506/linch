@@ -240,9 +240,11 @@ Python's `ExecutionBackend` pairs a shell and a file backend
 (`src/linch/execution/backend.py`), with `LocalExecutionBackend`,
 `RemoteExecutionBackend` and the `DockerBackend` shell
 (`src/linch/tools/execution.py:229`). linch-rust has the same seam
-(`ExecutionBackend` in `crates/linch-tools/src/exec.rs`) with three built-in
-backends chosen by config instead of objects; it has no pluggable remote
-shell, and the sandbox backend has no Python counterpart. Python's
+(`ExecutionBackend` in `crates/linch-tools/src/exec.rs`) with four built-in
+backends chosen by config instead of objects; the `remote` backend takes the
+place of Python's remote shell by asking the client's `ExecutionHost` to run
+each command ([Remote execution](./remote-execution.md)), and the sandbox
+backend has no Python counterpart. Python's
 `TempDirIsolation` gives each subagent branch its own working copy; the
 sandbox's private home is per session, and the workspace stays shared with
 the file tools.

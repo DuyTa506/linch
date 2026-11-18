@@ -65,7 +65,7 @@ bỏ tag bằng tay (`events/kinds/mod.rs:1-9`). `Event::type_name`
 | `skill_completed` | `SkillCompletedEvent`, `kinds/skills.rs:35` | yes | yes | |
 | `subagent` | `SubagentEvent`, `event/mod.rs:118` | như event được bọc | như event được bọc | Xem [bọc subagent](#bọc-subagent) |
 | `child_run_status` | `ChildRunStatusEvent`, `kinds/suspend.rs:66` | yes | yes | |
-| `workflow` | `WorkflowEvent`, `kinds/skills.rs:76` | yes | yes | Không bao giờ nằm trong log của run: các workflow của `linch-ext` chuyển nó cho event sink của chúng ([extensions](./ext.md)) |
+| `workflow` | `WorkflowEvent`, `kinds/skills.rs:80` | yes | yes | Không bao giờ nằm trong log của run: các workflow của `linch-ext` chuyển nó cho event sink của chúng ([extensions](./ext.md)) |
 | `verification` | `VerificationEvent`, `kinds/control.rs:209` | yes | yes | Các cổng kiểm tra câu trả lời (`runner/structured.rs`): việc kiểm tra output schema, `verifier` là `output_schema`; một verifier tích hợp sẵn, `name` của nó; một lần retry của hook `stop` dưới `spec.verification`, `policy_id` của nó (`runner/hooks.rs`). `retry` được stage với phản hồi bên cạnh, `stop` trong lần ghi terminal, `exhausted` với câu trả lời được chấp nhận. Một lần resume đếm các lần retry đã dùng từ những event này, của schema tách riêng khỏi phần còn lại |
 | `hook` | `HookEvent`, `kinds/hook.rs:14` | no | yes | |
 | `error` | `ErrorEvent`, `kinds/lifecycle.rs:90` | yes | yes | |
@@ -111,7 +111,7 @@ phân loại.
 |---|---|---|
 | `StreamOnly` | `partial_assistant`, `tool_progress`, `hook` | `Journal::stage` trả nó ngay lập tức với seq bền vững gần nhất và không bao giờ lưu nó (`crates/linch-core/src/journal.rs:136-143`). Tiến độ của tool đi thẳng vào outbox của stream (`crates/linch-core/src/runner/sink.rs:184-189`) |
 | `Both` | mọi loại đã biết khác, và `IgnorableEvent` | Được stage với seq kế tiếp, giữ đến lần ghi barrier kế tiếp, rồi được delivery theo thứ tự seq (`journal.rs:328-334`) |
-| `JournalOnly` | ba loại `model_call_*` | Được stage với seq kế tiếp và lưu như `Both`, nhưng không bao giờ được delivery. `Agent::events` cũng bỏ chúng ra (`crates/linch-core/src/agent.rs:380-396`), và method RPC `run.events`, vốn gọi nó, cũng vậy |
+| `JournalOnly` | ba loại `model_call_*` | Được stage với seq kế tiếp và lưu như `Both`, nhưng không bao giờ được delivery. `Agent::events` cũng bỏ chúng ra (`crates/linch-core/src/agent.rs:401-417`), và method RPC `run.events`, vốn gọi nó, cũng vậy |
 
 Các bản ghi chỉ dành cho journal là thứ mà resume đọc để kết thúc một lời gọi model mà
 nó có thể đã trả phí rồi (`crates/linch-core/src/journal/reconcile.rs`).
@@ -208,14 +208,14 @@ client.
 ## Client Python
 
 `python/src/linch_rust/events.py` có một dataclass frozen cho mỗi loại được delivery,
-với tên wire là biến lớp `type`, được gom trong union `Event` (`events.py:349`) và bảng
-`_KINDS` (`events.py:379`).
+với tên wire là biến lớp `type`, được gom trong union `Event` (`events.py:350`) và bảng
+`_KINDS` (`events.py:380`).
 
-- `decode_event` (`events.py:436`) dựng lớp ứng với `type`, chỉ truyền
+- `decode_event` (`events.py:437`) dựng lớp ứng với `type`, chỉ truyền
   các thành viên mà lớp có, nên một thành viên mà client không biết sẽ bị
   bỏ. Một event `subagent` giải mã event con của nó theo cách tương tự. Mọi
-  `type` khác trở thành `UnknownEvent(type, raw)` (`events.py:342`).
-- `decode_envelope` (`events.py:454`) đọc `seq`, `run_id`, `ts_ms` và
+  `type` khác trở thành `UnknownEvent(type, raw)` (`events.py:343`).
+- `decode_envelope` (`events.py:455`) đọc `seq`, `run_id`, `ts_ms` và
   `event`, và raise `LinchError` với `v` khác `WIRE_VERSION` của nó
   (1, `events.py:19`), kể cả khi thiếu `v`. Nó không đọc
   `ignorable`.

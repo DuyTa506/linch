@@ -220,8 +220,9 @@ của nó.
 (`src/linch/execution/backend.py`), với `LocalExecutionBackend`,
 `RemoteExecutionBackend` và shell `DockerBackend` (`src/linch/tools/execution.py:229`).
 linch-rust có cùng seam đó (`ExecutionBackend` trong
-`crates/linch-tools/src/exec.rs`) với ba backend dựng sẵn được chọn bằng cấu hình thay
-vì bằng object; nó không có remote shell cắm thêm được, và backend sandbox không có đối
-ứng trong Python. `TempDirIsolation` của Python cho mỗi nhánh subagent một bản làm việc
+`crates/linch-tools/src/exec.rs`) với bốn backend dựng sẵn được chọn bằng cấu hình thay
+vì bằng object; backend `remote` thay cho remote shell của Python bằng cách nhờ
+`ExecutionHost` của client chạy từng lệnh ([Thực thi từ xa](./remote-execution.md)), và
+backend sandbox không có đối ứng trong Python. `TempDirIsolation` của Python cho mỗi nhánh subagent một bản làm việc
 riêng; home riêng của sandbox là theo session, và workspace vẫn dùng chung với các tool
 tệp.

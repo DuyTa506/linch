@@ -114,7 +114,7 @@ tất, nên các record chính là cache phát lại và không cần gộp
 
 ### Các lời gọi
 
-`run_workflow(options, f)` (`crates/linch-ext/src/workflow/engine.rs:99`)
+`run_workflow(options, f)` (`crates/linch-ext/src/workflow/engine.rs:265`)
 claim workflow, rồi chạy `f` trên một `WorkflowContext` được nạp sẵn các record đã
 lưu. Các lời gọi được ghi vào journal:
 
@@ -157,7 +157,7 @@ gọi đã ghi journal trả về ngay, nên các nhánh đến một tên dùng
 với khi chạy thật; một bộ đếm dùng chung giữa các nhánh sẽ đưa record của nhánh này cho
 nhánh khác và chạy lại một step đã ghi journal. Đường dẫn là một biến task-local mà mỗi
 nhánh được poll bên dưới nó
-(`crates/linch-ext/src/workflow/context.rs:110`, `context.rs:161-183`).
+(`crates/linch-ext/src/workflow/context.rs:154`, `context.rs:229-251`).
 Tính đồng thời được dựng theo cách khác (`join!` hoặc `select!`, hoặc một task được
 spawn, vốn không kế thừa đường dẫn) không có đường dẫn riêng, nên các lời gọi ở đó cần
 tên hoặc khóa khác nhau. Python đếm một lần xuất hiện cho mỗi khóa trên toàn run, kể cả
@@ -171,7 +171,7 @@ journal. Lỗi và timeout của step được thử lại; lỗi mã hóa và m
 
 Một lời gọi `agent` chạy trên session riêng của nó với run id suy ra từ
 workflow, khóa của lời gọi, lần xuất hiện của nó và một generation
-(`crates/linch-ext/src/workflow/agent.rs:138`). Sau một sự cố, lần
+(`crates/linch-ext/src/workflow/agent.rs:456`). Sau một sự cố, lần
 `run_workflow` kế tiếp tiếp tục run đó thay vì bắt đầu lại, nên một lời gọi model không
 bao giờ bị trả phí hai lần. Nếu run vẫn còn lease của runner đã sập (Postgres, chưa
 quá một lease), lời gọi chờ đến khi lease hết hạn hoặc workflow bị hủy, thay vì thất bại.
@@ -180,23 +180,23 @@ tục: lời gọi thất bại, và lần resume kế tiếp bắt đầu một
 theo. Một run dừng để chờ phê duyệt làm lời gọi thất bại; hãy approve nó bằng
 `Agent::approve`, rồi resume workflow, thứ đọc văn bản của run đã xong. Timeout và retry
 của step không áp dụng cho lời gọi agent; deadline và cancel token của workflow thì có
-(`agent.rs:17-45`). Khi run đã kết thúc (thành công với văn bản đã ghi journal, thất bại
+(`agent.rs:19-165`). Khi run đã kết thúc (thành công với văn bản đã ghi journal, thất bại
 hoặc bị abort), lời gọi đóng session của nó bằng
 `Agent::close_session`, thứ giải phóng những gì agent giữ cho session đó
 trong process này, chẳng hạn các tệp bộ nhớ và các subagent worker được giữ lại; một run
-đang chờ phê duyệt giữ session của nó cho lần approve (`agent.rs:117-130`).
+đang chờ phê duyệt giữ session của nó cho lần approve (`agent.rs:432-445`).
 
 Một interrupt chưa có câu trả lời trả về `WorkflowError::Suspended`;
 `run_workflow` khi đó lưu workflow với trạng thái `awaiting_input` cùng câu hỏi,
 kể cả khi hàm đã bỏ qua lỗi đó. Các câu trả lời nằm trong
 `WorkflowOptions::resume` theo khóa, mỗi câu dùng một lần, nên các interrupt trong một
-vòng lặp cần khóa khác nhau (`crates/linch-ext/src/workflow/interrupt.rs:14-40`).
+vòng lặp cần khóa khác nhau (`crates/linch-ext/src/workflow/interrupt.rs:14-49`).
 
 ### Kết thúc
 
 Khi kết thúc, `run_workflow` ghi trạng thái: `awaiting_input` kèm
 interrupt, nếu không thì `completed` hoặc `failed`. Mất lease thì không ghi gì, vì
-một process khác sở hữu workflow (`engine.rs:75-82`). `deadline` bỏ hàm đi
+một process khác sở hữu workflow (`engine.rs:241-248`). `deadline` bỏ hàm đi
 và làm run thất bại với `Timeout`; các step đã xong vẫn nằm trong journal.
 `cancel` dừng workflow ở lời gọi kế tiếp sẽ chạy công việc thật, trong khi
 các lần phát lại vẫn trả về. Drop future là một sự cố: trạng thái vẫn là
@@ -204,14 +204,18 @@ các lần phát lại vẫn trả về. Drop future là một sự cố: trạn
 
 ### Journal store và lease
 
-`JournalStore` (`journal.rs:123`) có `claim`, `load`, `append` và
+`JournalStore` (`journal.rs:178`) có `claim`, `load`, `append` và
 `set_status`. Lease theo mô hình của lõi: `claim` luôn thắng, tạo
 workflow khi nó mới, và cộng 1 vào epoch; mọi lần ghi dưới epoch cũ hơn
 thất bại với `LeaseLost`. Không có hết hạn và không có heartbeat, nên hãy giữ một
 runner cho mỗi workflow, ví dụ bằng một job queue. Mọi trạng thái đều có thể được claim
 lại: một workflow thất bại resume từ journal của nó và một workflow đã hoàn thành phát
 lại đến cuối (`journal.rs:44-59`). Một workflow đã suspend không giữ process nào; bất kỳ
-process nào cũng có thể đọc câu hỏi của nó bằng `load`.
+process nào cũng có thể đọc câu hỏi của nó bằng `load`. `claim` cũng nhận principal mà các lời gọi của workflow hành động
+thay: lần claim đầu lưu nó (cột `linch_ext_workflows.principal`, migration
+`0002_workflow_principal`), và một lần claim sau phải nêu đúng principal đó, đầy đủ, nếu không nó thất bại với
+`JournalStoreError::PrincipalMismatch` và không đổi gì (rule `claims_keep_the_principal` của bộ
+conformance). Một workflow được lưu trước khi có cột đó được đọc như không có principal.
 
 | Store | Ghi chú |
 |---|---|
@@ -219,7 +223,7 @@ process nào cũng có thể đọc câu hỏi của nó bằng `load`.
 | `PgJournalStore` (feature `postgres`) | Các bảng `linch_ext_workflows` và `linch_ext_workflow_records`; các migration được ghi trong `linch_ext_migrations` (`crates/linch-ext/src/postgres.rs:14`). Mỗi lần ghi là một câu lệnh; một lần append record khóa hàng workflow `FOR SHARE` dưới epoch của lease, nên nó được ghi trước một lần claim cạnh tranh hoặc không ghi gì (`crates/linch-ext/src/workflow/postgres.rs:1-7`). Các lần ghi chạy ở mức cô lập mặc định của pool; trên `READ COMMITTED`, một lần ghi đã chờ một claim sẽ thất bại với lỗi serialization (`40001`) khi claim commit, không ghi gì, và chạy lại, tối đa ba lần thử, nên một claim vẫn thắng và một lần ghi bị fence là `LeaseLost` (`postgres.rs:45-74`). JSON là `TEXT` để một giá trị được phát lại đọc ra chính xác |
 
 Mọi store đều đạt `workflow::conformance::journal_store_suite`
-(`crates/linch-ext/src/workflow/conformance.rs:25`).
+(`crates/linch-ext/src/workflow/conformance.rs:33`).
 
 ### Workflows qua RPC
 

@@ -66,7 +66,7 @@ encoding.
 | `skill_completed` | `SkillCompletedEvent`, `kinds/skills.rs:35` | yes | yes | |
 | `subagent` | `SubagentEvent`, `event/mod.rs:118` | as wrapped | as wrapped | See [subagent wrapping](#subagent-wrapping) |
 | `child_run_status` | `ChildRunStatusEvent`, `kinds/suspend.rs:66` | yes | yes | |
-| `workflow` | `WorkflowEvent`, `kinds/skills.rs:76` | yes | yes | Never in a run's log: `linch-ext` workflows hand it to their event sink ([extensions](./ext.md)) |
+| `workflow` | `WorkflowEvent`, `kinds/skills.rs:80` | yes | yes | Never in a run's log: `linch-ext` workflows hand it to their event sink ([extensions](./ext.md)) |
 | `verification` | `VerificationEvent`, `kinds/control.rs:209` | yes | yes | The answer gates (`runner/structured.rs`): the output-schema check, `verifier` `output_schema`; a built-in verifier, its `name`; a `stop` hook's retry under `spec.verification`, its `policy_id` (`runner/hooks.rs`). `retry` is staged with the feedback beside it, `stop` in the terminal write, `exhausted` with the accepted answer. A resume counts the retries spent from these, the schema's apart from the rest |
 | `hook` | `HookEvent`, `kinds/hook.rs:14` | no | yes | |
 | `error` | `ErrorEvent`, `kinds/lifecycle.rs:90` | yes | yes | |
@@ -112,7 +112,7 @@ is classified.
 |---|---|---|
 | `StreamOnly` | `partial_assistant`, `tool_progress`, `hook` | `Journal::stage` returns it at once with the last durable seq and never stores it (`crates/linch-core/src/journal.rs:136-143`). Tool progress goes straight to the stream's outbox (`crates/linch-core/src/runner/sink.rs:184-189`) |
 | `Both` | every other known kind, and `IgnorableEvent` | Staged with the next seq, held until the next barrier write, then delivered in seq order (`journal.rs:328-334`) |
-| `JournalOnly` | the three `model_call_*` kinds | Staged with the next seq and stored like `Both`, but never delivered. `Agent::events` leaves them out too (`crates/linch-core/src/agent.rs:380-396`), and so does the RPC method `run.events`, which calls it |
+| `JournalOnly` | the three `model_call_*` kinds | Staged with the next seq and stored like `Both`, but never delivered. `Agent::events` leaves them out too (`crates/linch-core/src/agent.rs:401-417`), and so does the RPC method `run.events`, which calls it |
 
 The journal-only records are what resume reads to settle a model call it
 may already have paid for (`crates/linch-core/src/journal/reconcile.rs`).
@@ -210,13 +210,13 @@ the client's classes.
 
 `python/src/linch_rust/events.py` has one frozen dataclass per delivered
 kind, with the wire name as the class variable `type`, gathered in the
-`Event` union (`events.py:349`) and the `_KINDS` table (`events.py:379`).
+`Event` union (`events.py:350`) and the `_KINDS` table (`events.py:380`).
 
-- `decode_event` (`events.py:436`) builds the class of the `type`, passing
+- `decode_event` (`events.py:437`) builds the class of the `type`, passing
   only the members the class has, so a member the client does not know is
   dropped. A `subagent` event decodes its child the same way. Any other
-  `type` becomes `UnknownEvent(type, raw)` (`events.py:342`).
-- `decode_envelope` (`events.py:454`) reads `seq`, `run_id`, `ts_ms` and
+  `type` becomes `UnknownEvent(type, raw)` (`events.py:343`).
+- `decode_envelope` (`events.py:455`) reads `seq`, `run_id`, `ts_ms` and
   `event`, and raises `LinchError` for a `v` other than its `WIRE_VERSION`
   (1, `events.py:19`), a missing one included. It does not read
   `ignorable`.

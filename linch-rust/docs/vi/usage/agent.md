@@ -172,9 +172,10 @@ có, trừ `bash`.
 | `stores` | `{"type": "memory"}` | Nơi run và session được lưu ([Kho lưu trữ](./stores.md)) |
 | `workspace` | không có: không có workspace tool | Một thư mục đã tồn tại, là gốc của `Read`, `Write`, `Edit`, `Grep`, `Glob`, `Bash`, `BashOutput` và `BashKill` ([Tool](./tools.md#workspace-tool)). Đường dẫn tương đối được phân giải theo thư mục làm việc của server, cũng chính là của process này |
 | `bash` | `True` | Workspace tool có gồm `Bash`, `BashOutput` và `BashKill` hay không. Không dùng tới nếu không có workspace |
-| `execution` | `local`: `Bash` chạy với tư cách người dùng của server | Nơi `Bash` chạy: một `SandboxExecution` (Landlock, seccomp, rlimit) hoặc một `DockerExecution` ([Sandbox](./sandbox.md)). Là một phần của hợp đồng run trừ khi là `local` |
+| `execution` | `local`: `Bash` chạy với tư cách người dùng của server | Nơi `Bash` chạy: một `SandboxExecution` (Landlock, seccomp, rlimit), một `DockerExecution` ([Sandbox](./sandbox.md)) hoặc một `RemoteExecution` chạy lệnh trong client của bạn ([Thực thi từ xa](./remote-execution.md)). Là một phần của hợp đồng run trừ khi là `local` |
 | `ask_user` | `False` | Model có `AskUser` hay không; tool này tạm dừng run cho đến khi bạn trả lời ([Tool](./tools.md#hỏi-người-dùng)) |
 | `schedule_tools` | `False` | Model có `CreateSchedule`, `ListSchedules` và `CancelSchedule` hay không; các tool này lập lịch các run của agent này; cần một tenant có `max_schedules` ([Scheduler](./scheduler.md#để-model-lập-lịch)) |
+| `memory` | không có | Bộ nhớ dài hạn trong store: model có `MemorySave`, `MemorySearch` và `MemoryDelete`, và có thể được cho xem các kết quả khớp nhất trước mỗi request, `{"scope"?, "recall"?, "max_memories"?, "max_memories_per_scope"?}` ([Bộ nhớ](./memory.md#bộ-nhớ-dài-hạn-có-sẵn)) |
 | `permissions` | mode `default`, project root là workspace (hoặc `/`) | Lời gọi nào chạy, hỏi hay bị từ chối ([bên dưới](#permissions), [Bảo mật](./security.md#permission-modes)) |
 | `mcp_servers` | `[]` | Các MCP server được kết nối lần lượt khi agent được mở ([bên dưới](#mcp_servers)) |
 | `skills` | `False` | Tool `Skill`, với skill `verify` tích hợp sẵn và các skill trong `config_dir/skills` ([Skill](./skills.md)) |
@@ -189,6 +190,7 @@ có, trừ `bash`.
 | `deep_agent` | không có | Preset deep agent ([bên dưới](#deep_agent)) |
 | `profile` | không có | Một vai trò miền nghiệp vụ có phiên bản cho các run của agent ([bên dưới](#profile)) |
 | `max_provider_concurrency` | không có: không giới hạn | Số lời gọi provider tối đa mà các run của nó, và của các agent trên cùng key và endpoint provider, thực hiện cùng lúc; phần còn lại chờ đến lượt ([Provider](./providers.md#limit-concurrent-calls)). Không thuộc hợp đồng của run |
+| `pricing` | không có: bảng có sẵn | USD cho mỗi triệu token theo đúng model id, cho model mà bảng không có hoặc để thay giá của nó ([Giám sát](./monitoring.md#chi-phí-được-tính-thế-nào)) |
 
 ## `spec`
 
@@ -219,6 +221,8 @@ có, trừ `bash`.
 | `truncation_recovery` | không có: câu trả lời bị cắt là câu cuối | Tiếp tục một câu trả lời văn bản bị giới hạn đầu ra cắt, `{"max_attempts"?, "feedback"?}` ([Memory](./memory.md#cut-off-answers)) |
 | `loop_guard` | bật: 3 lời gọi giống nhau với cùng kết quả, 10 input giống nhau, 3 batch lỗi, 25 lượt không có lời gọi | Kết thúc một run bị kẹt, `{"max_identical_tool_calls"?, "max_identical_inputs"?, "max_consecutive_failures"?, "max_idle_turns"?}`, là `LoopGuard` của Python ([bên dưới](#loop_guard)) |
 | `policy` | không có: không kiểm tra gì | Các tool chỉ được chạy sau khi những tool khác đã thành công, và điều một câu trả lời cuối cùng phải thỏa, `{"prerequisites"?, "gates"?, "max_corrections"?}` ([bên dưới](#policy)) |
+| `tool_retry` | không có: lời gọi lỗi không được chạy lại | Chạy lại một tool sau kết quả lỗi có `code` nằm trong danh sách, chỉ với tool tự khai là idempotent, `{"max_attempts"?, "base_delay_ms"?, "max_delay_ms"?, "retry_on"?, "tools"?}` ([Tool](./tools.md#tool_retry)) |
+| `tool_cache` | không có: mọi lời gọi đều chạy | Trả một lời gọi giống hệt của tool đọc có tên từ cache, `{"tools", "ttl_ms"?, "max_entries"?, "max_value_bytes"?, "invalidate_on_write"?, "scope"?}` ([Tool](./tools.md#tool_cache)) |
 
 ### System block
 
@@ -351,7 +355,7 @@ lặp: `BashOutput` có thể đọc một lệnh nền đang chạy bao nhiêu 
 câu trả lời còn đổi; cùng một câu trả lời `max_idle_turns` lần liên tiếp thì run kết
 thúc (một lệnh không in gì và không bao giờ xong), và đọc lại một lệnh đã xong là một
 lần lặp ngay (`BashOutput` đánh dấu nó đã xong trong metadata của kết quả). Một [host
-tool](./tools.md#host-tools) khai báo `polls=True`, và một [MCP
+tool](./tools.md#host-tool) khai báo `polls=True`, và một [MCP
 server](#mcp_servers) liệt kê các tool poll của nó trong `polls`; kết quả của chúng báo
 một lần poll đã xong bằng metadata `{"poll_done": true}`.
 `force_final_answer` của Python không có. Một tenant từ xa không được nâng

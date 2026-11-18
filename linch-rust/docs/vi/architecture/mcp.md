@@ -12,7 +12,7 @@ server, kèm một supervisor chạy nền giữ registry đồng bộ với nó
 Linch bản Python mô tả các tool MCP của nó cho người dùng ở
 [usage/tools](../../../../docs/usage/tools.md#mcp-tools). Client Rust được xây trên
 `rmcp`, SDK Rust chính thức, và nói giao thức 2026-07-28 với phương án dự phòng là
-handshake `initialize` của 2025-11-25. SSE kiểu cũ, resource,
+handshake `initialize` của 2025-11-25. Transport HTTP+SSE, resource,
 prompt, sampling, elicitation và OAuth không được hỗ trợ
 (`crates/linch-mcp/src/lib.rs:22-24`). Crate này chỉ dành cho Unix: một server stdio
 dẫn đầu process group của riêng nó.

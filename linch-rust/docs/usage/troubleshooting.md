@@ -11,10 +11,14 @@ exception class tells you its family:
 
 | Class | Codes | Raised by |
 |---|---|---|
-| `ProtocolError` | -32700 to -32600 | A config or declaration the server cannot read |
-| `OpenError` | -32010 to -32015 | `open_agent`: the config, provider, stores or an MCP server failed |
-| `RunError` and its subclasses | -32020 to -32035 | The end of a run's stream, or `agent.events` |
+| `ProtocolError` | -32700, -32600, -32601, -32602, -32603 | A config or declaration the server cannot read (-32602); a method the server binary lacks (-32601: the binary is older than the client); a bug in the server (-32603: report it with the server's stderr) |
+| `OpenError` | -32010 to -32015 | `open_agent`: the config, provider, stores or an MCP server failed; -32012 is a run contract that could not be digested (report it) |
+| `RunError` and its subclasses | -32020 to -32034 and -32038 | The end of a run's stream, or `agent.events` |
 | `AgentNotFound`, `RunBusy` | -32001, -32002 | The call itself |
+| `Unauthenticated`, `NotAllowed`, `LimitReached` | -32003, -32004, -32005 | A remote server's token, tenant checks and caps ([A remote server](#a-remote-server-serverconnect)) |
+| `ProviderInfoError` and its subclasses | -32035 to -32037 | `provider.models` and `provider.model`, asked before an agent opens |
+| `SchedulerError` and its subclasses | -32040 to -32044 | Schedule and job calls ([Scheduler](#schedules-and-background-runs)) |
+| `WorkflowError` and its subclasses | -32045 to -32049 | Workflow calls ([Workflows](#workflows)) |
 | `ConnectionClosed` | none | Any call or stream, when the server went away |
 | `LinchError` | none | The base of all of these, and misuse of `Server` |
 
@@ -93,6 +97,9 @@ lists them.
 | `invalid agent: the model must not be blank` | -32011 | `spec.model` is empty | Set a model |
 | `invalid agent: the namespace must not be blank` | -32011 | `namespace` is empty | Set a namespace |
 | `invalid agent: workers need subagents` | -32011 | `workers` without `subagents: True` | Turn on `subagents` |
+| `budget.max_cost_usd needs a price for the model "<model>", which has none: set ...` | -32011 | A USD cap on a model with no price, neither in the built-in table nor in `pricing`: the primary or a `fallback_models` entry (vLLM, DeepSeek, SGLang and llama.cpp have no built-in price). Before this was refused the cap never tripped | Set [`pricing`](./agent.md#budget) for the model, or cap `max_tokens` |
+| `call_timeout_ms must be at least 100 (milliseconds)` | -32011 | `spec.call_timeout_ms` under 100 (`0` ended every tool call with a timeout at once) | Use 100 or more, or leave it out |
+| `a tenant agent needs a bound on its runs: set spec.max_turns or a spec.budget cap (max_tokens or max_cost_usd), ...` (`NotAllowed`, `kind == "run_bound"`) | -32004 | A tenant's agent with neither `max_turns` nor a token or USD cap, `profile` and `deep_agent` profile included | Set `max_turns` or a budget cap ([Server](./server.md#what-admission-refuses-and-why)) |
 | `profile unusable: profile id must not be blank` | -32011 | A blank `profile.id` (or `version`, or `max_turns` below 1) | Fix the [profile](./profiles.md) |
 | `deep agent unusable: a durable deep agent needs durable stores; use the Postgres stores, or set durable to false for ephemeral use` | -32011 | A built-in deep agent profile on memory stores | Use Postgres stores, or `"deep_agent": {"durable": False}` |
 | `deep agent unusable: unknown deep-agent profile "<name>"; choose one of: balanced, coordinator, unbounded` | -32011 | A misspelt profile name | Use a built-in name or a full profile dict |
@@ -126,7 +133,7 @@ These end a run's stream: iterating the `Run`, or `run.result()`, raises them.
 | Exception | Message | Cause | Fix |
 |---|---|---|---|
 | `SessionBusy` (-32030) | `session <id> is busy with run <run id>` | The session has a run that is running or waiting for an approval or an answer | Resume, approve, answer or cancel `busy.run_id` first, or queue the prompt ([Runs](./runs.md#one-live-run-per-session)) |
-| `RunError` (-32023) | `conflict: run <id> already exists in <namespace>` | `agent.run(..., run_id=...)` reused an id | Use a fresh id, or `resume` the existing run |
+| `RunExists` (-32023) | `conflict: run <id> already exists in <namespace>` | `agent.run(..., run_id=...)` reused an id | Use a fresh id, or `resume` the existing run |
 | `RunNotFound` (-32021) | `run <id> not found in namespace <namespace>` | No such run in the agent's stores; with memory stores, a different `Agent` handle started it, or the server restarted | With memory stores use the handle that started the run; with Postgres check the namespace and DSN |
 | `RunTerminal` (-32026) | `run <id> is Completed and cannot continue` | `resume`, `approve` or `answer` of a finished run, a cancelled one included (`data["status"]` is `aborted`); `data["status"]` is its status | Start a new run in the session |
 | `ContractMismatch` (-32025) | `run <id> has contract <expected>, this agent has <found>` (the names of `data`'s keys) | The agent's spec, tools, callbacks or (when it is not the default) permission policy differ from the ones the run started with; after an upgrade, a run started by an older binary under a non-default policy | Reopen with the original config, or let the run finish first; a suspended run can still be ended with `agent.cancel` ([The run contract](./agent.md#the-run-contract)) |
@@ -136,6 +143,10 @@ These end a run's stream: iterating the `Run`, or `run.result()`, raises them.
 | `RunLeased` (-32033) | `run <id> is held by "<owner>" for up to <duration> more` | Another server (another agent handle) drives the run on Postgres, or crashed less than a lease ago; from `agent.cancel`, an approve elsewhere has just claimed the suspended run | Wait for that run to stop, or retry after `.expires_in` seconds ([Stores](./stores.md#run-leases)) |
 | `LeaseLost` (-32022) | `lease on run <id> lost (epoch <n>)` | Another server took the run over (this one stalled past its lease) or failed it; from `agent.cancel`, an approve or answer claimed the run after the cancel did, and it goes on | Nothing to fix here: the run's new driver has it. If this server was paused, check for long GC or network pauses, or raise `stores.lease_ttl_ms` |
 | `InvalidAnswer` (-32032) | `run <id> cannot take this answer: <reason>` (the reason in `.reason`) | `agent.answer` named a request that is not pending, left a question unanswered, or gave a list to a single-select question | Nothing was written and the run still waits; answer again ([Tools](./tools.md#ask-the-user)) |
+| `InvalidToolChoice` (-32034) | `run <id> was not started: its tool_choice is unusable: <reason>` | `agent.run(..., tool_choice=...)` names a tool the run does not offer, or the provider refuses it | Nothing was written; fix the choice ([Structured output](./structured-output.md)) |
+| `InvalidSteer` (-32038) | `run <id> cannot take this steer: <reason>` (`.reason`) | `agent.steer` with blank text, text over 16 KiB, an unusable id, or a run that is idle (queued, or running with no server driving it) | Nothing was written; fix the text, or resume the run first ([Runs](./runs.md#steer)) |
+| `LimitReached` (-32005), `kind == "steers"` | `at most 16 steers at once; try again once one ends` | The run has 16 steers it has not read yet | Wait for the run's next step, then steer again |
+| `RunError` (-32020, -32024, -32028) | the store's or the journal's own text | A store failure, a failed journal write, or durable state that does not fit together; a dropped database connection mid-run is -32020 | The run is at its last durable state: resume it; report -32028 |
 
 Raised by the call itself:
 
@@ -155,12 +166,44 @@ A run that fails inside, without an exception, ends with an `error` event and a
 | `error["message"]` | Cause | Fix |
 |---|---|---|
 | `max turns exceeded` (after a `loop_guard` event) | The run reached `spec.max_turns` | Raise the limit, or start a new run to continue |
+| `max_cost_usd cannot count a call the pricing has no price for; set a price for the model that served it or cap max_tokens` (`BudgetAccountingError`) | A cost-capped run whose provider served a model the pricing lacks (an id the provider reports, not `spec.model`) | Key `pricing` by the ids the provider reports, or cap `max_tokens` ([Agent config](./agent.md#budget)) |
 | fragment: `provider returned HTTP <status>:` | The provider refused the call; `error["retryable"]` says whether trying again can help | Check the key and model for 401, 403 or 404; for 408, 429 and 5xx the run already retried up to [`spec.provider_retry`](./providers.md#failures-and-retries)'s `max_attempts`; add `fallback_models` or retry later |
 | fragment: `prompt exceeds the model's context window:` (`kind` `context_length`) | The provider refused the prompt as longer than the model's context window. Before this was recognized it read `provider returned HTTP 400:` | Set [`spec.compaction`](./memory.md#when-the-prompt-does-not-fit): the run then shortens its view and calls again |
 | `the prompt exceeds the model's context window, and the compaction it forced could not shorten it` | With `spec.compaction` set, nothing was left to fold, `max_forced` was spent, or the forced summary failed | Lower `keep_recent_turns`, turn on `micro`, raise `max_forced`, or keep tool results and `context_build` blocks smaller |
 | fragment: `provider connect error:` (`kind` `connect`) | The connection was never made (refused, DNS, TLS, connect timeout), so the request never went out | Check the provider's `base_url` and the network; the run already retried it |
 | fragment: `provider transport error:` (`kind` `transport`) | The request went out but no answer came back, or the stream broke | The run already retried it; under a capped `budget` it cannot, since the call may have been billed |
 | `invalid provider request: scripted provider ran out of turns after <n>` | A scripted test needs more turns than it has | Add the missing turns |
+
+## Schedules and background runs
+
+| Raised | Cause | Fix |
+|---|---|---|
+| `NotBackground` (-32040) | `schedule.create` or `job.enqueue` for an agent that cannot run in the background; `.reason` is `memory_store`, `host_tools`, `callbacks` or `remote_execution` (a `remote` execution backend answers on the client's connection) | Use Postgres stores, no host tools or callbacks, and a `local`, `sandbox` or `docker` backend ([Scheduler](./scheduler.md#which-agents-can-run-in-the-background)) |
+| `ScheduleNotFound` (-32041), `ScheduleExists` (-32042), `JobNotFound` (-32043) | An unknown schedule, a taken schedule id, an unknown or pruned job | Check the id and the agent's namespace |
+| `InvalidSchedule` (-32044) | A cron pattern that does not parse or never fires, an unknown time zone, an interval out of range, or both or neither of `cron` and `interval_ms`; `.reason` | Fix the timing |
+| A job fails with a reason naming `max_turns` and a budget | A stored definition made before a tenant had to bound its runs (`run_bound`); each fire of its schedule fails the same way, and `job.list` shows the reason | Set `max_turns` or a budget cap, open the agent again and schedule it anew |
+| A job fails with `the agent definition does not decode` | The stored definition no longer decodes; the cause is in the server's log (`LINCH_LOG`) | Open the agent again and schedule it anew |
+
+## Workflows
+
+| Raised | Cause | Fix |
+|---|---|---|
+| `WorkflowHeld` (-32045) | Another client, connection or server drives the workflow, or a client that crashed has not been noticed yet (about a minute: [liveness](./server.md#liveness)) | Retry after a minute |
+| `WorkflowBudgetExceeded` (-32046) | The `budget` is spent; or `data["kind"] == "unpriced"`: a `max_cost_usd` budget on a model with no price | Raise the budget and start the same `run_id` again; set `pricing` or cap `max_tokens` |
+| `WorkflowCallFailed` (-32047) | A `wf.agent` call's run failed, was aborted, timed out or waits for an approval; `.kind` | Read `.kind`; the finished calls are journaled |
+| `WorkflowNotFound` (-32048) | A call for a workflow this connection does not drive | Send `workflow.start` first (`run_workflow` does) |
+| `WorkflowNoJournal` (-32049) | `resume` answers for a workflow whose journal holds nothing, as with a memory-store agent on a new connection | Start it without `resume`, or use Postgres stores |
+| `NotAllowed` (-32004), `kind == "workflow_principal"` | The id was started for another principal | Pass the same principal, or start a new `run_id` ([Workflows](./workflows.md#acting-for-a-principal)) |
+| `NotAllowed` (-32004), `kind == "workflow"` | The tenant has no `allow.workflow` | Ask the operator ([Workflows](./workflows.md#admission)) |
+| `ConnectionClosed` after a long synchronous host tool | A WebSocket client whose event loop was blocked for over 60 s answered no ping, so the server ended the connection | Run a long blocking tool in a thread (`asyncio.to_thread`) ([Liveness](./server.md#liveness)) |
+
+## Provider questions
+
+| Raised | Cause | Fix |
+|---|---|---|
+| `ModelsUnsupported` (-32035) | `provider.models` or `provider.model` for a provider with no model list (`scripted`); `.provider` | Ask another provider |
+| `ModelNotFound` (-32036) | The provider's list lacks the model; `.truncated` says the list was cut short | Check the id; with `.truncated` it may exist past the cut |
+| `ProviderRequestFailed` (-32037) | `.kind` is `unreachable`, `status` (with `.status`), `invalid_request` or `other`; the message is fixed per kind and never holds the key, URL or the vendor's words | Check the `base_url`, the key and the network; the server's log has more with `LINCH_LOG=info` |
 
 ## Tools
 

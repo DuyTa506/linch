@@ -91,10 +91,11 @@ Một client stdio không có tenant và không có giới hạn.
 
 ## Agent nào chạy nền được
 
-Agent bạn lập lịch cần các store Postgres và không có host tool hay callback: một run nền
+Agent bạn lập lịch cần các store Postgres, không có host tool hay callback, và không có
+backend thực thi `remote` cho `Bash` (lệnh của nó chạy trên máy của client): một run nền
 không có client nào để gọi ngược lại. Nếu không, lời gọi ném `NotBackground` với `reason` là
-`memory_store`, `host_tools` hoặc `callbacks`. Hãy cho agent các tool workspace hoặc MCP
-thay vào đó.
+`memory_store`, `host_tools`, `callbacks` hoặc `remote_execution`. Hãy cho agent các tool
+workspace hoặc MCP, và một backend `local`, `sandbox` hay `docker`, thay vào đó.
 
 Một lịch luôn chạy cấu hình mà nó được tạo cùng; muốn đổi thì mở lại agent và tạo một lịch
 mới.
@@ -326,7 +327,7 @@ kích hoạt, chạy cấu hình cũ, và vẫn tính vào `max_schedules`. Hãy
 | Từ chối | Khi nào |
 |---|---|
 | `NotAllowed`, `kind == "schedule_tools"` | Allowlist của tenant không có `max_schedules` (từ chối theo mặc định), hoặc kết nối là cục bộ: một server stdio không chạy worker, và một client cục bộ không có mức trần |
-| `NotBackground`, `.reason` | Store bộ nhớ, host tool hoặc callback: các lần kích hoạt không thể chạy cùng agent đó |
+| `NotBackground`, `.reason` | Store bộ nhớ, host tool, callback hoặc backend thực thi từ xa: các lần kích hoạt không thể chạy cùng agent đó |
 
 Một worker phải phục vụ cơ sở dữ liệu của agent ([Chạy một worker](#chạy-một-worker)); server
 không thấy được một worker ở process khác, nên `max_schedules` là lời của operator rằng có
@@ -368,7 +369,7 @@ event của run sẽ bỏ qua nó. Các span OpenTelemetry của run mang `linch
 
 | Được ném | Khi |
 |---|---|
-| `NotBackground` (-32040) | Agent có kho lưu trữ trong bộ nhớ, host tool hoặc callback; `.reason` |
+| `NotBackground` (-32040) | Agent có kho lưu trữ trong bộ nhớ, host tool, callback hoặc backend thực thi `remote`; `.reason` |
 | `ScheduleNotFound` (-32041) | `pause_schedule` hoặc `resume_schedule` với một id mà namespace không có |
 | `ScheduleExists` (-32042) | `create_schedule` với một id mà namespace đã có |
 | `JobNotFound` (-32043) | `job` với một id mà namespace không có, hoặc lịch sử của nó đã bị dọn |

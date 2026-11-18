@@ -14,7 +14,7 @@ server; nó chỉ gọi ngược lại client cho các host tool và cho các
 callback mà client đã khai báo.
 
 Chính giao thức được đặc tả trong crate docs của `linch-rpc`
-(`crates/linch-rpc/src/lib.rs:1-374`): framing, mọi method, request
+(`crates/linch-rpc/src/lib.rs:1-573`): framing, mọi method, request
 và notification của server, và bảng lỗi. Trang này giải thích cách mã
 triển khai nó, các giới hạn và kiểm tra nằm ở đâu, và cách thay đổi
 nó. [Trang hướng dẫn dùng server](../usage/server.md) chỉ cách chạy nó và
@@ -50,25 +50,25 @@ process của chính mình, nên không có wire protocol, tenant hay allowlist.
 
 ## Method và message
 
-Mỗi tên method là một hằng số `method::` (`crates/linch-rpc/src/protocol.rs:25-55`),
-và `Server::dispatch` (`crates/linch-rpc/src/server.rs:294-312`) ánh xạ từng tên
+Mỗi tên method là một hằng số `method::` (`crates/linch-rpc/src/protocol.rs:28-66`),
+và `Server::dispatch` (`crates/linch-rpc/src/server.rs:304-322`) ánh xạ từng tên
 tới handler của nó. Các kiểu params từ chối trường không biết; `OpenParams` tách
 `tools` và `callbacks` ra và đọc phần còn lại thành một `AgentConfig` nghiêm ngặt
 (`crates/linch-rpc/src/protocol/open.rs:13-28`).
 
 | Method | Params | Handler | Kết quả |
 |---|---|---|---|
-| `connection.auth` | `AuthParams` (`protocol.rs:62`) | `login` (`crates/linch-rpc/src/server/login.rs:24`), chỉ là message đầu tiên trên socket; ở nơi khác là `-32600` | `Authenticated` `{tenant}` |
-| `agent.open` | `OpenParams` | `Server::open` (`crates/linch-rpc/src/server/agents.rs:19-48`) | `AgentOpened` `{agent, contract, skipped?}` |
-| `agent.close` | `CloseParams` | `agents.rs:51-75`; `-32002` khi kết nối đang điều khiển một run của nó | `{}` sau khi các MCP server của nó đã tắt |
-| `session.close` | `SessionCloseParams` | `agents.rs:76-86`: `Agent::close_session` (quên các lần đọc của session, kill các lệnh `Bash` chạy nền của nó) | `{}` |
-| `run.start` | `StartParams` (`protocol.rs:154`) | `Server::start` (`crates/linch-rpc/src/server/run.rs:20-43`) | `RunAccepted` `{run_id}`, rồi các notification |
-| `run.resume` | `ResumeParams` (`protocol.rs:178`) | `run.rs:45-50`, qua `claim` | như trên |
-| `run.approve` | `ApproveParams` (`protocol.rs:191`) | `run.rs:52-58`, qua `claim` | như trên |
-| `run.answer` | `AnswerParams` (`protocol.rs:219`) `{agent, run_id, answers, principal?}`, `answers` được khóa theo `request_id` | `run.rs:61-67`, qua `claim` | như trên |
+| `connection.auth` | `AuthParams` (`protocol.rs:73`) | `login` (`crates/linch-rpc/src/server/login.rs:24`), chỉ là message đầu tiên trên socket; ở nơi khác là `-32600` | `Authenticated` `{tenant}` |
+| `agent.open` | `OpenParams` | `Server::open` (`crates/linch-rpc/src/server/agents.rs:20-49`) | `AgentOpened` `{agent, contract, skipped?}` |
+| `agent.close` | `CloseParams` | `agents.rs:52-80`; `-32002` khi kết nối đang điều khiển một run của nó | `{}` sau khi các MCP server của nó đã tắt |
+| `session.close` | `SessionCloseParams` | `agents.rs:81-92`: `Agent::close_session` (quên các lần đọc của session, kill các lệnh `Bash` chạy nền của nó) | `{}` |
+| `run.start` | `StartParams` (`protocol.rs:191`) | `Server::start` (`crates/linch-rpc/src/server/run.rs:20-43`) | `RunAccepted` `{run_id}`, rồi các notification |
+| `run.resume` | `ResumeParams` (`protocol.rs:215`) | `run.rs:45-50`, qua `claim` | như trên |
+| `run.approve` | `ApproveParams` (`protocol.rs:228`) | `run.rs:52-58`, qua `claim` | như trên |
+| `run.answer` | `AnswerParams` (`protocol.rs:256`) `{agent, run_id, answers, principal?}`, `answers` được khóa theo `request_id` | `run.rs:61-67`, qua `claim` | như trên |
 | `run.steer` | `SteerParams` `{agent, run_id, text, id?, principal?}` | `Server::steer_run` (`run.rs`): `Agent::steer`. Một run mà process này điều khiển nhận nó qua inbox và trả lời sau lần flush của bước kế tiếp; một run bị tạm dừng được claim, ghi vào rồi đặt lại trong trạng thái tạm dừng; một run mà process khác giữ lease là `-32033` | `Steered` `{queued: true, id}` |
 | `run.cancel` | `CancelParams` `{run_id, agent?}` | `Server::cancel` (`run.rs`): hủy một run mà kết nối này điều khiển bằng token của nó; nếu không, khi có `agent`, kết thúc một run bị tạm dừng bằng `Agent::cancel`, run được tính là đang được điều khiển trong lúc đó nên một approve ở đây nhận `-32002` | `{cancelled}` |
-| `run.events` | `EventsParams` | `agents.rs:87-94`: `Agent::events` | `{events}`, các envelope bền vững sau `after_seq` |
+| `run.events` | `EventsParams` | `agents.rs:93-100`: `Agent::events` | `{events}`, các envelope bền vững sau `after_seq` |
 | `provider.capabilities` | `ProviderModelParams` `{provider, model}`: một `provider` như trong cấu hình agent (`protocol.rs`) | `server/provider.rs`: `ProviderConfig::build_keyless`, `Provider::prepare`, `Provider::capabilities`; không cần key | `ProviderCapabilities` |
 | `provider.models` | `ProviderParams` `{provider}` | `server/provider.rs`: `ProviderConfig::build`, `Provider::list_models`; cần key | `{models}`, một `ModelInfo` cho mỗi model |
 | `provider.model` | `ProviderModelParams` | `server/provider.rs`: `Provider::model_info` | `ModelInfo`; `-32036` khi danh sách không có nó |
@@ -90,8 +90,8 @@ tới handler của nó. Các kiểu params từ chối trường không biết;
 | `job.list` | `JobListParams` | `server/schedule.rs` | `{jobs}` |
 
 Server gửi ba notification. `workflow.event` `{run_id, event}` mang từng `WorkflowEvent` của một workflow mà kết nối đang drive, theo thứ tự, trước câu trả lời của lời gọi tạo ra nó. Hai cái còn lại: `run.event` `{run_id, envelopes}`
-(`RunEvent`, `protocol.rs:256`) mang một hoặc nhiều envelope liên tiếp
-của một run; `run.end` `{run_id, error?}` (`RunEnd`, `protocol.rs:266`) là
+(`RunEvent`, `protocol.rs:293`) mang một hoặc nhiều envelope liên tiếp
+của một run; `run.end` `{run_id, error?}` (`RunEnd`, `protocol.rs:303`) là
 message cuối cùng của một run. Nó cũng gửi các request riêng: `tool.call`
 cho một host tool (`crates/linch-rpc/src/protocol/call.rs:12`,
 `crates/linch-rpc/src/server/host.rs:70`) và `hook.call` cho một callback
@@ -104,26 +104,61 @@ không bao giờ trùng với id số của client; một lời gọi thôi khô
 ### Lỗi
 
 `ErrorObject` là `{code, message, data?}`; bảng đầy đủ nằm trong crate
-docs (`lib.rs:328-364`) và các mã nằm trong `crates/linch-rpc/src/error.rs:24-100`.
+docs (`lib.rs:518-569`) và các mã nằm trong `crates/linch-rpc/src/error.rs:24-183`.
 
-| Mã | Đến từ |
-|---|---|
-| -32700, -32600, -32601, -32602, -32603 | JSON-RPC: dòng, đối tượng request, method, params; một panic |
-| -32001, -32002 | Một agent handle không biết; một run mà kết nối đã điều khiển, hoặc `agent.close` của một agent đang có một run |
-| -32003 | Message đầu tiên của socket không phải `connection.auth` với một token đã biết |
-| -32004 | Một kiểm tra tenant từ chối; `data.kind` nêu tên nó |
-| -32005 | Đạt một giới hạn và chưa có gì bắt đầu; `data: {kind, max}`, `kind` là một trong `runs`, `agents`, `connections`, `logins` (`limit_reached`), hoặc `provider_calls`, một tốc độ: tối đa `max` lời gọi `provider.models` và `provider.model` trong `per_seconds` (60) cho mỗi tenant (`rate_limited`) |
-| -32010 đến -32015 | `agent.open`: `BuildError`, provider, store và MCP server không khả dụng |
-| -32020 đến -32034, -32038 | Một run, trong `run.end`, và `run.events`: lỗi store, `RunError`, session bận, một `output_schema` hoặc `tool_choice` không dùng được (`-32034`), một câu trả lời không khớp (`-32032`, `data.reason`), một lease đã mất (`-32022`, từ một claim hoặc một lần ghi journal bị fence), một run mà process khác đang giữ lease (`-32033`, `data: {run_id, owner, expires_in_ms}`), một steer để trống, quá dài hoặc có id không dùng được (`-32038`, `data.reason`) |
-| -32035 đến -32037 | Các method provider: một provider không có danh sách model (`-32035`, `data.provider`), một model mà danh sách của nó không có (`-32036`, `data.model`, và `data.truncated` khi danh sách bị cắt), một request thất bại hoặc một câu trả lời lỗi (`-32037`, `data: {kind, status?}`, `kind` là một trong `unreachable` (kết nối, reset và timeout như nhau), `status`, `invalid_request`, `other`; message là một văn bản cố định cho mỗi kind, không bao giờ chứa key, URL hay lời của vendor). Thiếu key là `-32013` với `data.env`. Một tenant cần `allow.provider_info` và một `base_url` được cho phép (`-32004`, `kind` là `provider_info` hoặc `provider_base_url`) |
-| -32040 đến -32044 | Các method của scheduler: một agent không thể chạy nền (`-32040`, `data.reason` là `memory_store`, `host_tools` hoặc `callbacks`), một lịch không biết (`-32041`), một id lịch đã dùng (`-32042`), một job không biết (`-32043`), một timing không dùng được (`-32044`, `data.reason`) |
-| -32045 đến -32049 | Các method workflow: một client khác đang drive workflow (`-32045`), budget đã hết (`-32046`, `data: {spent_tokens, spent_usd, max_tokens?, max_cost_usd?}`, hoặc `data: {kind: "unpriced", model}` khi `max_cost_usd` không thể tính một model không có giá), một lời gọi agent không tạo ra kết quả (`-32047`, `data.kind` là `failed`, `aborted`, `timeout`, `approval` hoặc `invalid`), một lời gọi cho workflow mà kết nối này không drive (`-32048`), các câu trả lời `resume` cho một workflow mà journal không có gì (`-32049`); `workflow.status` của một id mà namespace của agent không có là `-32021`, và `workflow.start` của một id đã có với principal khác (hoặc không có, hoặc có ở chỗ trước đó không có) là `-32004`, `kind: workflow_principal`. Một tenant cần `allow.workflow` (`-32004`, `kind: workflow`, hoặc `workflow_budget` khi vượt mức trần của nó) và gặp `-32005` với `kind` là `workflows`, `agent_calls_in_flight` hoặc `journal_records` |
+| Mã | Hằng | Python | Ý nghĩa |
+|---|---|---|---|
+| -32700 | `PARSE_ERROR` | `ProtocolError` | Dòng không phải JSON |
+| -32600 | `INVALID_REQUEST` | `ProtocolError` | Không phải request object hợp lệ, hoặc là một batch |
+| -32601 | `METHOD_NOT_FOUND` | `ProtocolError` | Không có method như vậy |
+| -32602 | `INVALID_PARAMS` | `ProtocolError` | Params không khớp method: field lạ hoặc thiếu, sai kiểu |
+| -32603 | `INTERNAL_ERROR` | `ProtocolError` | Lỗi của server, gồm cả panic |
+| -32001 | `AGENT_NOT_FOUND` | `AgentNotFound` | Không agent nào đang mở có handle đó |
+| -32002 | `RUN_BUSY` | `RunBusy` | Connection đã điều khiển run đó, hoặc `agent.close` nêu một agent đang có run |
+| -32003 | `UNAUTHENTICATED` | `Unauthenticated` | Message đầu tiên của socket không phải `connection.auth` với token đã biết; server đóng connection |
+| -32004 | `NOT_ALLOWED` | `NotAllowed` | Một kiểm tra tenant từ chối; `data.kind` nêu tên nó (bảng trong [Server](../usage/server.md#những-gì-admission-từ-chối-và-lý-do)), trong đó có `run_bound` và `workflow_principal` |
+| -32005 | `LIMIT_REACHED` | `LimitReached` | Đã chạm một giới hạn và chưa có gì bắt đầu; `data: {kind, max}`, `kind` là một trong `runs`, `agents`, `connections`, `logins`, `schedules`, `jobs`, `workflows`, `agent_calls_in_flight`, `journal_records` hoặc `steers` (một run có 16 steer đang chờ), hoặc `provider_calls`, một tốc độ: tối đa `max` lời gọi `provider.models` và `provider.model` mỗi `per_seconds` (60) cho tenant |
+| -32010 | `BUILD_MISSING` | `OpenError` | `agent.open`: thiếu một binding bắt buộc |
+| -32011 | `BUILD_INVALID` | `OpenError` | `agent.open`: config không hợp lệ, hoặc lỗi workspace, policy hay tool. Trong đó có: `budget.max_cost_usd` trên một model không có giá (model chính hoặc một mục `fallback_models`; thông báo nêu tên model), `spec.call_timeout_ms` dưới 100, và `workflow.start` có `max_cost_usd` cho agent có model chưa có giá |
+| -32012 | `BUILD_CONTRACT` | `OpenError` | `agent.open`: không tính được digest của run contract |
+| -32013 | `PROVIDER_UNAVAILABLE` | `OpenError` | Key của provider chưa đặt (`data.env` nêu biến của nó), hoặc không dựng được client của provider |
+| -32014 | `STORE_UNAVAILABLE` | `OpenError` | Không kết nối hay migrate được Postgres |
+| -32015 | `MCP_UNAVAILABLE` | `OpenError` | Không kết nối được một MCP server trong config; `data.server` nêu tên nó |
+| -32020 | `STORE` | `RunError` | Một lỗi store không nằm trong danh sách dưới (cả một connection database rớt giữa run) |
+| -32021 | `NOT_FOUND` | `RunNotFound` | Không có run hay session như vậy; cũng là `run.report` và `workflow.status` của một id mà namespace của agent không có |
+| -32022 | `LEASE_LOST` | `LeaseLost` | Từ một claim hoặc một lần ghi journal bị fence: một process khác đã nhận run, hoặc làm nó thất bại. Run dừng ở đây mà không ghi |
+| -32023 | `CONFLICT` | `RunExists` | Một run id tự chọn đã được lưu |
+| -32024 | `JOURNAL` | `RunError` | Một lần ghi journal thất bại |
+| -32025 | `CONTRACT_MISMATCH` | `ContractMismatch` | Contract của agent khác contract của run; `data.expected` là contract mà run bắt đầu và `data.found` là của agent này |
+| -32026 | `TERMINAL` | `RunTerminal` | Run đã kết thúc; `data.status` là trạng thái cuối |
+| -32027 | `NOT_SUSPENDED` | `NotSuspended` | `run.approve` trên một run không chờ phê duyệt, hoặc `run.answer` trên một run không chờ input; host đã thử lại một trong hai thì tiếp tục run bằng `run.resume` |
+| -32028 | `RECONCILE` | `RunError` | Trạng thái bền vững không khớp nhau |
+| -32029 | `PROMPT_BLOCKED` | `PromptBlocked` | Một hook `user_prompt_submit` từ chối prompt; `data.reason` nói lý do. Chưa ghi gì |
+| -32030 | `SESSION_BUSY` | `SessionBusy` | Session đã có một run chưa kết thúc; `data: {session_id, run_id}` |
+| -32031 | `INVALID_OUTPUT_SCHEMA` | `InvalidOutputSchema` | `output_schema` của `run.start` không compile, hoặc root của nó không phải object; `data.reason` |
+| -32032 | `INVALID_ANSWER` | `InvalidAnswer` | Một `run.answer` không khớp các yêu cầu input đang chờ; `data.reason`. Run vẫn chờ input |
+| -32033 | `RUN_LEASED` | `RunLeased` | Một process khác điều khiển run và giữ lease còn sống; `data: {run_id, owner, expires_in_ms}` |
+| -32034 | `INVALID_TOOL_CHOICE` | `InvalidToolChoice` | `tool_choice` của `run.start` nêu một tool mà run không cung cấp, hoặc provider từ chối nó; `data.reason` |
+| -32035 | `MODELS_UNSUPPORTED` | `ModelsUnsupported` | `provider.models` hay `provider.model` nêu một provider không có danh sách model (`scripted`); `data.provider` |
+| -32036 | `MODEL_NOT_FOUND` | `ModelNotFound` | `provider.model` nêu một model mà danh sách không có; `data.model`, và `data.truncated` khi danh sách bị cắt ngắn |
+| -32037 | `PROVIDER_REQUEST_FAILED` | `ProviderRequestFailed` | Không hỏi được provider, hoặc nó trả lỗi; `data: {kind, status?}`, `kind` là một trong `unreachable` (connect, reset và timeout như nhau), `status`, `invalid_request`, `other`. Một thông báo cố định cho mỗi kind: không bao giờ có key, URL hay lời của vendor |
+| -32038 | `INVALID_STEER` | `InvalidSteer` | `run.steer` với text trống hoặc quá 16 KiB, id không dùng được, hoặc một run đang rảnh (xếp hàng, hoặc đang chạy mà không server nào điều khiển: hãy resume nó trước); `data.reason`. Chưa ghi gì |
+| -32040 | `NOT_BACKGROUND` | `NotBackground` | `schedule.create` hay `job.enqueue` cho một agent không chạy nền được; `data.reason` là `memory_store`, `host_tools`, `callbacks` hoặc `remote_execution` |
+| -32041 | `SCHEDULE_NOT_FOUND` | `ScheduleNotFound` | Namespace của agent không có schedule với id đó |
+| -32042 | `SCHEDULE_EXISTS` | `ScheduleExists` | Namespace đã có một schedule với id đó |
+| -32043 | `JOB_NOT_FOUND` | `JobNotFound` | Namespace không có job với id đó, hoặc lịch sử của nó đã bị dọn |
+| -32044 | `INVALID_SCHEDULE` | `InvalidSchedule` | Thời gian của schedule không dùng được; `data.reason` |
+| -32045 | `WORKFLOW_HELD` | `WorkflowHeld` | Một client khác điều khiển workflow: connection này, connection khác hoặc server khác. `workflow.start` chưa ghi gì |
+| -32046 | `WORKFLOW_BUDGET` | `WorkflowBudgetExceeded` | Budget đã hết (`data: {spent_tokens, spent_usd, max_tokens?, max_cost_usd?}`), hoặc `data: {kind: "unpriced", model}` khi `max_cost_usd` không tính được một lời gọi của model không có giá. Không lời gọi agent nào bắt đầu nữa |
+| -32047 | `WORKFLOW_CALL_FAILED` | `WorkflowCallFailed` | Một lời gọi `workflow.agent` không cho kết quả; `data.kind` là `failed`, `aborted`, `timeout`, `approval` hoặc `invalid` |
+| -32048 | `WORKFLOW_NOT_FOUND` | `WorkflowNotFound` | Connection này không điều khiển workflow nào có id đó: chưa gửi `workflow.start` cho nó, hoặc đã finish nó |
+| -32049 | `WORKFLOW_NO_JOURNAL` | `WorkflowNoJournal` | `workflow.start` với câu trả lời `resume` cho một workflow mà journal trống (nó chưa chạy ở đây, hoặc journal của agent memory-store nằm ở connection khác). Chưa claim gì |
 
 `RunError::ContractMismatch {expected, found}` nêu tên các contract từ phía của agent:
 `expected` là contract của agent đã cố tiếp tục run, `found` là contract được lưu cùng
 run. Wire đảo chúng lại, để `data.expected` là contract của run và `data.found` là của
-agent, đúng như văn bản thông báo (`error.rs:157-165`, được test ở
-`error.rs:222-242`).
+agent, đúng như văn bản thông báo (`error.rs:260-269`, được test ở
+`error.rs:407-428`).
 
 Phần đăng nhập của socket trả lời các lần từ chối dưới những id khác nhau
 (`login.rs:33-85`): `-32005` `kind: logins` dưới id null trước khi đọc bất cứ thứ gì;
@@ -134,8 +169,8 @@ Client Python đọc dòng đầu tiên nó nhận được làm câu trả lờ
 bất kể id (`python/src/linch_rust/_remote.py:112-142`).
 
 Client Python ánh xạ mã sang exception trong `_BY_CODE`
-(`python/src/linch_rust/errors.py:158-170`), với các dải cho phần còn lại
-(`errors.py:173-186`); `python/tests/test_protocol.py:196` cố định ánh xạ này.
+(`python/src/linch_rust/errors.py:166-178`), với các dải cho phần còn lại
+(`errors.py:181-194`); `python/tests/test_protocol.py:202` cố định ánh xạ này.
 
 ### Các method workflow
 
@@ -159,7 +194,7 @@ journal failed`; nguyên nhân đi vào log của server.
 
 ## Bên trong một kết nối
 
-Mỗi kết nối là một `Server` (`server.rs:53-79`): các bảng agent đang mở,
+Mỗi kết nối là một `Server` (`server.rs:55-83`): các bảng agent đang mở,
 run đang được điều khiển và run đang park dưới một khóa, để `agent.close` không thể
 bỏ sót một run bắt đầu trong lúc nó kiểm tra; outbox của nó; peer của nó cho các
 request từ server; và tenant của nó, là `None` đối với client cục bộ.
@@ -170,15 +205,15 @@ request từ server; và tenant của nó, là `None` đối với client cục 
    cho `connection` (`connection.rs:148-211`), thứ spawn task writer,
    chạy phần đăng nhập khi access là `Login`, và đọc cho đến khi input kết thúc
    hoặc `stop` kích hoạt.
-2. **Vòng lặp đọc.** `Server::receive` (`server.rs:171-207`) parse một dòng,
+2. **Vòng lặp đọc.** `Server::receive` (`server.rs:181-217`) parse một dòng,
    đưa câu trả lời của client cho request của server mà nó nêu tên, và đọc
    mọi thứ khác như một request (`Request::from_value`,
    `crates/linch-rpc/src/message.rs:108`). Một request không có `id` là một
    notification và bị bỏ. Sau đó mỗi lời gọi lấy một trong 64 permit
-   (`MAX_REQUESTS`, `server.rs:49`); vòng lặp await nó, nên request thứ 65
+   (`MAX_REQUESTS`, `server.rs:51`); vòng lặp await nó, nên request thứ 65
    dừng việc đọc cho đến khi một lời gọi kết thúc. Lời gọi chạy trong task riêng,
    nên một `agent.open` chậm không bao giờ giữ chân một `run.cancel`.
-3. **Dispatch.** `Server::handle` (`server.rs:265-292`) bắt một panic thành
+3. **Dispatch.** `Server::handle` (`server.rs:275-302`) bắt một panic thành
    `-32603`. Một method run trả về stream của nó: kết quả `RunAccepted`
    được xếp hàng trước, rồi một task điều khiển stream.
 4. **Một run.** `Server::drive` (`run.rs:159-196`) mã hóa mỗi envelope một lần,
@@ -193,7 +228,7 @@ request từ server; và tenant của nó, là `None` đối với client cục 
 6. **Request từ server.** `Peer::call` (`peer.rs:92-139`) xếp hàng request
    và chờ câu trả lời, timeout hoặc lệnh hủy của nó; thời gian chờ chỗ trống trong
    outbox được tính vào cả hai.
-7. **Hết input.** `Server::stop` (`server.rs:150-169`) để các lời gọi
+7. **Hết input.** `Server::stop` (`server.rs:159-178`) để các lời gọi
    đã đọc kết thúc, drop mọi run tại chỗ nó đang đứng (một run bền vững vẫn
    resume được), làm các request đang chờ của server thất bại, rồi đóng các MCP server
    của mọi agent. Writer xả hết hàng đợi và kết nối trả về.
@@ -201,10 +236,10 @@ request từ server; và tenant của nó, là `None` đối với client cục 
 ### Thứ tự
 
 - `RunAccepted` của một run được xếp hàng trước khi task điều khiển nó được
-  spawn (`server.rs:278-289`), nên nó đến client trước mọi
+  spawn (`server.rs:288-299`), nên nó đến client trước mọi
   notification của run đó. Client Python dựa vào điều này: nó phân loại các
   notification của một run theo run id mà nó đọc từ kết quả đó
-  (`python/src/linch_rust/_rpc.py:254-265`).
+  (`python/src/linch_rust/_rpc.py:306-317`).
 - Mọi message đi qua một hàng đợi tới một writer, nên wire giữ
   thứ tự của hàng đợi. Một batch chỉ gộp những gì đã được xếp hàng, và mọi
   message khác hay envelope của run khác sẽ đóng nó (`outgoing.rs:1-10`): một
@@ -232,10 +267,10 @@ Không có buffer nào tăng không giới hạn trên server:
    (`NOTIFICATION_CAPACITY`, `crates/linch-rpc/src/client.rs:29`), rồi
    ngừng đọc, nên các câu trả lời cũng phải chờ sau chúng (`client.rs:103-110`).
    Client Python làm tương tự với 1024 của riêng nó
-   (`NOTIFICATION_CAPACITY`, `python/src/linch_rust/_rpc.py:46`): mỗi
+   (`NOTIFICATION_CAPACITY`, `python/src/linch_rust/_rpc.py:48`): mỗi
    `run.event` chưa đọc giữ một chỗ trên các run của kết nối, và
    reader chờ một chỗ trước khi xếp hàng cái kế tiếp (`RunQueue`,
-   `_rpc.py:60-96`). `Run.cancel` tiếp tục đọc run của nó khi chờ
+   `_rpc.py:62-98`). `Run.cancel` tiếp tục đọc run của nó khi chờ
    câu trả lời (`python/src/linch_rust/run.py:102-121`); một run không ai đọc
    trong khi event của nó vẫn đến sẽ làm kết nối bị nghẽn.
 
@@ -246,21 +281,21 @@ giao một message cho một task khi hàng đợi đầy.
 
 | Transport | Điểm vào | Access | Runtime |
 |---|---|---|---|
-| stdio | `linch-server` không có đối số; `linch_rpc::serve` (`connection.rs:43-50`) | `Access::Local`: không đăng nhập, không tenant, không giới hạn | Current-thread (`crates/linch-server/src/main.rs:49-55`): một client, nên chuyển một envelope giữa các task của nó không đánh thức thread nào khác |
-| Unix socket | `--config FILE` với `socket`; `Listeners` (`crates/linch-server/src/listen.rs:41-98`) | `Access::Login`: message đầu tiên là `connection.auth` | Multi-thread |
-| HTTP với WebSocket | `--config FILE` với `http`; `crates/linch-server/src/http.rs:74-113` | `Access::Tenant`: header bearer được kiểm tra trước khi upgrade | Multi-thread |
+| stdio | `linch-server` không có đối số; `linch_rpc::serve` (`connection.rs:43-50`) | `Access::Local`: không đăng nhập, không tenant, không giới hạn | Current-thread (`crates/linch-server/src/main.rs:55-61`): một client, nên chuyển một envelope giữa các task của nó không đánh thức thread nào khác |
+| Unix socket | `--config FILE` với `socket`; `Listeners` (`crates/linch-server/src/listen.rs:43-102`) | `Access::Login`: message đầu tiên là `connection.auth` | Multi-thread |
+| HTTP với WebSocket | `--config FILE` với `http`; `crates/linch-server/src/http.rs:80-121` | `Access::Tenant`: header bearer được kiểm tra trước khi upgrade | Multi-thread |
 
 **stdio.** Trên Linux, server mở lại các pipe của nó qua
 `/proc/self/fd/0` và `/proc/self/fd/1` và điều khiển chúng ở chế độ non-blocking
-(`main.rs:88-123`). Non-blocking là một cờ của open file
+(`main.rs:94-129`). Non-blocking là một cờ của open file
 description, thứ mà fd 0 và 1 dùng chung với mọi process giữ cùng
 pipe; các description mới giữ cờ này không rò sang các reader khác của một shell hay
 supervisor. Mọi thứ không phải pipe dùng `stdin()` và `stdout()` của tokio.
 
 **Unix socket.** Một tệp socket do một server đã dừng để lại sẽ bị thay thế, và
-một tệp mà một server đang trả lời trên đó thì bị từ chối (`bind_socket`, `listen.rs:102-119`).
+một tệp mà một server đang trả lời trên đó thì bị từ chối (`bind_socket`, `listen.rs:106-123`).
 Mỗi kết nối chờ đăng nhập của nó với một trong 32 chỗ
-(`MAX_PENDING_LOGINS`, `crates/linch-rpc/src/access.rs:137-141`): mỗi chỗ có thể
+(`MAX_PENDING_LOGINS`, `crates/linch-rpc/src/access.rs:162-166`): mỗi chỗ có thể
 đệm một dòng 16 MiB trong 10 s, nên các chỗ này giới hạn mức đó ở 512 MiB. Kết nối thứ
 33 nhận `-32005` ngay. Một lần đăng nhập có 10 s (`LOGIN_TIMEOUT`,
 `login.rs:17`); im lặng quá mức đó nhận `-32003` và kết nối đóng
@@ -287,15 +322,15 @@ và dùng các pool của tenant đó (bên dưới).
 
 ## Tenant và allowlist
 
-`ServerConfig::from_json` (`crates/linch-server/src/config.rs:153`) đọc
+`ServerConfig::from_json` (`crates/linch-server/src/config.rs:186`) đọc
 cấu hình, từ chối các trường không biết và giới hạn bằng 0; `tokens`
 (`config.rs:187`) đọc từng token trực tiếp hoặc từ môi trường;
 `AllowConfig::build` (`config.rs:220`) tạo các `Allowlists`.
 
-- Một `Tenant` (`access.rs:43-127`) có tên gồm 1 đến 64 chữ cái ASCII,
+- Một `Tenant` (`access.rs:45-152`) có tên gồm 1 đến 64 chữ cái ASCII,
   chữ số, `.`, `_` hoặc `-` (không bao giờ có `/`), các allowlist của nó, và một semaphore
   cho mỗi loại: run, agent và connection, dùng chung giữa mọi kết nối của nó.
-- `Tokens` (`access.rs:143-208`) giữ mỗi token dưới dạng digest SHA-256 và
+- `Tokens` (`access.rs:168-233`) giữ mỗi token dưới dạng digest SHA-256 và
   so sánh một token được đưa ra với mọi digest trong thời gian hằng số. Không token nào
   được ghi log hay echo lại.
 - `Tenant::admit` (`crates/linch-rpc/src/access/admit.rs:20-136`) kiểm tra một
@@ -327,16 +362,16 @@ principal của run của mọi lời gọi và được lưu cùng dòng journa
 principal sẽ hành động thay cho principal được lưu cùng run khi nó bắt đầu
 (`continue_run` của lõi, từ `RunRecord::principal`).
 
-**Postgres.** `PgTarget::parse` (`crates/linch-rpc/src/access/allowlists.rs:137-174`)
+**Postgres.** `PgTarget::parse` (`crates/linch-rpc/src/access/allowlists.rs:185-222`)
 đọc một DSN theo cách store kết nối với nó, qua `PgConnectOptions` của sqlx,
 nên một ghi đè `?host=` hay `?user=` được tính và một user hay `sslmode` bị thiếu lấy
 mặc định của server. Một mục cho phép một DSN có cùng host, port, socket, database, user,
 `options` khởi động và tệp TLS, và một `sslmode` ít nhất nghiêm ngặt bằng của nó, xếp
-hạng từ `disable` (0) đến `verify-full` (5) (`PgTarget::allows`, `allowlists.rs:176-197`).
+hạng từ `disable` (0) đến `verify-full` (5) (`PgTarget::allows`, `allowlists.rs:224-245`).
 
 Facade dùng chung một pool cho mỗi đích giữa các agent được mở với cùng một
 `PgPools` (`crates/linch/src/pools.rs:19-39`). Một `Tenant` sở hữu một cái
-(`access.rs:56`, `access.rs:79`) và `connection` đưa cho kết nối của tenant cái đó
+(`access.rs:58`, `access.rs:82`) và `connection` đưa cho kết nối của tenant cái đó
 (`connection.rs:163-179`), nên các pool được khóa theo tenant và đích:
 hai tenant trên cùng một đích không bao giờ dùng chung pool, và một tenant không thể
 đặt kích thước pool của tenant khác (R3 front 5). Mọi kết nối của một tenant dùng chung
@@ -348,9 +383,9 @@ các cài đặt mà sqlx bỏ qua sẽ dùng chung một pool. Một pool lấy
 lần open đã kết nối nó (`pools.rs:94-112`); việc kết nối bỏ cuộc sau
 5 s và các migration sau 30 s (`pools.rs:146-164`).
 
-**Lệnh MCP.** Một `McpCommand` (`allowlists.rs:54-74`) không được liệt kê
+**Lệnh MCP.** Một `McpCommand` (`allowlists.rs:100-122`) không được liệt kê
 `PATH`, `HOME` hay các biến được biết là chọn mã nào mà một chương trình nạp
-(`CODE_LOADING_ENV` và các tiền tố của nó, `allowlists.rs:76-113`). Danh sách này là
+(`CODE_LOADING_ENV` và các tiền tố của nó, `allowlists.rs:124-161`). Danh sách này là
 nỗ lực tối đa (best effort).
 
 ## Run nền
@@ -403,14 +438,14 @@ job, được mở rộng tách biệt với các server lắng nghe.
 
 | Giới hạn | Giá trị | Ở đâu | Vượt quá |
 |---|---|---|---|
-| `max_pool_connections` cho mỗi tenant | `linch_postgres::default_max_connections()` nếu không đặt (`allowlists.rs:275-278`) | `Tenant::admit` (`admit.rs:90-105`), trước khi bất cứ thứ gì kết nối | `-32004`, `kind: pool_connections`, `max` là mức trần |
-| `max_connections` cho mỗi tenant | 8 nếu không đặt (`allowlists.rs:24`) | `Tenant::connect` (`access.rs:94-111`); kết nối giữ chỗ cho đến khi nó kết thúc (`connection.rs:161-180`) | Socket: `-32005` dưới id `connection.auth`; HTTP: `429` |
+| `max_pool_connections` cho mỗi tenant | `linch_postgres::default_max_connections()` nếu không đặt (`allowlists.rs:325-328`) | `Tenant::admit` (`admit.rs:90-105`), trước khi bất cứ thứ gì kết nối | `-32004`, `kind: pool_connections`, `max` là mức trần |
+| `max_connections` cho mỗi tenant | 8 nếu không đặt (`allowlists.rs:24`) | `Tenant::connect` (`access.rs:103-136`); kết nối giữ chỗ cho đến khi nó kết thúc (`connection.rs:161-180`) | Socket: `-32005` dưới id `connection.auth`; HTTP: `429` |
 | `max_runs` cho mỗi tenant | 16 nếu không đặt (`allowlists.rs:17`) | `run_place`, lấy trong `start` và `claim` (`run.rs:152-157`) và được run đang điều khiển giữ | `-32005`, không có gì bắt đầu |
-| `max_agents` cho mỗi tenant | 16 nếu không đặt (`allowlists.rs:29`) | Lấy trong `open` sau các kiểm tra (`agents.rs:19-26`), được giải phóng khi các MCP server của agent đã tắt (`server.rs:104-111`) | `-32005`, trước khi bất kỳ MCP server nào khởi động |
-| Số lời gọi đang bay cho mỗi kết nối | 64 | `server.rs:49` | Việc đọc phải chờ |
-| Số đăng nhập đang chờ | 32 cho mỗi `Tokens` | `access.rs:137-141` | `-32005` `kind: logins`, rồi đóng |
+| `max_agents` cho mỗi tenant | 16 nếu không đặt (`allowlists.rs:29`) | Lấy trong `open` sau các kiểm tra (`agents.rs:20-27`), được giải phóng khi các MCP server của agent đã tắt (`server.rs:110-119`) | `-32005`, trước khi bất kỳ MCP server nào khởi động |
+| Số lời gọi đang bay cho mỗi kết nối | 64 | `server.rs:51` | Việc đọc phải chờ |
+| Số đăng nhập đang chờ | 32 cho mỗi `Tokens` | `access.rs:162-166` | `-32005` `kind: logins`, rồi đóng |
 | Số HTTP upgrade đang chờ | 32 cho mỗi server | `http.rs:38-43` | Đóng mà không đọc |
-| Một dòng hoặc một message | 16 MiB (`connection.rs:28`); 64 KiB đầu của nó được giữ để tìm `id` (`crates/linch-rpc/src/lines.rs:18`) | `Server::too_long` (`server.rs:232-251`) | `-32600`, dưới id của request khi phần đầu cho thấy nó; một câu trả lời làm request của server thất bại |
+| Một dòng hoặc một message | 16 MiB (`connection.rs:28`); 64 KiB đầu của nó được giữ để tìm `id` (`crates/linch-rpc/src/lines.rs:18`) | `Server::too_long` (`server.rs:242-261`) | `-32600`, dưới id của request khi phần đầu cho thấy nó; một câu trả lời làm request của server thất bại |
 | Chờ đăng nhập, phần đầu HTTP | 10 s mỗi loại | `login.rs:17`, `http.rs:36` | Đăng nhập nhận `-32003`, rồi kết nối đóng; kết nối HTTP đóng |
 
 Một kết nối cục bộ (stdio) không có giới hạn nào của tenant.
@@ -433,11 +468,11 @@ Dù cách nào, run chỉ giữ một chỗ, nên các run đang chạy của m�
 `RequestHandler` (`client.rs:57`); `Client::in_process` (`client.rs:174`)
 khởi động một server trên các pipe trong bộ nhớ, như các test làm.
 
-`Connection` của client Python (`python/src/linch_rust/_rpc.py:160`) có
+`Connection` của client Python (`python/src/linch_rust/_rpc.py:189`) có
 một task reader. Nó giải quyết các câu trả lời theo id, phân loại các envelope
-`run.event` và `run.end` theo run của chúng (`_rpc.py:232-252`), chạy `tool.call` và
+`run.event` và `run.end` theo run của chúng (`_rpc.py:280-304`), chạy `tool.call` và
 `hook.call` mỗi cái trong một task và hủy một cái khi có `$/cancelRequest`
-(`_rpc.py:267-310`). `Agent` (`python/src/linch_rust/agent.py:50`) bọc
+(`_rpc.py:319-362`). `Agent` (`python/src/linch_rust/agent.py:50`) bọc
 các method: `run`, `resume` và `approve` qua `_start` (`agent.py:203`),
 và `close`, `close_session` và `events` (`agent.py:159-201`).
 
@@ -445,19 +480,19 @@ và `close`, `close_session` và `events` (`agent.py:159-201`).
 
 | Bước | Ở đâu | Cái gì bắt lỗi nếu bỏ sót |
 |---|---|---|
-| 1. Đặt tên | Một hằng số `method::` trong `protocol.rs:25-55` | Không có gì; mọi bước khác đều dùng nó |
+| 1. Đặt tên | Một hằng số `method::` trong `protocol.rs:28-66` | Không có gì; mọi bước khác đều dùng nó |
 | 2. Params và kết quả của nó | `protocol.rs` hoặc một tệp `protocol/`, với `deny_unknown_fields` và doc comment | `-32602` cho một trường không biết chỉ khi kiểu đó từ chối chúng |
 | 3. Handler | Một method `impl Server` trong `server/agents.rs` hoặc `server/run.rs`. Chạy các kiểm tra tenant (`admit_principal`, một chỗ) trước mọi thứ khác, và trả về `Reply::Run` cho một run | Test trong `crates/linch-rpc/tests/tenants.rs` và `limits.rs` cho các kiểm tra của nó |
-| 4. Dispatch | Một nhánh trong `Server::dispatch` (`server.rs:294-312`) | `-32601` lúc chạy |
+| 4. Dispatch | Một nhánh trong `Server::dispatch` (`server.rs:304-322`) | `-32601` lúc chạy |
 | 5. Lỗi | Một mã mới trong `error.rs` cùng phép chuyển đổi của nó | `crates/linch-rpc/tests/wire.rs` cho hình dạng trên wire |
-| 6. Tài liệu giao thức | Method trong phần Methods của crate docs, một mã mới trong bảng của nó (`lib.rs:118-246`, `lib.rs:328-364`) | Chỉ review |
+| 6. Tài liệu giao thức | Method trong phần Methods của crate docs, một mã mới trong bảng của nó (`lib.rs:120-369`, `lib.rs:518-569`) | Chỉ review |
 | 7. Client Rust | Không cần: `Client::call` là tổng quát. Một helper có kiểu trong `crates/linch-rpc/tests/common/mod.rs` nếu test cần | Biên dịch các test |
 | 8. Client Python | Một method trên `Agent` (`agent.py`), và với một mã mới thì một exception trong `errors.py` cùng mục `_BY_CODE` của nó | `python/tests/test_protocol.py` |
 | 9. Tài liệu sử dụng | `docs/usage/server.md` và các trang Python gọi nó | Chỉ review |
 | 10. Test | `crates/linch-rpc/tests/<area>.rs` end to end qua `Client::in_process` hoặc wire thô (`wire.rs`); một test Python với server đã build | `cargo test -p linch-rpc`, `pytest` |
 
 Một trường được thêm vào `AgentConfig` đến được `agent.open` mà không cần đổi gì ở đây;
-`python/tests/test_config.py:52` kiểm tra rằng cấu hình có kiểu của Python nêu tên
+`python/tests/test_config.py:53` kiểm tra rằng cấu hình có kiểu của Python nêu tên
 mọi trường mà server đọc.
 
 ## Ví dụ

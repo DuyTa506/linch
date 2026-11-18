@@ -310,6 +310,29 @@ result = await run_or_resume(agent, "job-7", "Reconcile the ledger")
 Use it from a job queue's task, or from a LangGraph or Prefect node: the
 node can be retried any number of times and the run happens once.
 
+## Errors
+
+| Raised | When |
+|---|---|
+| `WorkflowHeld` (-32045) | Another client drives the workflow ([above](#one-driver-per-workflow)); nothing was written |
+| `WorkflowBudgetExceeded` (-32046) | The `budget` is spent (`.spent_tokens`, `.spent_usd`), or `data["kind"] == "unpriced"` (`data["model"]`): a `max_cost_usd` budget on a model with no price. The finished calls stay journaled |
+| `WorkflowCallFailed` (-32047) | A `wf.agent` call produced no result; `.kind` is `failed`, `aborted`, `timeout`, `approval` (the child run stopped for an approval) or `invalid` (an unknown subagent) |
+| `WorkflowNotFound` (-32048) | A call for a workflow id this connection does not drive: `workflow.start` was never sent for it, or it finished |
+| `WorkflowNoJournal` (-32049) | `resume` answers for a workflow whose journal holds nothing |
+| `NotAllowed` (-32004) | `kind` `workflow` (no `allow.workflow`), `workflow_budget` (a budget above the ceiling) or `workflow_principal` (another principal than the workflow was started for); a `principal` of another tenant |
+| `LimitReached` (-32005) | `kind` `workflows`, `agent_calls_in_flight` or `journal_records` ([Admission](#admission)) |
+| `OpenError` (-32011) | `workflow.start` with a `max_cost_usd` budget for an agent with an unpriced model |
+| `RunNotFound` (-32021) | `workflow_status` of an id the agent's namespace does not hold |
+| `WorkflowSuspended` | Not an error of the server: an interrupt has no answer, and `run_workflow` raises it (a `BaseException`) after the workflow is stored as `awaiting_input` |
+| `WorkflowTimeoutError` | A step attempt ran past its limit, or `deadline_ms` passed (client side) |
+
+All the server's are `WorkflowError`s except `NotAllowed`, `LimitReached`,
+`OpenError` and `RunNotFound`. `workflow_status(agent, run_id)` returns a
+`WorkflowStatus` (`status`, `records`, `interrupt_key`, `interrupt_payload`)
+without driving the workflow. `Retry(max_attempts, base_delay_ms,
+max_delay_ms)` passed as `retry=` repeats a failed or timed out `wf.agent` or
+`wf.step`; only the winning attempt is journaled.
+
 ## Differences from Python Linch
 
 | | Python | Here |

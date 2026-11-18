@@ -90,8 +90,8 @@ holder, không theo tên owner, vì `RunOptions::owner` mặc định là `linch
 - **Release.** Một run dừng mà không suspend hay kết thúc (một lỗi, một stream bị drop)
   release lease của nó từ `Drop` của `Held`, trong một task sinh ra ghi một lần, để
   process khác không phải chờ hết TTL (`lease.rs:108-125`). Agent giữ từng task release
-  đó, và `Agent::released` (`crates/linch-core/src/agent.rs:452`) chờ chúng;
-  `OpenedAgent::close` chờ tối đa `RELEASE_WAIT` (5 s, `crates/linch/src/open.rs:348`)
+  đó, và `Agent::released` (`crates/linch-core/src/agent.rs:473`) chờ chúng;
+  `OpenedAgent::close` chờ tối đa `RELEASE_WAIT` (5 s, `crates/linch/src/open.rs:375`)
   trước khi ngắt kết nối, nên một `linch-server` thoát sau khi drop các run của nó vẫn
   giải phóng chúng. Một sự cố sập không release gì; lease tự hết hạn.
 - **Store trong bộ nhớ** không có TTL: chúng không bao giờ từ chối một claim, không
@@ -134,6 +134,7 @@ dữ liệu của session: chỉ các lời gọi tool và kết quả của ch�
 | `session_store_suite` | `SessionStore` | `store/conformance.rs:46` |
 | `task_store_suite` | `SessionStore + TaskStore` | `store/conformance/tasks.rs:14` |
 | `backend_suite` | `FileBackend` | `crates/linch-core/src/vfs/conformance.rs:11` |
+| `memory_store_suite` | `MemoryStore`, kho bộ nhớ dài hạn của một namespace ([kho Postgres](#store-postgres)) | `crates/linch-core/src/memory/conformance.rs:39` |
 
 Một quy tắc thất bại sẽ panic với một thông báo nêu tên nó, nên hãy gọi các suite từ một
 test. Mỗi kiểm tra dùng namespace riêng của nó dưới `conformance/`; hãy chạy chúng trên
@@ -162,7 +163,7 @@ luôn thắng và fence lease trước đó, bất kể handle nào hỏi.
 ## Store Postgres
 
 `linch-postgres` triển khai `PgRunStore`, `PgSessionStore` (cũng là
-`TaskStore`) và `PgFileBackend`. Tất cả đều nhận một `PgPool`.
+`TaskStore`), `PgFileBackend`, `PgToolCache` và `PgMemoryStore`. Tất cả đều nhận một `PgPool`.
 
 ### Schema và migration
 
@@ -182,7 +183,9 @@ schema và bắt đầu bằng `linch_`, nên `search_path` của kết nối ch
 | `0004_tasks.sql` | `linch_sessions.next_task_id`, `linch_tasks`, `linch_task_edges` |
 | `0005_mailbox.sql` | `linch_mailbox` (`PgMailbox`: message giữa các peer theo namespace và người nhận, được một lần drain giữ lease, bị xóa bởi ack của nó) |
 | `0006_run_leases.sql` | `linch_runs.lease_holder` và `lease_until`, nullable, không default, không đánh chỉ mục: thêm chúng không viết lại hàng nào, và một lần gia hạn vẫn là một update chỉ trên heap. NULL nghĩa là không có lease còn sống |
+| `0007_run_principal.sql` | `linch_runs.principal`, nullable, không có default (principal mà run được bắt đầu cho, dạng JSON): một resume, approve hoặc answer không nêu principal sẽ hành động cho nó, nên không thể thoát một role rule bằng cách bỏ principal khỏi lần tiếp tục
 | `0008_tool_cache.sql` | `linch_tool_cache` (`PgToolCache`: kết quả tool theo namespace và digest của khóa, `expires_at` theo đồng hồ của database, `seq` để loại bỏ mục cũ nhất, `bytes` và `quota_group` cho mức trần byte của tenant; `output` là `TEXT`) và `linch_tool_cache_epoch` (số lần xóa của một namespace, không bao giờ bị xóa). Một put và một clear của một namespace dùng chung một advisory lock (shared và exclusive) trong transaction của chúng, nên một put có epoch đã cũ bị từ chối; một put cũng cắt quota group từ mới nhất và dọn tối đa 100 hàng hết hạn của bất kỳ namespace nào |
+| `0009_memories.sql` | `linch_memories` (`PgMemoryStore`: bộ nhớ dài hạn theo namespace và scope, scope `NULL` là bộ nhớ mọi session dùng chung; `call_key` là idempotency key của lời gọi lưu, duy nhất trong namespace, nên một lần lưu được phát lại chỉ lưu một dòng; `terms` giữ các từ của nội dung và tag, mỗi từ có tiền tố là hash bucket của namespace và scope, sau một index GIN, nên một lần tìm chỉ đọc posting của bucket của nó; một lần lưu dưới cap lấy một advisory lock cho mỗi gốc tenant) |
 
 Payload JSON (checkpoint, envelope, log entry, metadata của task) là `TEXT`, không phải
 `JSONB`: JSONB sắp xếp lại khóa và viết lại số, mà các store phải trả về đúng những gì đã
