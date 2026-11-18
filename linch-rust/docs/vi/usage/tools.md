@@ -776,7 +776,7 @@ thứ compaction và context window phải trả giá. Một số tool tự gi�
 | `Glob` | 1000 đường dẫn |
 | Một tool MCP | 30000 byte văn bản kết quả |
 | `memory_recall` | 8 KiB ngữ cảnh được gợi lại mỗi request |
-| `Read` | mặc định 2000 dòng và tệp tối đa 10 MiB; một dòng không bị giới hạn độ rộng, nên một dòng minify có thể trả về hàng megabyte (offload bên dưới phủ trường hợp này) |
+| `Read` | mặc định 2000 dòng và tệp tối đa 10 MiB; một dòng không bị giới hạn độ rộng, nên một dòng minify có thể trả về hàng megabyte (offload bên dưới giữ con trỏ nhỏ, nhưng `read_file` cũng theo dòng, nên đọc lại dòng đó vẫn trả về nguyên vẹn) |
 
 Một host tool không có giới hạn riêng. Với các tool đó, và với mọi kết quả mà một giới hạn ở
 trên cho qua, cơ chế duy nhất là offload sang hệ thống tệp:

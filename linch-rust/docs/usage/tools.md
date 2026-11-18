@@ -774,7 +774,7 @@ their own output:
 | `Glob` | 1000 paths |
 | An MCP tool | 30000 bytes of result text |
 | `memory_recall` | 8 KiB of recalled context per request |
-| `Read` | 2000 lines by default and a 10 MiB file; a line has no width limit, so one minified line can return megabytes (the offload below covers it) |
+| `Read` | 2000 lines by default and a 10 MiB file; a line has no width limit, so one minified line can return megabytes (the offload below keeps the pointer small, but `read_file` is line-based too, so reading that line back returns it whole) |
 
 A host tool has no bound of its own. For these, and for any result a bound
 above lets through, the one mechanism is the filesystem offload:
