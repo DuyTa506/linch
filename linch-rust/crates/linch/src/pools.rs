@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
 use linch_core::{ProviderGate, WeakProviderGate};
-use linch_postgres::PgPool;
+use linch_postgres::{MigrateError, PgPool, SchemaError};
 use sqlx::ConnectOptions;
 use sqlx::postgres::PgConnectOptions;
 use tokio::sync::OnceCell;
@@ -206,8 +206,8 @@ async fn connect(dsn: &str, max_connections: NonZeroU32) -> Result<PgPool, OpenE
     let pool = linch_postgres::connect(dsn, linch_postgres::CONNECT_TIMEOUT, max_connections)
         .await
         .map_err(|error| OpenError::Store(Box::new(error)))?;
-    match tokio::time::timeout(MIGRATE_TIMEOUT, linch_postgres::migrate(&pool)).await {
-        Ok(migrated) => migrated.map_err(|error| OpenError::Store(Box::new(error)))?,
+    match tokio::time::timeout(MIGRATE_TIMEOUT, prepare(&pool)).await {
+        Ok(prepared) => prepared?,
         Err(_) => {
             let message = format!("the migrations did not finish within {MIGRATE_TIMEOUT:?}");
             let error = io::Error::new(io::ErrorKind::TimedOut, message);
@@ -215,6 +215,35 @@ async fn connect(dsn: &str, max_connections: NonZeroU32) -> Result<PgPool, OpenE
         }
     }
     Ok(pool)
+}
+
+/// Refuse a schema a newer release migrated, then apply the migrations.
+async fn prepare(pool: &PgPool) -> Result<(), OpenError> {
+    linch_postgres::schema_version(pool).await.map_err(gate)?;
+    match linch_postgres::migrate(pool).await {
+        Ok(()) => Ok(()),
+        // A newer release migrated between the check and the migrate.
+        Err(error @ MigrateError::VersionMissing(_)) => {
+            linch_postgres::schema_version(pool).await.map_err(gate)?;
+            Err(OpenError::Store(Box::new(error)))
+        }
+        Err(error) => Err(OpenError::Store(Box::new(error))),
+    }
+}
+
+fn gate(error: SchemaError) -> OpenError {
+    match error {
+        SchemaError::Newer {
+            table,
+            applied,
+            latest,
+        } => OpenError::SchemaNewer {
+            table,
+            applied,
+            latest,
+        },
+        other => OpenError::Store(Box::new(other)),
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

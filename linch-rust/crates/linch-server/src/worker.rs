@@ -7,6 +7,7 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
+use linch::postgres::SchemaError;
 use linch_rpc::{BackgroundAgents, Tenant};
 use linch_worker::{Retention, Worker, WorkerConfig, WorkerError};
 use thiserror::Error;
@@ -26,6 +27,10 @@ pub enum WorkerStartError {
     /// The database could not be reached or migrated.
     #[error("worker: cannot prepare the database: {0}")]
     Database(String),
+    /// The database holds a migration this server does not embed: a newer
+    /// release migrated it.
+    #[error("worker: {0}")]
+    SchemaNewer(SchemaError),
 }
 
 /// A worker serving the tenants' and the local roots' jobs in one
@@ -81,6 +86,14 @@ impl BackgroundWorker {
         let pool = linch::postgres::connect(&dsn, linch::postgres::CONNECT_TIMEOUT, size)
             .await
             .map_err(|error| database(&error))?;
+        // Before any migration or job: a database a newer release migrated
+        // is not this server's to touch.
+        let gate = |error: SchemaError| match error {
+            SchemaError::Newer { .. } => WorkerStartError::SchemaNewer(error),
+            other => database(&other),
+        };
+        linch::postgres::schema_version(&pool).await.map_err(gate)?;
+        linch_worker::schema_version(&pool).await.map_err(gate)?;
         (linch::postgres::migrate(&pool).await).map_err(|error| database(&error))?;
         (linch_worker::migrate(&pool).await).map_err(|error| database(&error))?;
         let mut factory = BackgroundAgents::new(dsn);
@@ -149,6 +162,9 @@ fn worker_config(
     if let Some(keep) = millis(section.history_retention_ms, "history_retention_ms")? {
         config.history_retention = Some(keep);
     }
+    if let Some(drain) = millis(section.drain_timeout_ms, "drain_timeout_ms")? {
+        config.drain_timeout = drain;
+    }
     if let Some(section) = &section.retention {
         config.retention = Some(retention(section)?);
     }
@@ -212,6 +228,23 @@ mod tests {
         let text = r#"{"dsn": {"value": "postgres://x"}}"#;
         let section: WorkerSection = serde_json::from_str(text).unwrap();
         assert_eq!(worker_config(&section, "srv").unwrap().retention, None);
+    }
+
+    #[test]
+    fn the_drain_timeout_is_30_seconds_unless_set_and_zero_is_refused_at_load() {
+        let text = r#"{"dsn": {"value": "postgres://x"}}"#;
+        let section: WorkerSection = serde_json::from_str(text).unwrap();
+        let config = worker_config(&section, "srv").unwrap();
+        assert_eq!(config.drain_timeout, Duration::from_secs(30));
+        let text = r#"{"dsn": {"value": "postgres://x"}, "drain_timeout_ms": 2500}"#;
+        let section: WorkerSection = serde_json::from_str(text).unwrap();
+        let config = worker_config(&section, "srv").unwrap();
+        assert_eq!(config.drain_timeout, Duration::from_millis(2500));
+        let zero = r#"{"tenants": {}, "worker": {"dsn": {"value": "postgres://x"}, "drain_timeout_ms": 0}}"#;
+        let error = crate::ServerConfig::from_json(zero)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("drain_timeout_ms is 0"), "{error}");
     }
 
     #[test]

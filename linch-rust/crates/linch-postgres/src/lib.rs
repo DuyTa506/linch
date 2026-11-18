@@ -40,21 +40,27 @@ use sqlx::postgres::{PgConnectOptions, PgConnection, PgPoolOptions};
 use sqlx::{Connection, Postgres, SqlSafeStr, Transaction};
 
 mod codec;
+mod exhausted;
 mod files;
+mod lease_line;
 mod mailbox;
 mod memory;
 mod pool_size;
 mod run;
+mod schema;
 mod session;
 mod tasks;
 mod tool_cache;
 
 pub use codec::CodecError;
+pub use exhausted::{ACQUIRE_TIMEOUT, PoolExhausted, is_pool_exhausted};
 pub use files::PgFileBackend;
+pub use lease_line::LeaseLine;
 pub use mailbox::{DEFAULT_LEASE, PgMailbox};
 pub use memory::{DEFAULT_STATEMENT_TIMEOUT, PgMemoryStore};
 pub use pool_size::{MAX_DEFAULT_CONNECTIONS, MIN_DEFAULT_CONNECTIONS, default_max_connections};
 pub use run::{DEFAULT_RUN_LEASE_TTL, PgRunStore};
+pub use schema::{SchemaError, SchemaVersion, check_table, schema_version};
 pub use session::PgSessionStore;
 pub use sqlx::PgPool;
 pub use sqlx::migrate::MigrateError;
@@ -78,8 +84,9 @@ pub const IDLE_PING_AFTER: Duration = Duration::from_secs(1);
 ///
 /// sqlx's own `PgPool::connect` retries a refused connection until its
 /// 30 s acquire timeout, so an unreachable database would hold the caller
-/// that long. Only this first connect is bounded; later waits for a pooled
-/// connection keep sqlx's defaults.
+/// that long. Only this first connect is bounded; a later wait for a pooled
+/// connection lasts [`ACQUIRE_TIMEOUT`] (30 s), then the call fails with a
+/// [`PoolExhausted`] cause.
 ///
 /// The pool pings a connection before handing it out only when it sat
 /// idle for [`IDLE_PING_AFTER`] or longer, and replaces it when the ping
@@ -131,6 +138,7 @@ pub async fn connect(
                 Ok(true)
             })
         })
+        .acquire_timeout(ACQUIRE_TIMEOUT)
         .max_connections(max_connections.get());
     match tokio::time::timeout(timeout, pool.connect_with(options)).await {
         Ok(connected) => connected,
@@ -268,12 +276,19 @@ fn migrator() -> Migrator {
 ///     MigrateError: If the database is unreachable, a migration fails, or
 ///         an applied migration differs from the embedded one.
 pub async fn migrate(pool: &PgPool) -> Result<(), MigrateError> {
+    let migrator = migrator();
+    // Starting a server on a schema that is already migrated only reads: it
+    // takes no lock, so it does not wait behind a migration that is running
+    // (or hold others up for the milliseconds of a lock and a connection).
+    if schema::is_applied(pool, MIGRATIONS_TABLE, &migrator).await {
+        return Ok(());
+    }
     // The lock lives on a connection of its own, outside the pool, so a
     // one-connection pool can still migrate; closing it (or dropping this
     // future) releases the lock.
     let mut lock = PgConnection::connect_with(&pool.connect_options()).await?;
     sqlx::query(MIGRATE_LOCK).execute(&mut lock).await?;
-    let migrated = migrator().run(pool).await;
+    let migrated = migrator.run(pool).await;
     let _ = lock.close().await;
     migrated
 }

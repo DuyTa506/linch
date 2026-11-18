@@ -122,6 +122,7 @@ docs (`lib.rs:518-569`) and the codes in `crates/linch-rpc/src/error.rs:24-183`.
 | -32013 | `PROVIDER_UNAVAILABLE` | `OpenError` | The provider key is unset (`data.env` names its variable), or the provider client could not be built |
 | -32014 | `STORE_UNAVAILABLE` | `OpenError` | Postgres could not be reached or migrated |
 | -32015 | `MCP_UNAVAILABLE` | `OpenError` | An MCP server of the config could not be connected; `data.server` names it |
+| -32016 | `SCHEMA_NEWER` | `OpenError::SchemaNewer` | The database holds a migration this server does not embed (a newer release migrated it); nothing was read or written; `data: {table, applied, latest}` |
 | -32020 | `STORE` | `RunError` | A store failure not listed below (also a dropped database connection in the middle of a run) |
 | -32021 | `NOT_FOUND` | `RunNotFound` | No such run or session; also `run.report` and `workflow.status` of an id the agent's namespace does not hold |
 | -32022 | `LEASE_LOST` | `LeaseLost` | From a claim or a fenced journal write: another process took the run over, or failed it. The run stopped here without writing |
@@ -263,8 +264,10 @@ There is no buffer that grows without bound on the server:
    it.
 2. A run's task waits for room before it polls the run's stream again, and
    a run advances only while its stream is polled (the core spawns no task
-   for it), so the run pauses. A server request waiting for room counts it
-   against its timeout.
+   for it), so the run pauses. Its lease heartbeat is a task of its own,
+   so the run stays its server's while it waits: no other server can
+   resume it, and it goes on when the client reads again. A server request
+   waiting for room counts it against its timeout.
 3. Reading stops at 64 calls in flight.
 4. The Rust client keeps at most 1024 unread notifications
    (`NOTIFICATION_CAPACITY`, `crates/linch-rpc/src/client.rs:29`), then

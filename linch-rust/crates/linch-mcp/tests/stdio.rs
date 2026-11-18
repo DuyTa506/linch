@@ -161,10 +161,14 @@ async fn disconnect_kills_a_server_that_stopped_reading() {
 #[tokio::test]
 async fn disconnect_kills_what_the_server_started() {
     let marker = std::env::temp_dir().join(format!("linch-mcp-orphan-{}", std::process::id()));
+    // The marker has no extension, so `go` is the marker path plus `.go`.
+    let go = marker.with_extension("go");
     let _ = std::fs::remove_file(&marker);
-    // Like `npx` or `uvx`: a launcher leaves a child behind, here one that
-    // would write the marker after 2 s, then becomes the server.
-    let script = r#"(sleep 2; touch "$0") & exec "$1""#;
+    let _ = std::fs::remove_file(&go);
+    // Like `npx` or `uvx`: a launcher leaves a child behind, then becomes the
+    // server. The child writes the marker only once the test creates `go`,
+    // after the disconnect, so a slow connect cannot let it write early.
+    let script = r#"(while [ ! -e "$0.go" ]; do sleep 0.1; done; touch "$0") & exec "$1""#;
     let args = vec![
         "-c".to_owned(),
         script.to_owned(),
@@ -182,9 +186,11 @@ async fn disconnect_kills_what_the_server_started() {
     assert_eq!(echoed.value, json!("up"));
     server.disconnect().await;
 
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    std::fs::write(&go, b"").unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
     let survived = marker.exists();
     let _ = std::fs::remove_file(&marker);
+    let _ = std::fs::remove_file(&go);
     assert!(!survived, "the server's child outlived the disconnect");
 }
 

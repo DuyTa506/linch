@@ -61,7 +61,7 @@
 
 use std::borrow::Cow;
 
-use linch_postgres::{MigrateError, PgPool};
+use linch_postgres::{MigrateError, PgPool, SchemaError, SchemaVersion};
 use sqlx::migrate::{Migration, MigrationType, Migrator};
 use sqlx::{Postgres, SqlSafeStr, Transaction};
 
@@ -95,7 +95,7 @@ pub use schedule::{
 };
 pub use status::{JobInfo, JobState, MAX_JOBS_LISTED, job, jobs, prune_history};
 pub use timing::Timing;
-pub use worker::{HISTORY_RETENTION, Worker, WorkerConfig};
+pub use worker::{DRAIN_TIMEOUT, HISTORY_RETENTION, Worker, WorkerConfig};
 
 /// Table that records which worker migrations have been applied.
 ///
@@ -165,6 +165,19 @@ fn migrator() -> Migrator {
         table_name: Cow::Borrowed(MIGRATIONS_TABLE),
         ..Migrator::with_migrations(migrations)
     }
+}
+
+/// What the worker migrations have applied in the pool's database and
+/// schema, against what this binary embeds. Writes nothing.
+///
+/// Args:
+///     pool: Pool for the database (and `search_path` schema) to read.
+///
+/// Raises:
+///     SchemaError: `Newer` when the database holds a worker migration this
+///         binary does not embed; `Database` when the read fails.
+pub async fn schema_version(pool: &PgPool) -> Result<SchemaVersion, SchemaError> {
+    linch_postgres::check_table(pool, MIGRATIONS_TABLE, &migrator()).await
 }
 
 /// Create or upgrade the queue and schedule tables in the pool's database.

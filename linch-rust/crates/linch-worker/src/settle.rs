@@ -19,6 +19,10 @@ pub(crate) const MAX_FAILURES: i32 = 5;
 /// Longest wait before a job is tried again (PgQueuer's default).
 pub(crate) const MAX_RETRY_DELAY: Duration = Duration::from_secs(300);
 
+/// Longest wait for the lease releases of the runs a handed-back job
+/// dropped; the same bound as `linch::RELEASE_WAIT`.
+pub(crate) const RELEASE_WAIT: Duration = Duration::from_secs(5);
+
 /// The wait after attempt `attempt` (1 for the first): `base`, doubled for
 /// every earlier attempt, at most [`MAX_RETRY_DELAY`].
 pub(crate) fn backoff(base: Duration, attempt: i32) -> Duration {
@@ -66,6 +70,17 @@ pub(crate) async fn settle(
         Outcome::Lost => {
             tracing::info!(job = id, "lost the job; dropped its run");
             Ok(true)
+        }
+        Outcome::HandedBack => {
+            // The run's lease first: a job visible before it is free would
+            // find the run leased and wait out a backoff.
+            if let Some(agent) = agent {
+                let _ = tokio::time::timeout(RELEASE_WAIT, agent.released()).await;
+            }
+            tracing::info!(job = id, "the drain timeout ran out; handing the job back");
+            lease
+                .release(pool, Duration::ZERO, "the worker stopped", false)
+                .await
         }
     };
     match settled {

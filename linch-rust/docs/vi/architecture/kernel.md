@@ -234,9 +234,10 @@ Các tenant được tách theo namespace, không theo process. Namespace của 
 một phần của mọi khóa store, nên hai agent có namespace khác nhau không bao giờ dùng
 chung run hay session, kể cả trên cùng một cơ sở dữ liệu (`builder.rs:117-121`,
 [stores](./stores.md#khóa-và-đa-tenant)). Nhiều agent chạy trên một Tokio runtime.
-Một run chỉ tiến lên khi stream của nó được poll (`runner.rs:39-40`), và lõi chỉ spawn
-một loại task: task điều khiển các subagent chạy nền của một run đang suspend
-(`runner.rs:41-44`).
+Một run chỉ tiến lên khi stream của nó được poll (`runner.rs:39-40`), và lõi spawn ba
+loại task: task điều khiển các subagent chạy nền của một run đang suspend, heartbeat
+gia hạn lease của run chừng nào run còn sống, và task release một lần ghi lease của
+một run bị drop (`runner.rs:39-45`).
 
 Một registry hay chuỗi hook mà bạn thêm phải theo cùng các quy tắc: nó nằm trong
 `AgentInner` hoặc trên một giá trị mà builder nhận, nó trao ra các `Registration`,

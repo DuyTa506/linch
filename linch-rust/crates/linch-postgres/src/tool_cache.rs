@@ -98,7 +98,7 @@ impl PgToolCache {
 }
 
 fn backend(error: sqlx::Error) -> ToolCacheError {
-    ToolCacheError(Box::new(error))
+    ToolCacheError(crate::exhausted::backend_source(error))
 }
 
 fn json(error: serde_json::Error) -> ToolCacheError {

@@ -32,7 +32,7 @@ impl PgFileBackend {
 }
 
 fn backend(error: sqlx::Error) -> VfsError {
-    VfsError::Backend(error.into())
+    VfsError::Backend(crate::exhausted::backend_source(error))
 }
 
 /// `text` with the `LIKE` wildcards and the escape character escaped.

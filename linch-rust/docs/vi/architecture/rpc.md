@@ -124,6 +124,7 @@ docs (`lib.rs:518-569`) và các mã nằm trong `crates/linch-rpc/src/error.rs:
 | -32013 | `PROVIDER_UNAVAILABLE` | `OpenError` | Key của provider chưa đặt (`data.env` nêu biến của nó), hoặc không dựng được client của provider |
 | -32014 | `STORE_UNAVAILABLE` | `OpenError` | Không kết nối hay migrate được Postgres |
 | -32015 | `MCP_UNAVAILABLE` | `OpenError` | Không kết nối được một MCP server trong config; `data.server` nêu tên nó |
+| -32016 | `SCHEMA_NEWER` | `OpenError::SchemaNewer` | Database có một migration mà server này không nhúng (một bản phát hành mới hơn đã migrate nó); chưa đọc hay ghi gì; `data: {table, applied, latest}` |
 | -32020 | `STORE` | `RunError` | Một lỗi store không nằm trong danh sách dưới (cả một connection database rớt giữa run) |
 | -32021 | `NOT_FOUND` | `RunNotFound` | Không có run hay session như vậy; cũng là `run.report` và `workflow.status` của một id mà namespace của agent không có |
 | -32022 | `LEASE_LOST` | `LeaseLost` | Từ một claim hoặc một lần ghi journal bị fence: một process khác đã nhận run, hoặc làm nó thất bại. Run dừng ở đây mà không ghi |
@@ -261,7 +262,9 @@ Không có buffer nào tăng không giới hạn trên server:
    Writer chờ transport, nên một client đọc chậm sẽ làm đầy nó.
 2. Task của một run chờ chỗ trống trước khi poll stream của run lần nữa, và
    một run chỉ tiến lên khi stream của nó được poll (lõi không spawn task nào
-   cho nó), nên run tạm dừng. Một request của server đang chờ chỗ trống tính thời gian
+   cho nó), nên run tạm dừng. Heartbeat lease của nó là một task riêng, nên run vẫn
+   thuộc server của nó trong lúc chờ: không server nào khác resume được nó, và nó chạy
+   tiếp khi client đọc lại. Một request của server đang chờ chỗ trống tính thời gian
    đó vào timeout của nó.
 3. Việc đọc dừng ở 64 lời gọi đang bay.
 4. Client Rust giữ tối đa 1024 notification chưa đọc

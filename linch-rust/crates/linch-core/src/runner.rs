@@ -38,10 +38,11 @@
 //! attached, which writes the paid receipt before the hooks run.
 //! [`RunStream`] holds the run future and polls it only while the
 //! caller polls the stream; a run on a store whose claims expire renews
-//! its lease inside that future (see `lease`). The one task the core
-//! spawns drives the background subagents of a run suspended for approval
-//! (see `family`), apart from the one-write release of a lease whose run
-//! is dropped.
+//! its lease from a heartbeat task of its own, which lives as long as the
+//! run future does (see `lease`). Apart from that and the one-write
+//! release of a lease whose run is dropped, the one task the core spawns
+//! drives the background subagents of a run suspended for approval (see
+//! `family`).
 
 use std::collections::VecDeque;
 use std::future::Future;

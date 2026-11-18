@@ -13,7 +13,7 @@ ghi "fragment" chỉ trích phần cố định của một thông báo dài hơ
 | Lớp | Mã | Do đâu |
 |---|---|---|
 | `ProtocolError` | -32700, -32600, -32601, -32602, -32603 | Một cấu hình hoặc khai báo mà server không đọc được (-32602); một method mà binary của server không có (-32601: binary cũ hơn client); một lỗi của server (-32603: báo cáo kèm stderr của server) |
-| `OpenError` | -32010 đến -32015 | `open_agent`: cấu hình, provider, kho lưu trữ hoặc một MCP server bị lỗi; -32012 là run contract không tính được digest (hãy báo cáo) |
+| `OpenError` | -32010 đến -32016 | `open_agent`: cấu hình, provider, kho lưu trữ, một schema mới hơn server (-32016, `SchemaNewer`) hoặc một MCP server bị lỗi; -32012 là run contract không tính được digest (hãy báo cáo) |
 | `RunError` và các lớp con | -32020 đến -32034, -32038 và -32050 | Cuối stream của một run, hoặc `agent.events` |
 | `AgentNotFound`, `RunBusy` | -32001, -32002 | Chính lệnh gọi |
 | `Unauthenticated`, `NotAllowed`, `LimitReached` | -32003, -32004, -32005 | Token, các kiểm tra tenant và giới hạn của server từ xa ([Server từ xa](#server-từ-xa-serverconnect)) |
@@ -125,6 +125,11 @@ Thông báo không bao giờ chứa DSN.
 | `error with configuration: relative URL without a base` | DSN không phải là URL | Dùng `postgres://user:pass@host:port/db` |
 | `failed to lookup address information` | Không phân giải được tên host | Sửa host |
 | `the migrations did not finish within 30s` | Một tiến trình khác đang giữ khóa migration | Chờ nó, hoặc tìm migration bị kẹt |
+
+| Thông báo (fragment) | Mã | Nguyên nhân | Cách khắc phục |
+|---|---|---|---|
+| `the database schema is newer than this binary: linch_migrations holds migration <n>, the newest this binary knows is <m>` | -32016 (`SchemaNewer`; `.table`, `.applied`, `.latest`) | Một bản phát hành mới hơn đã migrate cơ sở dữ liệu này; không có gì được đọc hay ghi | Nâng cấp server này lên bản phát hành đã migrate nó, hoặc khôi phục cơ sở dữ liệu từ trước lần migrate ([Stores: Migration như một bước deploy](./stores.md#migration-như-một-bước-deploy)) |
+| `pool timed out after 30s: raise max_pool_connections or lower concurrent runs` | -32020 (ở cuối một run) | Mọi kết nối của pool đều bận trong 30 giây; server cũng ghi log tenant và mức sử dụng của pool | Tăng `stores.max_connections` trong giới hạn của cơ sở dữ liệu, hoặc giảm số run đồng thời ([Stores: Ngân sách kết nối](./stores.md#ngân-sách-kết-nối)); resume run |
 
 Nếu kết nối bị đứt giữa chừng một run, stream của run đó kết thúc với `RunError`
 (mã -32020); run giữ nguyên ở trạng thái bền vững cuối cùng và có thể được resume.

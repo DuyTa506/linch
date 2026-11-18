@@ -16,8 +16,9 @@ use futures::StreamExt;
 use linch_core::events::kinds::ScheduleFireEvent;
 use linch_core::{Agent, Phase, Principal, RunOptions, RunRecord, RunStore, RunStream};
 use linch_core::{SessionId, StoreError};
-use linch_postgres::{PgPool, PgRunStore};
+use linch_postgres::{LeaseLine, PgPool, PgRunStore};
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::chain;
 use crate::factory::{AgentFactory, FactoryError, JobAgent};
@@ -28,6 +29,8 @@ use crate::settle::settle;
 /// What every job task of one worker shares.
 pub(crate) struct Shared {
     pub(crate) pool: PgPool,
+    /// The job heartbeat's connection, apart from `pool`.
+    pub(crate) line: LeaseLine,
     pub(crate) runs: PgRunStore,
     pub(crate) agents: HashMap<String, Agent>,
     /// Opens the agent of a job with a stored definition.
@@ -35,6 +38,9 @@ pub(crate) struct Shared {
     pub(crate) owner: String,
     pub(crate) timeout: Duration,
     pub(crate) retry_delay: Duration,
+    /// Cancelled when the drain timeout runs out: every job in flight stops
+    /// and is handed back.
+    pub(crate) handback: CancellationToken,
 }
 
 impl Shared {
@@ -57,6 +63,7 @@ pub(crate) async fn execute(shared: Arc<Shared>, lease: JobLease) {
     let outcome = tokio::select! {
         outcome = attempt(&shared, &lease, &mut opened) => outcome,
         () = keep_alive(&shared, &lease) => Outcome::Lost,
+        () = shared.handback.cancelled() => Outcome::HandedBack,
     };
     let agent = match &opened {
         Some(opened) => Some(&opened.agent),
@@ -213,11 +220,16 @@ fn continue_run(
 async fn keep_alive(shared: &Shared, lease: &JobLease) {
     let timeout = shared.timeout;
     let mut confirmed = lease.since;
+    // Each attempt is due a third of the timeout after the one before it
+    // began, so one that waited its whole patience is followed by another
+    // at once.
+    let mut due = Instant::now() + timeout / 3;
     loop {
-        tokio::time::sleep(timeout / 3).await;
+        tokio::time::sleep_until(due).await;
         let sent = Instant::now();
+        due = sent + timeout / 3;
         let remaining = timeout.saturating_sub(confirmed.elapsed());
-        let beat = lease.heartbeat(&shared.pool, timeout);
+        let beat = lease.heartbeat(&shared.line, timeout);
         match tokio::time::timeout(remaining, beat).await {
             Ok(Ok(true)) => confirmed = sent,
             Ok(Ok(false)) => return,

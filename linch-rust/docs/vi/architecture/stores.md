@@ -79,11 +79,16 @@ holder, không theo tên owner, vì `RunOptions::owner` mặc định là `linch
   cha resume các run con của nó (`resume_child`) tiếp quản run
   (`runner/start.rs:214-248`, `runner/fail.rs:28`).
 - **Heartbeat.** `runner::lease::Held` (`crates/linch-core/src/runner/lease.rs:55`)
-  gia hạn lease mỗi một phần ba TTL theo bộ hẹn giờ, cạnh run trong run future
-  (`lease.rs:90-105`, `lease.rs:139-158`), nên một lần gọi model dài, một tool hay một
-  back-off retry vẫn giữ được nó; nó chỉ đập khi stream được poll, nên một host bị
-  treo hoặc sập để lease hết hạn. Một `UPDATE` nhỏ cho mỗi khoảng, mỗi run đang chạy;
-  không có gì thêm trên các commit.
+  gia hạn lease mỗi một phần ba TTL từ một task riêng, được spawn khi run được điều
+  khiển và bị abort khi run kết thúc hoặc bị drop, nên một lần gọi model dài, một tool
+  hay một back-off retry vẫn giữ được nó, và một stream không ai poll (một client đã
+  ngừng đọc) cũng vậy. Một host đóng băng hoặc sập làm heartbeat dừng theo, và lease
+  hết hạn. Mỗi nhịp đến hạn sau một phần ba TTL kể từ lúc nhịp trước bắt đầu, và bỏ
+  một lần gia hạn kéo dài quá một phần ba đó; một task bị panic kết thúc run với
+  `LeaseLost`. Trên Postgres, một lần gia hạn chạy trên kết nối `LeaseLine` riêng của
+  store, bị chặn bởi cùng một phần ba đó (cũng đặt làm `statement_timeout`), không bao
+  giờ trong pool. Một `UPDATE` nhỏ cho mỗi khoảng, mỗi run đang chạy; không có gì thêm
+  trên các commit.
 - **Mất lease được xác nhận.** Một lần gia hạn thấy epoch đã đổi kết thúc run ngay với
   `LeaseLost` (một lỗi journal, như một lần ghi bị fence), trừ khi journal đã chuyển
   run ra khỏi `running` (`Journal::settled`).

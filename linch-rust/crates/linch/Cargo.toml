@@ -20,7 +20,9 @@ linch-mcp = { path = "../linch-mcp" }
 linch-postgres = { path = "../linch-postgres" }
 linch-providers = { path = "../linch-providers" }
 linch-tools = { path = "../linch-tools" }
-serde = { version = "1.0.229", features = ["derive"] }
+# `migrate` and `check` also cover the worker's queue tables.
+linch-worker = { path = "../linch-worker" }
+serde ={ version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 # Reads a DSN as the store connects with it, to key its pool on where it
 # connects; the sqlx linch-postgres already builds, with its features.
@@ -45,8 +47,7 @@ rmcp = { version = "3.9.0", default-features = false, features = ["server", "tra
 # The `bench_driver` example reads the process CPU-time clock.
 rustix = { version = "1.1.6", features = ["time"] }
 tempfile = "3.27.0"
-# The `bench_driver` example's worker case: the queue and its shutdown token.
-linch-worker = { path = "../linch-worker" }
+# The `bench_driver` example's worker case: its shutdown token.
 tokio-util = "0.7.20"
 # `rt-multi-thread`: the `bench_driver` example runs on the runtime
 # `linch-server` uses.

@@ -24,7 +24,11 @@ nói giao thức JSON-RPC được mô tả trong tài liệu của crate `linch
 | Client | Client đã khởi động nó | Nhiều client: `Server.connect(...)`, qua socket hoặc WebSocket |
 | Đăng nhập | Không có | `connection.auth` hoặc `Authorization: Bearer` |
 | Allowlist và giới hạn | Không có | Theo từng tenant |
-| Dừng | Khi stdin của nó đóng | Khi nhận SIGINT hoặc SIGTERM |
+| Dừng | Khi stdin của nó đóng | Khi nhận SIGINT hoặc SIGTERM: các run đang chạy bị drop, các job của worker có `worker.drain_timeout_ms` để hoàn tất ([Scheduler](./scheduler.md#dừng-một-worker)) |
+
+`linch-server --migrate` và `linch-server --check` là cách dùng thứ ba của binary: chúng áp
+dụng hoặc đọc schema cơ sở dữ liệu rồi thoát
+([Stores: Migration như một bước deploy](./stores.md#migration-như-một-bước-deploy)).
 
 ---
 
@@ -459,6 +463,14 @@ khi server khởi động lại. Vì vậy listener HTTP:
 Kết thúc một kết nối giống như input của nó kết thúc: các run của nó bị bỏ (một run Postgres giữ
 trạng thái bền vững cuối cùng và có thể resume), các lời gọi của nó được trả lời, và các chỗ của nó
 được giải phóng.
+
+Một client vẫn kết nối nhưng **ngừng đọc** (buffer socket và hàng đợi 1024 message của server
+đầy) làm các run của nó tạm dừng, và vẫn giữ chúng: lease của run được gia hạn bởi một task
+riêng, nên không server nào khác tiếp quản được run khi kết nối còn sống ([Run
+leases](./stores.md#run-leases)). Một WebSocket không đọc gì cũng không nhận được ping: nó bị kết
+thúc khi một ping không gửi được trong `pong_timeout_ms`, và các run của nó bị bỏ như trên. Unix
+socket và stdio không có write timeout: một client cục bộ không bao giờ đọc lại giữ các run của
+nó cho đến khi đóng.
 
 **Một client đang bận nhưng còn sống phải giữ cho event loop của nó chạy.** Pong đến từ code
 WebSocket của client, chạy trên event loop của nó. Một client Python có loop bị chặn lâu hơn

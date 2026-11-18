@@ -98,7 +98,14 @@ namespace's first `/`-separated segment, and one without only by a worker
 with an agent for its namespace (`crates/linch-worker/src/lease.rs`,
 `dequeue`). See [agent definitions](#agent-definitions).
 
-On `shutdown` it waits for the jobs in flight. Dropping the future instead
+On `shutdown` it waits up to `WorkerConfig::drain_timeout` (30 s) for the
+jobs in flight (`worker.rs`, `drain`). A job still running is then handed
+back: `execute` drops the attempt (a dropped run stream releases its run's
+lease through `Held::drop`), waits up to 5 s for `agent.released()`, and
+releases the job with a zero delay and no failure (`Outcome::HandedBack`), so
+the next worker finds neither hold. A job that cannot settle within 10 more
+seconds is aborted and falls back on the visibility timeout. Dropping the
+future instead
 abandons them like a crash: their runs stay resumable and the jobs become
 visible again after the visibility timeout. Database errors inside the loop
 are logged and retried on the next poll.
