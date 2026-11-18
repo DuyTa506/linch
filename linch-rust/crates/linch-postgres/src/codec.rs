@@ -54,6 +54,7 @@ pub(crate) fn not_found(kind: &'static str, namespace: &str, id: &str) -> StoreE
         kind,
         namespace: namespace.to_owned(),
         id: id.to_owned(),
+        pruned: false,
     }
 }
 

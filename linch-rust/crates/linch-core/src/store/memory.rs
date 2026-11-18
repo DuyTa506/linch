@@ -80,6 +80,7 @@ fn not_found(kind: &'static str, namespace: &str, id: &str) -> StoreError {
         kind,
         namespace: namespace.to_owned(),
         id: id.to_owned(),
+        pruned: false,
     }
 }
 

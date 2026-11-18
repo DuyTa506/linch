@@ -150,7 +150,9 @@ async fn run_state<'e>(
 const COMMIT: &str = "WITH moved AS ( \
          UPDATE linch_runs SET status = COALESCE($4, status), \
          checkpoint = COALESCE($5, checkpoint), \
-         last_seq = last_seq + cardinality($7::bigint[]) \
+         last_seq = last_seq + cardinality($7::bigint[]), \
+         ended_at = CASE WHEN COALESCE($4, status) IN ('completed', 'failed', 'aborted') \
+                         THEN now() ELSE ended_at END \
          WHERE namespace = $1 AND run_id = $2 AND epoch = $3 AND status = 'running' \
          AND ($6::bigint IS NULL OR last_seq = $6) RETURNING 1 \
      ), inserted AS ( \
@@ -230,6 +232,30 @@ fn session_busy(error: &sqlx::Error) -> bool {
 }
 
 impl PgRunStore {
+    /// The error for a run with no row: `NotFound`, `pruned` when a
+    /// retention pass deleted it. Only this not-found path reads the
+    /// tombstones, so no read of a run that exists pays for them. A failed
+    /// tombstone read is the error, and not a guess.
+    async fn missing(&self, namespace: &str, run_id: &RunId) -> StoreError {
+        let pruned = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM linch_pruned_runs WHERE namespace = $1 AND run_id = $2)",
+        )
+        .bind(namespace)
+        .bind(run_id.as_str())
+        .fetch_one(&self.pool)
+        .await;
+        match pruned {
+            Ok(true) => StoreError::NotFound {
+                kind: "run",
+                namespace: namespace.to_owned(),
+                id: run_id.as_str().to_owned(),
+                pruned: true,
+            },
+            Ok(false) => not_found("run", namespace, run_id.as_str()),
+            Err(error) => backend(error),
+        }
+    }
+
     /// Run [`COMMIT`]; whether the run row took it.
     async fn write(
         &self,
@@ -271,8 +297,9 @@ impl PgRunStore {
             .fetch_optional(&mut *tx)
             .await
             .map_err(backend)?;
-        let (status, epoch, held_by, holder, left_ms) =
-            row.ok_or_else(|| not_found("run", namespace, run_id.as_str()))?;
+        let Some((status, epoch, held_by, holder, left_ms)) = row else {
+            return Err(self.missing(namespace, run_id).await);
+        };
         let (status, epoch) = (parse_status(&status)?, to_u64(epoch, "epoch")?);
         if status.is_terminal() {
             return Err(StoreError::InvalidTransition {
@@ -466,8 +493,19 @@ impl RunStore for PgRunStore {
         .fetch_optional(&self.pool)
         .await
         .map_err(backend)?;
-        let (session_id, parent_run_id, principal, contract, status, epoch, checkpoint, last_seq) =
-            row.ok_or_else(|| not_found("run", namespace, run_id.as_str()))?;
+        let Some((
+            session_id,
+            parent_run_id,
+            principal,
+            contract,
+            status,
+            epoch,
+            checkpoint,
+            last_seq,
+        )) = row
+        else {
+            return Err(self.missing(namespace, run_id).await);
+        };
         Ok(RunRecord {
             namespace: namespace.to_owned(),
             run_id: run_id.clone(),
@@ -539,7 +577,7 @@ impl RunStore for PgRunStore {
         .await
         .map_err(backend)?;
         if rows.is_empty() {
-            return Err(not_found("run", namespace, run_id.as_str()));
+            return Err(self.missing(namespace, run_id).await);
         }
         rows.into_iter()
             .filter_map(|(text,)| text)
