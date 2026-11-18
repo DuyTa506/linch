@@ -25,6 +25,12 @@
 //! The crate is Unix-only: Bash relies on process groups.
 
 #![forbid(unsafe_code)]
+#![deny(
+    clippy::todo,
+    clippy::unimplemented,
+    clippy::unwrap_used,
+    clippy::panic
+)]
 
 mod bash;
 mod edit;
