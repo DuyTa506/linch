@@ -90,6 +90,10 @@ async fn a_database_a_newer_release_migrated_is_refused_with_its_own_exit_code()
         let refused = run(&[flag, SOURCE[0], SOURCE[1]], Some(&db.dsn)).await;
         assert_eq!(refused.code, Some(3), "{flag}: {}", refused.stderr);
         assert!(refused.stderr.contains("newer"), "{}", refused.stderr);
+        let newer = &status(&refused)["newer"];
+        assert_eq!(newer["table"], "linch_migrations");
+        assert_eq!(newer["applied"], latest + 2);
+        assert_eq!(newer["latest"], latest);
         assert!(
             !refused.stderr.contains("postgres://"),
             "{}",

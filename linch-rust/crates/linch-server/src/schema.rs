@@ -29,7 +29,8 @@ pub const EXIT_BEHIND: u8 = 4;
 pub struct SchemaOutcome {
     /// The exit status.
     pub code: u8,
-    /// One JSON line for stdout; empty when the command failed.
+    /// One JSON line for stdout; empty when the command failed otherwise
+    /// than for a newer schema.
     pub stdout: String,
     /// The reason, for stderr; empty when the command succeeded.
     pub stderr: String,
@@ -44,7 +45,8 @@ pub struct SchemaOutcome {
 /// Returns:
 ///     The exit status and what to print. stdout is one JSON line:
 ///     `{"current": bool, "store": {"applied": n|null, "latest": n},
-///     "worker": {...}}`. No text holds the DSN.
+///     "worker": {...}}`, or `{"newer": {"table", "applied", "latest"}}`
+///     for a database a newer release migrated. No text holds the DSN.
 pub async fn run_schema(action: SchemaAction, dsn: &str) -> SchemaOutcome {
     let status = match action {
         SchemaAction::Migrate => migrate(dsn).await,
@@ -63,14 +65,25 @@ pub async fn run_schema(action: SchemaAction, dsn: &str) -> SchemaOutcome {
                 stderr: String::new(),
             }
         }
-        Err(error) => SchemaOutcome {
-            code: match error {
-                SchemaError::Newer { .. } => EXIT_NEWER,
-                _ => EXIT_FAILED,
-            },
-            stdout: String::new(),
-            stderr: chain(&error),
-        },
+        Err(error) => {
+            let (code, stdout) = match &error {
+                SchemaError::Newer {
+                    table,
+                    applied,
+                    latest,
+                } => (
+                    EXIT_NEWER,
+                    json!({ "newer": { "table": table, "applied": applied, "latest": latest } })
+                        .to_string(),
+                ),
+                _ => (EXIT_FAILED, String::new()),
+            };
+            SchemaOutcome {
+                code,
+                stdout,
+                stderr: chain(&error),
+            }
+        }
     }
 }
 
