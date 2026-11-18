@@ -812,7 +812,7 @@ dòng của một kết quả dài, nên mức tiết kiệm ít nhất cũng b�
 Offload không phủ mọi kết quả. Kết quả dưới ngưỡng được giữ nguyên vẹn, và nhiều kết quả như
 vậy cộng dồn lại; compaction mới là thứ cắt bớt chúng. Chính kết quả của bốn tool hệ thống tệp đi
 qua nguyên vẹn. Một tool không thể trả về ảnh hay dữ liệu nhị phân dưới dạng JSON, nên không có gì
-loại đó để offload. Các dòng của chính `Read` không bị cắt (xem bảng). `details` của một lỗi dành
+loại đó để offload. Các dòng của chính `Read` không bị cắt (xem bảng). Một `read_file` không có `offset` hay `limit` trả về nguyên một tệp gồm các dòng ngắn, dài bao nhiêu cũng vậy (một giá trị có cấu trúc dài hơn khi định dạng đẹp so với ban đầu), vì thế con trỏ yêu cầu `offset` và `limit`. `details` của một lỗi dành
 cho host và không bao giờ tới model, nên không được offload. [Run contract](./agent.md#the-run-contract)
 của agent chứa phiên bản policy của hook và schema của `read_file`, nên một run đã lưu trước khi
 một trong hai thay đổi không thể được resume (`ContractMismatch`). Với store trong bộ nhớ, các tệp chỉ sống bằng tiến trình, nên một

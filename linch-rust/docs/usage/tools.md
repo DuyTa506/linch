@@ -818,7 +818,7 @@ Offload does not reach every result. Results under the threshold are kept
 whole, and many of them add up; compaction is what trims those. The four
 filesystem tools' own results pass through whole. A tool cannot return an
 image or binary data as JSON, so there is nothing of that kind to offload.
-`Read`'s own lines are not cut (see the table). The `details` of an error are
+`Read`'s own lines are not cut (see the table). A `read_file` with no `offset` or `limit` returns a whole file of short lines, however long (a structured value is longer pretty-printed than it was), which is why the pointer asks for `offset` and `limit`. The `details` of an error are
 for the host and never reach the model, so they are not offloaded. The agent's
 [run contract](./agent.md#the-run-contract) holds the hook's policy version
 and `read_file`'s schema, so a run stored before a change of either cannot be

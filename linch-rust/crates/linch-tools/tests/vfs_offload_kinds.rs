@@ -486,6 +486,7 @@ async fn a_crash_at_any_write_keeps_the_pointer_the_result() {
     let pretty = serde_json::to_string_pretty(&rows(6_500)).unwrap();
 
     let mut crashes = 0;
+    let mut outcomes: HashMap<bool, u32> = HashMap::new();
     for target in ["runs", "sessions"] {
         for n in 1..=40u64 {
             for timing in [FaultTiming::Before, FaultTiming::After] {
@@ -524,7 +525,8 @@ async fn a_crash_at_any_write_keeps_the_pointer_the_result() {
                     !result.contains("row 6400"),
                     "{context}: the payload was logged"
                 );
-                assert!(trial.tool_runs() <= 2, "{context}: the tool ran again");
+                assert!(trial.tool_runs() <= 1, "{context}: the tool ran again");
+                *outcomes.entry(interrupted).or_insert(0) += 1;
                 if !interrupted {
                     let backend = trial.sessions.backend(&SessionId::from("s1"));
                     let stored = backend.read("/offload/rows_call_1.txt").await;
@@ -538,4 +540,9 @@ async fn a_crash_at_any_write_keeps_the_pointer_the_result() {
         }
     }
     assert!(crashes > 10, "the sweep crashed {crashes} runs");
+    let seen = |interrupted| outcomes.get(&interrupted).copied().unwrap_or(0);
+    assert!(
+        seen(false) > 0 && seen(true) > 0,
+        "both outcomes occur: {outcomes:?}"
+    );
 }
