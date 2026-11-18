@@ -31,6 +31,8 @@ Linch bản Python có cùng cấu trúc ([compaction](../../../../docs/architec
   compaction sẽ kết thúc run.
 - Việc ước lượng kích thước được tích hợp sẵn: khoảng bốn ký tự cho mỗi token và 1000
   cho mỗi ảnh (`compaction.rs:235-268`). Không có bộ ước lượng token cắm thêm được.
+  Ngưỡng kích hoạt không chỉ dựa vào ước lượng: khi provider đã báo usage, nó theo số
+  token prompt mà provider đếm ([bên dưới](#due-đo-cái-gì)).
 - Một bản tóm tắt đã trả phí được giữ nguyên vẹn trong checkpoint `Compacted`, không
   phải dưới dạng một công thức chỉ chứa hash. Một lần resume nối nó vào mà không cần
   lời gọi provider nào nữa
@@ -46,7 +48,7 @@ Linch bản Python có cùng cấu trúc ([compaction](../../../../docs/architec
 
 | Trường | Mặc định | Ý nghĩa |
 |---|---|---|
-| `threshold_tokens` | không có | Compact khi view ước lượng đạt số token này. Nếu không có, compact gần cửa sổ ngữ cảnh của provider (bên dưới) |
+| `threshold_tokens` | không có | Compact khi [số đo](#due-đo-cái-gì) của view đạt số token này: ước lượng, hoặc số token prompt provider báo gần nhất cộng với ước lượng phần phát sinh sau đó, lấy số lớn hơn. Nếu không có, compact gần cửa sổ ngữ cảnh của provider (bên dưới) |
 | `keep_recent_turns` | 10 | Số lượt assistant được giữ nguyên văn sau bản tóm tắt; tối thiểu 1 |
 | `prompt` | `DEFAULT_PROMPT` | Chỉ dẫn cho lời gọi tóm tắt; chúng nằm trong message user cuối của lời gọi đó |
 | `max_output_tokens` | 4096 | Số token tối đa mà bản tóm tắt được dùng |
@@ -82,8 +84,8 @@ mà không làm gì khi một trong các điều sau đúng
 
 Việc đến hạn do `due` quyết định (`compaction.rs:270-288`):
 
-- Với `threshold_tokens`, ước lượng bằng hoặc vượt ngưỡng đó.
-- Không có nó, ước lượng cộng với phần dự trữ đầu ra đạt 80% cửa sổ ngữ cảnh của model.
+- Với `threshold_tokens`, số đo của view (bên dưới) bằng hoặc vượt ngưỡng đó.
+- Không có nó, số đo cộng với phần dự trữ đầu ra đạt 80% cửa sổ ngữ cảnh của model.
   Phần dự trữ là `max_output_tokens` của spec khi được đặt và khác 0, nếu không thì
   bằng một phần năm cửa sổ, tối thiểu 1 và tối đa 32768. Cửa sổ là
   `Provider::context_window` cho model của spec ([providers](./providers.md)).
@@ -91,6 +93,51 @@ Việc đến hạn do `due` quyết định (`compaction.rs:270-288`):
 Ước lượng tính văn bản, thinking, thông báo catalog, input của tool và kết quả của tool;
 ảnh tốn một lượng cố định; chữ ký và reasoning bị che không được tính
 (`compaction.rs:235-268`).
+
+### `due` đo cái gì
+
+Ước lượng đếm ít hơn provider từ 20% đến 2 lần cho cùng một prompt, và bỏ qua system
+prompt cùng các tool: các run thật đọc được 3426 ước lượng so với khoảng 4342 do
+provider báo (DeepSeek) và 2672 so với 5485 (vLLM, văn bản dạng log). Chỉ kích hoạt
+theo ước lượng thì kích hoạt muộn. Trong một run kịch bản mà prompt thật gấp đôi ước
+lượng cộng 1500 token, trên cửa sổ 8000 token, với kết quả tool lớn dần, ngưỡng không bao
+giờ kích hoạt: provider từ chối prompt ở lượt 13, và bản tóm tắt bị ép sau đó cũng không
+vừa, nên run kết thúc `failed` (khi các bản tóm tắt được miễn khỏi cửa sổ, nó kết thúc
+`failed` sau 4 lần từ chối và 3 bản tóm tắt bắt buộc mà `max_forced` cho phép). Đó là
+lỗi về tính đúng đắn, không phải chuyện tinh chỉnh. Nay run kết thúc `success`, không
+prompt nào bị từ chối, với 8 bản tóm tắt ở đầu lượt (`tests/e2e_compaction_estimator.rs`).
+
+Vì vậy `due` nhận một số đo (`compaction::Anchor::measure`): số lớn hơn giữa ước lượng,
+và số token prompt mà provider báo cho lời gọi primary được chấp nhận gần nhất
+(`Usage::total_input_tokens`: mọi nhóm input, gồm system prompt và tool) cộng với ước
+lượng phần view từ message assistant cuối trở đi, là phần mà báo cáo đó có trước. Nó không
+bao giờ thấp hơn ước lượng, nên một provider báo ít hơn trọng lượng view không làm
+chậm gì cả.
+
+- Mỗi lời gọi primary được chấp nhận thay anchor bằng số token prompt nó báo, hoặc bằng
+  không có gì khi nó không báo: một giá trị cũ nằm dưới message assistant mới hơn sẽ đếm
+  thiếu cả các lượt. Lượt đầu của run, và lượt ngay sau một lần compact, không có anchor và
+  dùng ước lượng.
+- Một lần compact được áp dụng (kể cả micro) xóa nó: báo cáo là của view đã bị thay.
+  Một lần bị từ chối để nguyên nó.
+- Nó được gấp từ các event bền của run, bằng một hàm duy nhất mà runner gọi khi stage event
+  và resume gọi trên những gì đã bền (`Anchor::observe`, `Anchor::of`; chỉ các event
+  `model_call_receipt` loại `primary` và các event `compaction` được áp dụng được tính),
+  nên resume đo giống như run đầu. Không có gì là toàn cục của tiến trình.
+- Micro-compaction được xét trên số đo trừ đi số token ước lượng mà việc xóa loại bỏ, nên
+  nó chỉ đủ khi đưa số đo xuống dưới ngưỡng.
+- Mọi thứ khác giữ nguyên đơn vị ước lượng: kiểm tra `not_smaller`, `tokens_before` và
+  `tokens_after` của event, và biên tăng trưởng của việc giữ. Việc một bản tóm tắt được áp
+  dụng có để view vẫn đến hạn hay không được xét trên số đo trừ đi phần nó loại bỏ
+  (`compaction::measure_after`). Event mang số đo dưới tên `measured_tokens` (không có trên
+  dây khi ước lượng là số đo), nên resume đọc lại đúng phán đoán đó.
+
+Các khoảng trống: lời gọi tóm tắt ở đầu lượt gửi toàn bộ view, nên một ngưỡng vượt quá
+mức vừa cửa sổ (một `threshold_tokens` gần hoặc trên cửa sổ) vẫn gặp lời từ chối; một bản
+tóm tắt bắt buộc gửi phần đã gộp, mà bản thân nó có thể không vừa, và khi đó run kết thúc
+`failed`. Ngưỡng suy ra từ cửa sổ chừa một phần năm cửa sổ cho lời gọi đó. Một ngưỡng thấp
+hơn trọng lượng của các lượt được giữ và overhead của provider bị giữ sau hai bản tóm
+tắt, như ở trên.
 
 `keep_from` là message assistant thứ `keep_recent_turns` tính từ cuối view. Phần được
 giữ bắt đầu từ message đó, nên một kết quả tool không bao giờ bị cắt rời khỏi lời gọi
@@ -190,7 +237,7 @@ Không thử lại trong cùng lượt.
 
 Một model không bao giờ cho ra bản tóm tắt dùng được sẽ không bị hỏi ở mọi lượt đến hạn
 (`compaction::Rejections`). Một bản tóm tắt được áp dụng nhưng để view vẫn đến hạn
-(`compaction::due` trên `tokens_after` của event: ngưỡng kích hoạt thấp hơn trọng lượng của
+(`compaction::due` trên `compaction::measure_after` của event: ngưỡng kích hoạt thấp hơn trọng lượng của
 checkpoint cộng các lượt được giữ, nên lượt kế tiếp lại đến hạn) được tính như một lần từ
 chối: nó đã trả phí và không đổi điều gì mà ngưỡng nhìn thấy được. Sau
 `REJECTIONS_BEFORE_HOLD` (2) lần như vậy liên tiếp, bất kể mã nào, một lượt đến hạn sẽ không

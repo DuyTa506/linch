@@ -29,7 +29,9 @@ What differs in Rust:
   compaction. Python always has a strategy to fall back on; here a refusal
   without compaction ends the run.
 - The size estimate is built in: about four characters per token and 1000 per
-  image (`compaction.rs:235-268`). There is no pluggable token estimator.
+  image (`compaction.rs:235-268`). There is no pluggable token estimator. The
+  trigger does not rest on it alone: once a provider reports usage, it follows
+  the prompt tokens the provider counted ([below](#what-due-measures)).
 - A paid summary is kept whole in the `Compacted` checkpoint, not as a
   hash-only recipe. A resume appends it without another provider call
   (`crates/linch-core/src/run.rs:147-154`, `runner/compact.rs:309-324`).
@@ -44,7 +46,7 @@ What differs in Rust:
 
 | Field | Default | Meaning |
 |---|---|---|
-| `threshold_tokens` | none | Compact when the estimated view reaches this many tokens. Without it, compact near the provider's context window (below) |
+| `threshold_tokens` | none | Compact when the view's [measure](#what-due-measures) reaches this many tokens: the estimate, or the provider's last reported prompt tokens plus the estimate of what followed, whichever is larger. Without it, compact near the provider's context window (below) |
 | `keep_recent_turns` | 10 | Assistant turns kept verbatim after the summary; at least 1 |
 | `prompt` | `DEFAULT_PROMPT` | Instructions for the summary call; they ride in its last user message |
 | `max_output_tokens` | 4096 | Most tokens the summary may use |
@@ -80,8 +82,8 @@ primary call without doing anything when any of these hold
 
 Due is decided by `due` (`compaction.rs:270-288`):
 
-- With `threshold_tokens`, the estimate is at or above it.
-- Without it, the estimate plus an output reserve reaches 80% of the model's
+- With `threshold_tokens`, the view's measure (below) is at or above it.
+- Without it, the measure plus an output reserve reaches 80% of the model's
   context window. The reserve is the spec's `max_output_tokens` when set and
   not 0, else a fifth of the window, at least 1 and at most 32768. The window
   is `Provider::context_window` for the spec's model
@@ -90,6 +92,57 @@ Due is decided by `due` (`compaction.rs:270-288`):
 The estimate counts text, thinking, catalog notices, tool inputs and tool
 results; images cost a fixed amount; signatures and redacted reasoning are not
 counted (`compaction.rs:235-268`).
+
+### What `due` measures
+
+The estimate counts 20% to 2x fewer tokens than a provider reports for the
+same prompt, and leaves out the system prompt and the tools: live runs read
+3426 estimated against about 4342 reported (DeepSeek) and 2672 against 5485
+(vLLM, log-like text). A trigger on the estimate alone fires late. In a
+scripted run whose real prompt was twice the estimate plus 1500 tokens, on an
+8000-token window, with growing tool results, the trigger never fired: the
+provider refused the prompt at turn 13, and the summary that refusal forced
+did not fit either, so the run ended `failed` (with summaries exempt from the
+window, it ended `failed` after 4 refusals and the 3 forced summaries
+`max_forced` allows). A correctness defect, not a tuning matter. The run now
+ends `success` with no prompt refused and 8 summaries at turn starts
+(`tests/e2e_compaction_estimator.rs`).
+
+`due` is therefore given a measure (`compaction::Anchor::measure`): the larger
+of the estimate, and the prompt tokens the provider reported for the latest
+accepted primary call (`Usage::total_input_tokens`: every input bucket, system
+prompt and tools included) plus the estimate of the view from the last
+assistant message on, which is what the report predates. It is never below
+the estimate, so a provider that reports less than the view weighs delays
+nothing.
+
+- Each accepted primary call replaces the anchor with its reported prompt
+  tokens, or with none when it reported none: a stale value under a later
+  assistant message would undercount by whole turns. A run's first turn, and
+  the turn right after a compaction, have no anchor and use the estimate.
+- An applied compaction (micro included) clears it: the report is of the
+  view it replaced. A rejected one leaves it.
+- It is folded from the run's durable events, by one function that the
+  runner calls as it stages events and a resume calls over what is durable
+  (`Anchor::observe`, `Anchor::of`; only `model_call_receipt` events of kind
+  `primary` and applied `compaction` events count), so a resume measures as
+  the first run did. Nothing is process-global.
+- Micro-compaction is judged on the measure less the estimated tokens the
+  clearing removes, so it is enough only when it brings the measure under the
+  trigger.
+- Everything else stays in estimate units: the `not_smaller` check, the
+  event's `tokens_before` and `tokens_after`, and the hold's growth margin.
+  Whether an applied summary left the view still due is judged on the measure
+  less what it removed (`compaction::measure_after`). The event carries the
+  measure as `measured_tokens` (off the wire when the estimate was the
+  measure), so a resume reads the same judgment back.
+
+Gaps: a summary call at a turn's start sends the whole view, so a trigger
+above what fits the window (a `threshold_tokens` near or over it) still
+meets a refusal; a forced summary sends the folded part, which can itself not
+fit, and then the run ends `failed`. The window-derived trigger leaves a
+fifth of the window for that call. A trigger below what the kept turns and
+the provider's overhead weigh is held after two summaries, as above.
 
 `keep_from` is the `keep_recent_turns`-th assistant message from the end of
 the view. The kept part starts at that message, so a tool result is never cut
@@ -195,8 +248,8 @@ for a forced summary. There is no retry within the turn.
 
 A model that never gives a usable summary is not asked at every due turn
 (`compaction::Rejections`). A summary that is applied but leaves the view still
-due (`compaction::due` on the event's `tokens_after`: a trigger below what the
-checkpoint and the kept turns weigh, so the next turn is due again) counts like
+due (`compaction::due` on `compaction::measure_after` of the event: a trigger
+below what the checkpoint and the kept turns weigh, so the next turn is due again) counts like
 a rejection: it was paid for and changed nothing the trigger can see. After
 `REJECTIONS_BEFORE_HOLD` (2) of these in a row, whatever their codes, a turn's
 start that is due does not ask until the estimated view has grown by

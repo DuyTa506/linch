@@ -47,7 +47,7 @@ compacts. The fields, typed as `Compaction`:
 
 | Field | Default | What it controls |
 |---|---|---|
-| `threshold_tokens` | none: follow the context window | Compact a view estimated at this many tokens or more (about four characters per token, 1000 per image). Without it, compact when the estimate plus an output reserve reaches 80% of the provider's [context window](./providers.md#context-window) |
+| `threshold_tokens` | none: follow the context window | Compact a view measured at this many tokens or more: the estimate (about four characters per token, 1000 per image), or, once the provider has reported usage, its last reported prompt tokens plus the estimate of what followed, whichever is larger. Without it, compact when that measure plus an output reserve reaches 80% of the provider's [context window](./providers.md#context-window) |
 | `keep_recent_turns` | `10` | Assistant turns kept verbatim after the summary; at least 1 |
 | `prompt` | the built-in prompt | Instructions for the summary call. `DETAILED_COMPACTION_PROMPT` is Python Linch's `DetailedCompaction` (below) |
 | `max_output_tokens` | `4096` | Most tokens the summary may use; at least 1 |
@@ -80,6 +80,19 @@ over the trigger (a `threshold_tokens` below what the checkpoint and the kept
 turns weigh, so every turn is due again) counts like a rejection, so a tiny
 threshold does not buy a summary at every turn
 ([Architecture](../architecture/compaction.md#the-summary-call)).
+
+The estimate counts 20% to 2x fewer tokens than a provider reports, and
+leaves out the system prompt and the tools. The trigger therefore follows the
+prompt tokens the provider reported for the latest call (system prompt and
+tools included) plus the estimate of what the view gained since, and never
+less than the estimate; a run whose first turn or latest compaction left no
+report uses the estimate. The report is read back from the run's events on a
+resume. The `compaction` event keeps its estimates in `tokens_before` and
+`tokens_after`, and adds `measured_tokens` when the measure was higher. A
+summary call at a turn's start sends the whole view, so keep a
+`threshold_tokens` well under the window; a prompt the provider still refuses
+is shortened as [below](#when-the-prompt-does-not-fit) says
+([Architecture](../architecture/compaction.md#what-due-measures)).
 
 The compaction spec is part of the [run contract](./agent.md#the-run-contract):
 a run started under one setting is not resumed under another.

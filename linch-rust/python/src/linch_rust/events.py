@@ -277,6 +277,9 @@ class CompactionEvent:
     unchanged view): a code, `tool_call`, `empty` or `not_smaller` (the view with
     the whole checkpoint in it is estimated no smaller than the view now), then what follows (the
     next due turn asks again, asks again once the view has grown, or the run ends).
+    `measured_tokens` is what the trigger measured the view at when that was
+    more than `tokens_before`: the provider's last reported prompt tokens plus
+    the estimate of what followed them; `None` until a provider has reported usage.
     """
 
     type: ClassVar[str] = "compaction"
@@ -288,6 +291,7 @@ class CompactionEvent:
     duration_ms: int
     forced: bool = False
     rejected: str | None = None
+    measured_tokens: int | None = None
 
 
 @dataclass(frozen=True)

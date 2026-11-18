@@ -91,6 +91,13 @@ pub struct CompactionEvent {
     /// unchanged view. Omitted when the compaction was applied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rejected: Option<String>,
+    /// Tokens the trigger measured the view at, when that was more than
+    /// `tokens_before`: the provider's last reported prompt tokens (the
+    /// system prompt and tools included) plus the estimate of what the view
+    /// gained since. Omitted when the estimate was the measure, which holds
+    /// until a provider has reported usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measured_tokens: Option<u64>,
 }
 
 /// Why a [`LoopGuardEvent`] tripped.
