@@ -143,6 +143,7 @@ async fn pick_up(
         trace_id: run.trace_id.clone(),
         output_schema: None,
         tool_choice: None,
+        schedule: None,
     };
     let loaded = child.runs.load(&child.namespace, &id).await;
     if let (Ok(_), Some(ctx)) = (&loaded, call) {

@@ -40,6 +40,7 @@ encoding.
 | `type` | Payload, in `events/` | Stored | Delivered | Notes |
 |---|---|---|---|---|
 | `init` | `InitEvent`, `kinds/lifecycle.rs:19` | yes | yes | One per call of the run: the start, and each resume or approve with `resumed` and the `turn` it continues in. The start's carries the run's own `output_schema` and `tool_choice`, and its final tool's name (`final_tool`), which a resume reads back |
+| `schedule_fire` | `ScheduleFireEvent`, `kinds/lifecycle.rs` | yes | yes | A run a worker started for a schedule fire: the `schedule_id` and the `fire_at_ms` it was due, staged right after `init` in the same write, so no write is added. Any other run has none. A resume does not repeat it; it stays in `run.events` |
 | `user` | `UserEvent`, `kinds/lifecycle.rs:62` | yes | yes | `subtype`: `prompt`, `tool_result`, `alignment`, `notification` |
 | `assistant` | `AssistantEvent`, `kinds/lifecycle.rs:72` | yes | yes | |
 | `partial_assistant` | `PartialAssistantEvent`, `kinds/lifecycle.rs:82` | no | yes | |
@@ -88,12 +89,14 @@ the run's stream, and so sent to clients. The two columns are the
 | `seq` | The run's sequence number. Durable events take consecutive seqs from 1; a stream-only event carries the last durable seq, so seqs on the stream repeat and have gaps |
 | `run_id` | The run the event belongs to |
 | `ts_ms` | The producer's wall clock in Unix milliseconds when it made the envelope (`envelope.rs:170-174`). Order by `seq`, never by `ts_ms`: a crashed run and its resume may run on clocks that disagree |
-| `ignorable` | The producer's promise that an unknown `event.type` may be skipped. Absent on the wire when false |
+| `ignorable` | The producer's promise that an unknown `event.type` may be skipped. Absent on the wire when false. The journal sets it only on `schedule_fire` |
 | `event` | The event |
 
 The run's journal makes every envelope (`crates/linch-core/src/journal.rs:315`):
 `v` is `WIRE_VERSION`, `ts_ms` is the time the event was staged, and
-`ignorable` is false. When an envelope becomes durable is the
+`ignorable` is false, except that of a `schedule_fire` event, which is true: it
+only names the schedule behind a run, so a build that predates it may skip it
+(`Event::skippable_by_older_builds`). When an envelope becomes durable is the
 [group commit](./stores.md#group-commit-write-counts) rule: a durable event
 is held until the next barrier write, which carries it.
 
@@ -195,6 +198,13 @@ The child's `seq` is not kept; read the child run's own log for it.
 
 [Skills and subagents](./skills-subagents.md) covers when children run.
 
+### Golden samples
+
+`crates/linch-core/src/events/golden/accounting.json` holds one wire sample
+of `schedule_fire` and of each `model_call_*` kind. A Rust test decodes and
+re-encodes each one to itself; `test_events.py` decodes the same file into
+the client's classes.
+
 ## The Python client
 
 `python/src/linch_rust/events.py` has one frozen dataclass per delivered
@@ -211,7 +221,10 @@ kind, with the wire name as the class variable `type`, gathered in the
   `ignorable`.
 - Nested values (messages, usage, tool result blocks) stay the JSON dicts
   the server sent.
-- The journal-only kinds have no class; the server never sends them.
+- The three journal-only kinds have classes too (`ModelCallDeliveryEvent`,
+  `ModelCallReceiptEvent`, `ModelCallUsageSettlementEvent`), for envelopes
+  read from a journal; the server never streams them, nor returns them from
+  `run.events`, so a client sees them only that way.
 
 So the two sides differ on purpose: Rust refuses what it does not know, and
 the client tolerates it. A client older than its server keeps working on
@@ -227,10 +240,9 @@ text:
 - the variants of `pub enum Event {` in `events/event/mod.rs`, written as
   `Name(Payload),` one per line;
 - the `Serialize` arms written as `Event::Name(e) => tagged("name", e)`;
-- each payload's `pub struct Payload {` body in `events/event/mod.rs` or
-  `events/kinds/*.rs`, and its `pub field:` lines;
-- `subagent` by hand, and none of the kinds in `JOURNAL_ONLY`
-  (`test_events.py:26`).
+- each payload's `pub struct Payload {` body in `events/event/mod.rs`,
+  `events/kinds/*.rs` or `events/model_call.rs`, and its `pub field:` lines;
+- `subagent` by hand.
 
 It then asserts that the set of kinds and each kind's field names equal
 those of the Python classes. It compares names only, not types or
@@ -377,7 +389,10 @@ others, and one is checked by nothing:
 Then run `cargo test -p linch-core events` and the parity test above.
 Adding a variant is a wire change for older readers: an older Rust build
 reads the new kind as `UnknownType` unless the producer marks the envelope
-`ignorable`, and the core never does.
+`ignorable`. The core does so only for a kind a reader loses nothing by
+skipping: `schedule_fire` (`Event::skippable_by_older_builds`, checked by
+`the_fire_is_ignorable_to_an_older_build_and_nothing_else_is`). Decide that in
+that method, never per run.
 
 ## Tests
 

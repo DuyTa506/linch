@@ -1,0 +1,55 @@
+[
+  {
+    "type": "schedule_fire",
+    "schedule_id": "nightly",
+    "fire_at_ms": 1762400000000
+  },
+  {
+    "type": "model_call_delivery",
+    "run_id": "r1",
+    "logical_call_id": "r1:primary:0",
+    "delivery_attempt_id": "r1:primary:0:1",
+    "kind": "primary",
+    "turn_index": 0,
+    "requested_model": "claude"
+  },
+  {
+    "type": "model_call_receipt",
+    "run_id": "r1",
+    "logical_call_id": "r1:primary:0",
+    "delivery_attempt_id": "r1:primary:0:1",
+    "kind": "primary",
+    "actual_model": "claude-served",
+    "disposition": "accepted",
+    "usage": {
+      "input_tokens": 10,
+      "output_tokens": 5,
+      "cache_read_tokens": 2,
+      "cache_creation_tokens": 1
+    },
+    "cost_usd": 0.0125,
+    "duration_ms": 840
+  },
+  {
+    "type": "model_call_usage_settlement",
+    "run_id": "r1",
+    "budget_owner_id": "root",
+    "logical_call_id": "r1:primary:0",
+    "usage": {
+      "input_tokens": 10,
+      "output_tokens": 5,
+      "cache_read_tokens": 2,
+      "cache_creation_tokens": 1
+    },
+    "cost_usd": 0.0125
+  },
+  {
+    "type": "model_call_receipt",
+    "run_id": "r1",
+    "logical_call_id": "r1:compaction:0",
+    "delivery_attempt_id": "r1:compaction:0:1",
+    "kind": "compaction",
+    "disposition": "cancelled",
+    "duration_ms": 0
+  }
+]

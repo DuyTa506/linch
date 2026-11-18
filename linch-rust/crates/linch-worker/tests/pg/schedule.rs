@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use futures::future::join_all;
-use linch_core::{RunStatus, SessionId, ToolScope};
+use linch_core::{Event, RunStatus, SessionId, ToolScope};
 use linch_worker::{
     Cap, Schedule, Timing, WorkerError, create_schedule, delete_agent_schedule, delete_schedule,
     enqueue_run, fire_due_schedules, get_schedule, list_agent_schedules, list_schedules,
@@ -174,6 +174,64 @@ async fn a_fire_becomes_a_run() {
     .await;
     wait_until("its job is acked", || async { db.jobs().await == 0 }).await;
     assert_eq!(probe.started(), 1);
+    worker.stop().await;
+    db.finish().await;
+}
+
+/// The run a schedule's fire makes names that schedule and the time the
+/// fire was due, right after its `init`; a one-off job's run has no such
+/// event.
+#[tokio::test]
+async fn a_fired_run_carries_the_schedule_event() {
+    let Some(db) = TestDb::new("fire_event").await else {
+        return;
+    };
+    create_schedule(&db.pool, &hourly("h"), None).await.unwrap();
+    db.sql("UPDATE linch_worker_schedules SET next_fire = now() - interval '1 second'")
+        .await;
+    let due = next_fire(&db, "h").await;
+    let probe = Probe::new("Lookup", ToolScope::Read, Hold::None);
+    let worker = Running::spawn(&db.pool, config("w1"), agent(&db.pool, probe.clone()));
+    let run_id = db.run_of("sched").await;
+    wait_until("the scheduled run completes", || async {
+        db.status(&run_id).await == RunStatus::Completed
+    })
+    .await;
+
+    let events = db.events(&run_id).await;
+    let kinds: Vec<_> = events.iter().map(|e| e.event.type_name()).collect();
+    assert_eq!(kinds[..3], ["init", "schedule_fire", "user"], "{kinds:?}");
+    let Event::ScheduleFire(fire) = &events[1].event else {
+        panic!("{:?}", events[1].event);
+    };
+    assert_eq!(fire.schedule_id, "h");
+    assert_eq!(
+        i64::try_from(fire.fire_at_ms).unwrap(),
+        due.timestamp_millis()
+    );
+    assert_eq!(events[1].seq, 2);
+
+    // A job that no schedule made has none.
+    let session = SessionId::new("plain");
+    enqueue_run(&db.pool, "default", NS, &session, "go")
+        .await
+        .unwrap();
+    let plain = db.run_of("plain").await;
+    wait_until("the one-off run completes", || async {
+        db.status(&plain).await == RunStatus::Completed
+    })
+    .await;
+    let events = db.events(&plain).await;
+    assert!(
+        events
+            .iter()
+            .all(|e| e.event.type_name() != "schedule_fire"),
+        "{:?}",
+        events
+            .iter()
+            .map(|e| e.event.type_name())
+            .collect::<Vec<_>>()
+    );
     worker.stop().await;
     db.finish().await;
 }

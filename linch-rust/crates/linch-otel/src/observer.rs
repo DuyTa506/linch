@@ -7,7 +7,7 @@ mod calls;
 mod tools;
 
 use linch_core::events::kinds::{
-    ErrorEvent, ResultEvent, ResultSubtype, UserEvent, UserEventSubtype,
+    ErrorEvent, ResultEvent, ResultSubtype, ScheduleFireEvent, UserEvent, UserEventSubtype,
 };
 use linch_core::{Envelope, Event, JsonValue};
 use opentelemetry::trace::SpanKind;
@@ -44,6 +44,10 @@ pub struct RunObserver {
     session_id: Option<String>,
     turn: Option<u64>,
     run_id: Option<String>,
+    /// The schedule that started the run, from its `schedule_fire` event,
+    /// which follows `init`: the run span is already open, so it is set
+    /// on that span, and the spans opened later take it from here.
+    schedule_id: Option<String>,
     trace_id: Option<String>,
     run: Option<Open>,
     step: Option<Open>,
@@ -71,6 +75,7 @@ impl RunObserver {
             session_id: None,
             turn: None,
             run_id: None,
+            schedule_id: None,
             trace_id: None,
             run: None,
             step: None,
@@ -152,6 +157,7 @@ impl RunObserver {
             self.start_run(event, at);
         }
         match event {
+            Event::ScheduleFire(fire) => self.schedule_fire(fire),
             Event::User(user) => self.user(user, at),
             Event::ContextBuild(build) => self.context_build(build, at),
             Event::Assistant(response) => self.assistant(response, at),
@@ -203,7 +209,21 @@ impl RunObserver {
         if let (true, Some(turn)) = (with_turn, self.turn) {
             attributes.push(KeyValue::new(keys::TURN_INDEX, count(turn)));
         }
+        if let Some(id) = &self.schedule_id {
+            attributes.push(KeyValue::new(keys::SCHEDULE_ID, id.clone()));
+        }
         attributes
+    }
+
+    fn schedule_fire(&mut self, fire: &ScheduleFireEvent) {
+        self.schedule_id = Some(fire.schedule_id.clone());
+        if let Some(run) = &self.run {
+            run.set(KeyValue::new(keys::SCHEDULE_ID, fire.schedule_id.clone()));
+            run.set(KeyValue::new(
+                keys::SCHEDULE_FIRE_AT,
+                count(fire.fire_at_ms),
+            ));
+        }
     }
 
     fn start_run(&mut self, event: &Event, at: u64) {

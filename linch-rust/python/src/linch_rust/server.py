@@ -17,6 +17,7 @@ from .agent import Agent, Skipped
 from .callbacks import Callback
 from .config import AgentConfig
 from .errors import LinchError
+from .provider import ModelInfo, ModelList, ProviderCapabilities
 from .run import Observer
 from .tools import HostTool
 
@@ -226,10 +227,110 @@ class Server:
         observers = _observers(config, telemetry)
         return Agent(conn, handle, str(opened["contract"]), observers, skipped)
 
+    async def provider_capabilities(
+        self, provider: Mapping[str, Any] | AgentConfig, model: str | None = None
+    ) -> ProviderCapabilities:
+        """What a provider supports for a model, before any agent is open.
+
+        Nothing is sent to the provider except a self-hosted server's one
+        window probe, and no key is needed. A cloud provider's answer
+        comes from the adapter, not from the vendor.
+
+        Args:
+            provider: The `provider` of an agent config (`{"id": "vllm",
+                "base_url": ...}`), or the whole `AgentConfig`, whose
+                `provider` and `spec.model` are then used.
+            model: The model asked about; with an `AgentConfig` it defaults
+                to the spec's model.
+
+        Returns:
+            The capabilities. `context_source` says whether the window is
+            configured, from the server, from the adapter's table or a
+            default guess.
+
+        Raises:
+            NotAllowed: A remote server does not let the tenant ask, or the
+                provider's `base_url` is not one of its allowed endpoints.
+            ProtocolError: The provider config is invalid.
+        """
+        found, name = _provider_and_model(provider, model)
+        result = await self._started().request(
+            "provider.capabilities", {"provider": found, "model": name}
+        )
+        return ProviderCapabilities.from_wire(result)
+
+    async def list_models(self, provider: Mapping[str, Any] | AgentConfig) -> ModelList:
+        """The models a provider's server lists, in its order.
+
+        Asks the provider's API with the server's key, so the key must be
+        set (a self-hosted server's is optional).
+
+        Args:
+            provider: The `provider` of an agent config, or the whole
+                `AgentConfig`.
+
+        Returns:
+            One `ModelInfo` per model; a field the API does not give is
+            `None`. The list's `truncated` is true when the server followed
+            only the first pages of a longer list.
+
+        Raises:
+            ModelsUnsupported: The provider has no model list.
+            ProviderRequestFailed: The provider could not be reached or
+                answered with an error; the message is fixed text per `kind`.
+            LimitReached: A tenant asked more than 10 times in a minute.
+            OpenError: The provider's key is not set on the server.
+            NotAllowed: As for `provider_capabilities`.
+        """
+        found, _ = _provider_and_model(provider, None)
+        result = await self._started().request("provider.models", {"provider": found})
+        models = [ModelInfo.from_wire(item) for item in result["models"]]
+        return ModelList(models, truncated=bool(result.get("truncated", False)))
+
+    async def model_info(
+        self, provider: Mapping[str, Any] | AgentConfig, model: str | None = None
+    ) -> ModelInfo:
+        """What the provider's server lists about one model.
+
+        Args:
+            provider: The `provider` of an agent config, or the whole
+                `AgentConfig`.
+            model: The model id; with an `AgentConfig` it defaults to the
+                spec's model.
+
+        Returns:
+            The model's entry.
+
+        Raises:
+            ModelNotFound: The list does not hold the model (`truncated` says
+                the list was cut, so it may exist past the cut).
+            ModelsUnsupported: As for `list_models`.
+            ProviderRequestFailed: As for `list_models`.
+            OpenError: As for `list_models`.
+            NotAllowed: As for `provider_capabilities`.
+        """
+        found, name = _provider_and_model(provider, model)
+        result = await self._started().request("provider.model", {"provider": found, "model": name})
+        return ModelInfo.from_wire(result)
+
     def _started(self) -> Connection:
         if self._conn is None:
             raise LinchError("the server is not started; use `async with Server()`")
         return self._conn
+
+
+def _provider_and_model(
+    provider: Mapping[str, Any] | AgentConfig, model: str | None
+) -> tuple[Mapping[str, Any], str]:
+    """The provider config and the model of a call that takes either a
+    provider or a whole agent config."""
+    if "provider" in provider and "spec" in provider:
+        spec = provider["spec"]
+        found: Mapping[str, Any] = provider["provider"]
+        name = model if model is not None else str(spec.get("model", ""))
+    else:
+        found, name = provider, model if model is not None else ""
+    return found, name
 
 
 def _observers(

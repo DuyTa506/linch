@@ -150,3 +150,22 @@ async fn a_failed_probe_keeps_the_default() {
         "OpenAI is never probed"
     );
 }
+
+/// A probe reads a small answer: one past 64 KiB is dropped unread, so a
+/// server that answers it with a flood costs a few KiB of memory, not the
+/// flood.
+#[tokio::test]
+async fn a_probe_answer_over_64_kib_is_dropped() {
+    let pad = "x".repeat(70 * 1024);
+    let models = json!({"data": [{"id": "qwen", "max_model_len": 32_768}], "pad": pad});
+    let (url, _request) = serve_once(ok(&models));
+    let server = OpenAiChat::server(ServerOptions::new(Server::Vllm, format!("{url}/v1"))).unwrap();
+    server.prepare().await;
+    assert_eq!(server.context_window("qwen"), 128_000);
+
+    let small = json!({"data": [{"id": "qwen", "max_model_len": 32_768}], "pad": "x".repeat(1024)});
+    let (url, _request) = serve_once(ok(&small));
+    let server = OpenAiChat::server(ServerOptions::new(Server::Vllm, format!("{url}/v1"))).unwrap();
+    server.prepare().await;
+    assert_eq!(server.context_window("qwen"), 32_768);
+}

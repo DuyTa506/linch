@@ -8,6 +8,7 @@ use linch_core::provider::Thinking;
 use linch_core::{
     JsonObject, JsonValue, ProviderError, ProviderRequest, ReasoningEffort, ToolChoice, Usage,
 };
+use linch_core::{PromptCache, Support};
 use serde_json::json;
 
 use crate::context::ContextRule;
@@ -44,6 +45,28 @@ pub(crate) struct ChatProfile {
     pub context: ContextRule,
     /// How the target refuses a prompt longer than its context window.
     pub overflow: &'static Overflow,
+    /// Whether the target takes image input: the adapter always sends
+    /// `image_url` parts, and a self-hosted server serves whatever model
+    /// it was started with.
+    pub vision: Support,
+    /// Whether a tool call's arguments stream in pieces.
+    pub streams_tool_arguments: bool,
+    /// How the target caches a prompt prefix.
+    pub prompt_cache: PromptCache,
+    /// Whether [`ProviderRequest::stop_sequences`] go in `stop`.
+    pub stop_sequences: bool,
+    /// What the target's `GET /models` list gives per model.
+    pub models: ModelList,
+}
+
+/// How a target's model list is read.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ModelList {
+    /// The members of a list row the target fills.
+    pub row: crate::models::OpenAiRow,
+    /// Whether the list has no window, which the server's `/props` gives
+    /// for its one model.
+    pub props_context: bool,
 }
 
 /// Which forced `tool_choice` forms a target accepts; `auto` and `none`
@@ -72,6 +95,18 @@ pub(crate) static OPENAI: ChatProfile = ChatProfile {
     usage: openai_usage,
     context: ContextRule::Known(OPENAI_CONTEXT),
     overflow: &crate::overflow::OPENAI_CHAT,
+    vision: Support::ModelDependent,
+    streams_tool_arguments: true,
+    prompt_cache: PromptCache::Automatic,
+    stop_sequences: true,
+    models: ModelList {
+        row: crate::models::OpenAiRow {
+            context: None,
+            output: None,
+            modalities: false,
+        },
+        props_context: false,
+    },
 };
 
 /// Python's `openai_chat._KNOWN_CONTEXT`; 128000 for the other models.

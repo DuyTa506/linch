@@ -25,7 +25,11 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use linch_core::{Provider, ProviderError, ProviderRequest, ProviderStream};
+use linch_core::{
+    ContextSource, ModelList, ModelsError, OutputSchemaMode, PromptCache, Provider,
+    ProviderCapabilities, ProviderError, ProviderRequest, ProviderStream, Support, ThinkingCaps,
+    ToolChoiceCaps,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::ApiKey;
@@ -118,6 +122,7 @@ impl Anthropic {
     /// [`ProviderError::Transport`] when the HTTP client cannot be built,
     /// for example when no TLS roots are available.
     pub fn new(options: AnthropicOptions) -> Result<Self, ProviderError> {
+        crate::base_url::require(&options.base_url)?;
         let client = crate::transport::client(CONNECT_TIMEOUT, READ_TIMEOUT)
             .map_err(|err| http::transport(&options.api_key, &err))?;
         Ok(Self { client, options })
@@ -141,6 +146,64 @@ impl Provider for Anthropic {
         thinking: Option<&linch_core::Thinking>,
     ) -> Option<String> {
         payload::tool_choice_refusal(choice, thinking).map(str::to_owned)
+    }
+
+    /// Anthropic's own rules: native JSON outputs, every thinking control,
+    /// explicit `cache_control`, images in every Claude model.
+    fn capabilities(&self, model: &str) -> ProviderCapabilities {
+        ProviderCapabilities {
+            provider: self.id().to_owned(),
+            model: model.to_owned(),
+            declared: true,
+            context_window: CONTEXT_WINDOW,
+            context_source: ContextSource::Table,
+            output_schema: OutputSchemaMode::Native,
+            tool_choice: ToolChoiceCaps::probe(|choice, thinking| {
+                self.tool_choice_refusal(choice, thinking)
+            }),
+            thinking: ThinkingCaps {
+                disable: true,
+                budget: true,
+                effort: true,
+                reasoning_text: true,
+            },
+            vision: Support::Supported,
+            streams_tool_arguments: true,
+            prompt_cache: PromptCache::Explicit,
+            stop_sequences: true,
+        }
+    }
+
+    /// `GET /v1/models`, paged by `after_id` while `has_more`.
+    async fn list_models(&self) -> Result<ModelList, ModelsError> {
+        let base = self.options.base_url.trim_end_matches('/');
+        let key = &self.options.api_key;
+        let headers = [
+            ("x-api-key", key.expose()),
+            ("anthropic-version", API_VERSION),
+        ];
+        let mut models = Vec::new();
+        let mut after: Option<String> = None;
+        let mut truncated = false;
+        for n in 0..crate::models::MAX_PAGES {
+            let mut url = format!("{base}/v1/models?limit=1000");
+            if let Some(after) = &after {
+                url.push_str("&after_id=");
+                url.extend(percent_encoding::utf8_percent_encode(
+                    after,
+                    percent_encoding::NON_ALPHANUMERIC,
+                ));
+            }
+            let page = crate::models::get_json(&self.client, &url, &headers, Some(key)).await?;
+            let (listed, next) = crate::models::anthropic_page(&page);
+            models.extend(listed);
+            match next {
+                Some(next) => after = Some(next),
+                None => break,
+            }
+            truncated = n + 1 == crate::models::MAX_PAGES;
+        }
+        Ok(ModelList { models, truncated })
     }
 
     async fn stream(

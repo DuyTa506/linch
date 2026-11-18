@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import re
 from pathlib import Path
 from typing import get_args
@@ -14,8 +15,12 @@ from linch_rust import (
     CompactionEvent,
     Event,
     InitEvent,
+    ModelCallDeliveryEvent,
+    ModelCallReceiptEvent,
+    ModelCallUsageSettlementEvent,
     ModelFallbackEvent,
     ProviderRetryEvent,
+    ScheduleFireEvent,
     SkillCompletedEvent,
     SkillInvokedEvent,
     SubagentEvent,
@@ -26,8 +31,8 @@ from linch_rust import (
 from linch_rust.events import decode_event
 
 EVENTS_RS = Path(__file__).resolve().parents[2] / "crates/linch-core/src/events"
-# Written only to the accounting journal, never streamed to a client.
-JOURNAL_ONLY = {"model_call_delivery", "model_call_receipt", "model_call_usage_settlement"}
+# The Rust side's own wire samples: its test decodes and re-encodes each one.
+GOLDEN = EVENTS_RS / "golden/accounting.json"
 
 END = {
     "type": "tool_call_end",
@@ -128,19 +133,65 @@ def test_a_resumed_init_names_the_turn_it_continues_in() -> None:
     assert isinstance(again, InitEvent) and (again.resumed, again.turn) == (True, 2)
 
 
+def test_the_golden_accounting_samples_decode_to_typed_events() -> None:
+    samples = json.loads(GOLDEN.read_text(encoding="utf-8"))
+    fire, delivery, receipt, settlement, cancelled = (decode_event(raw) for raw in samples)
+    usage = {
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "cache_read_tokens": 2,
+        "cache_creation_tokens": 1,
+    }
+
+    assert fire == ScheduleFireEvent(schedule_id="nightly", fire_at_ms=1_762_400_000_000)
+    assert delivery == ModelCallDeliveryEvent(
+        run_id="r1",
+        logical_call_id="r1:primary:0",
+        delivery_attempt_id="r1:primary:0:1",
+        kind="primary",
+        requested_model="claude",
+        turn_index=0,
+    )
+    assert receipt == ModelCallReceiptEvent(
+        run_id="r1",
+        logical_call_id="r1:primary:0",
+        delivery_attempt_id="r1:primary:0:1",
+        kind="primary",
+        disposition="accepted",
+        duration_ms=840,
+        actual_model="claude-served",
+        usage=usage,
+        cost_usd=0.0125,
+    )
+    assert settlement == ModelCallUsageSettlementEvent(
+        run_id="r1",
+        logical_call_id="r1:primary:0",
+        usage=usage,
+        budget_owner_id="root",
+        cost_usd=0.0125,
+    )
+    # Absent members stay None, as the Rust side leaves them off the wire.
+    assert isinstance(cancelled, ModelCallReceiptEvent)
+    assert (cancelled.actual_model, cancelled.usage, cancelled.cost_usd) == (None, None, None)
+    assert (cancelled.kind, cancelled.disposition) == ("compaction", "cancelled")
+    # A kind this client does not know stays an UnknownEvent.
+    assert decode_event({"type": "model_call_new", "x": 1}) == UnknownEvent(
+        "model_call_new", {"x": 1}
+    )
+
+
 def rust_kinds() -> dict[str, set[str]]:
-    """Each streamed Rust event kind's wire name and the names of its fields."""
+    """Each Rust event kind's wire name and the names of its fields."""
     event_rs = (EVENTS_RS / "event/mod.rs").read_text(encoding="utf-8")
     kinds_rs = [path.read_text(encoding="utf-8") for path in sorted(EVENTS_RS.glob("kinds/*.rs"))]
-    structs = "\n".join([event_rs, *kinds_rs])
+    model_call_rs = (EVENTS_RS / "model_call.rs").read_text(encoding="utf-8")
+    structs = "\n".join([event_rs, *kinds_rs, model_call_rs])
     enum = event_rs.split("pub enum Event {", 1)[1].split("\n}", 1)[0]
     payloads = dict(re.findall(r"^\s+(\w+)\((\w+)\),$", enum, re.MULTILINE))
     tags = dict(re.findall(r'Event::(\w+)\(e\) => \{?\s*tagged\("(\w+)", e\)', event_rs))
     tags["Subagent"] = "subagent"
     kinds: dict[str, set[str]] = {}
     for variant, tag in tags.items():
-        if tag in JOURNAL_ONLY:
-            continue
         found = re.search(rf"pub struct {payloads[variant]} \{{(.*?)\n\}}", structs, re.DOTALL)
         assert found is not None, payloads[variant]
         kinds[tag] = set(re.findall(r"^\s*pub (\w+):", found.group(1), re.MULTILINE))

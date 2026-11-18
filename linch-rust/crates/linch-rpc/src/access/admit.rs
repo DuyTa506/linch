@@ -14,6 +14,7 @@ use linch::{
     SystemSection, ToolChoice,
 };
 use serde_json::json;
+use url::Url;
 
 use super::allowlists::{McpCommand, PgTarget, allows};
 use super::{Allowlists, Tenant};
@@ -36,6 +37,14 @@ impl Tenant {
             ),
             _ => error,
         }
+    }
+
+    /// Refuse a provider question (`provider.capabilities`, `provider.models`,
+    /// `provider.model`) unless the tenant may ask them and the provider
+    /// is one it may use: the same `base_url` check as `agent.open`, since
+    /// the model calls send the server's key there.
+    pub(crate) fn admit_provider_info(&self, provider: &ProviderConfig) -> Result<(), ErrorObject> {
+        self.allow.admit_provider_info(provider)
     }
 
     /// Refuse `config` unless its namespace is this tenant's and its
@@ -273,19 +282,38 @@ impl Allowlists {
         }
     }
 
+    fn admit_provider_info(&self, provider: &ProviderConfig) -> Result<(), ErrorObject> {
+        if !self.provider_info {
+            let message = "asking a provider about its models is not allowed on this connection";
+            return Err(refused("provider_info", message.into()));
+        }
+        self.admit_provider(provider)
+    }
+
     fn admit_provider(&self, provider: &ProviderConfig) -> Result<(), ErrorObject> {
         if matches!(provider, ProviderConfig::Scripted { .. }) && !self.scripted_provider {
             let message = "the scripted provider is not allowed on this connection";
             return Err(refused("provider", message.into()));
         }
-        match base_url(provider) {
-            Some(url) if !allows(&self.provider_origins, url) => {
-                let message = "provider base_url is not in the tenant's provider_base_urls, \
-                               so the server's key may not be sent there";
-                Err(refused("provider_base_url", message.into()))
-            }
-            _ => Ok(()),
+        let Some(url) = base_url(provider) else {
+            return Ok(());
+        };
+        // The adapter appends its path to the text as written, so the text
+        // must be plain before the allowlist reads it.
+        if let Err(error) = linch::providers::check_base_url(url) {
+            return Err(refused(
+                "provider_base_url",
+                format!("provider base_url refused: {error}"),
+            ));
         }
+        let parsed = Url::parse(url).map_err(|_| refused("provider_base_url", "bad URL".into()))?;
+        let defaults = provider.default_base_paths();
+        if !(self.provider_endpoints.iter()).any(|entry| entry.allows(&parsed, defaults)) {
+            let message = "provider base_url is not in the tenant's provider_base_urls \
+                           (origin and path), so the server's key may not be sent there";
+            return Err(refused("provider_base_url", message.into()));
+        }
+        Ok(())
     }
 
     /// The canonical `path` (the config's `kind`), if it lies in an

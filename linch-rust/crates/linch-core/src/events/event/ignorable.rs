@@ -7,6 +7,7 @@ use crate::json::{JsonObject, JsonValue};
 /// open-ended `ignorable` fallback.
 pub(super) const KNOWN_EVENT_TYPES: &[&str] = &[
     "init",
+    "schedule_fire",
     "user",
     "assistant",
     "partial_assistant",

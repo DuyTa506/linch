@@ -45,6 +45,21 @@ class InitEvent:
 
 
 @dataclass(frozen=True)
+class ScheduleFireEvent:
+    """The schedule fire that started the run, right after its `init`.
+
+    Only a run a worker started for a schedule has one; it is durable, so
+    `Agent.events` finds it. `fire_at_ms` is when the fire was due (Unix
+    milliseconds), not when the worker got to it. A resume of the run does
+    not repeat it.
+    """
+
+    type: ClassVar[str] = "schedule_fire"
+    schedule_id: str
+    fire_at_ms: int
+
+
+@dataclass(frozen=True)
 class UserEvent:
     """A user message: the prompt, tool results, or a runtime notification."""
 
@@ -475,6 +490,68 @@ class ResultEvent:
 
 
 @dataclass(frozen=True)
+class ModelCallDeliveryEvent:
+    """One delivery attempt of a model call was dispatched.
+
+    The three `model_call_*` kinds are the accounting journal's records:
+    the server writes them to the journal and never streams them, so a
+    client sees them only in envelopes read from a journal.
+
+    Attributes:
+        logical_call_id: The logical call this attempts; its receipts share it.
+        delivery_attempt_id: This attempt, the unit of deduplication.
+        kind: `primary` (a turn's call) or `compaction`.
+        turn_index: The turn the call belongs to, when it has one.
+        requested_model: The model asked for.
+    """
+
+    type: ClassVar[str] = "model_call_delivery"
+    run_id: str
+    logical_call_id: str
+    delivery_attempt_id: str
+    kind: str
+    requested_model: str
+    turn_index: int | None = None
+
+
+@dataclass(frozen=True)
+class ModelCallReceiptEvent:
+    """How one delivery attempt ended.
+
+    Attributes:
+        disposition: `accepted`, `rejected`, `cancelled`, `failed` or
+            `not_dispatched`. A cancelled or failed attempt has no `usage`.
+        actual_model: The model that served the call, when it was dispatched.
+        usage: The call's token usage, `None` when unknown.
+        cost_usd: The call's cost, `None` when the model is not priced.
+        duration_ms: How long the attempt took.
+    """
+
+    type: ClassVar[str] = "model_call_receipt"
+    run_id: str
+    logical_call_id: str
+    delivery_attempt_id: str
+    kind: str
+    disposition: str
+    duration_ms: int
+    actual_model: str | None = None
+    usage: JsonObject | None = None
+    cost_usd: float | None = None
+
+
+@dataclass(frozen=True)
+class ModelCallUsageSettlementEvent:
+    """A settled receipt's usage was charged to a budget owner."""
+
+    type: ClassVar[str] = "model_call_usage_settlement"
+    run_id: str
+    logical_call_id: str
+    usage: JsonObject
+    budget_owner_id: str | None = None
+    cost_usd: float | None = None
+
+
+@dataclass(frozen=True)
 class UnknownEvent:
     """A kind this client has no class for; `raw` is the payload without `type`."""
 
@@ -484,6 +561,7 @@ class UnknownEvent:
 
 Event = (
     InitEvent
+    | ScheduleFireEvent
     | UserEvent
     | AssistantEvent
     | PartialAssistantEvent
@@ -513,6 +591,9 @@ Event = (
     | HookEvent
     | ErrorEvent
     | ResultEvent
+    | ModelCallDeliveryEvent
+    | ModelCallReceiptEvent
+    | ModelCallUsageSettlementEvent
     | UnknownEvent
 )
 
@@ -520,6 +601,7 @@ _KINDS: dict[str, type[Any]] = {
     cls.type: cls
     for cls in (
         InitEvent,
+        ScheduleFireEvent,
         UserEvent,
         AssistantEvent,
         PartialAssistantEvent,
@@ -549,6 +631,9 @@ _KINDS: dict[str, type[Any]] = {
         HookEvent,
         ErrorEvent,
         ResultEvent,
+        ModelCallDeliveryEvent,
+        ModelCallReceiptEvent,
+        ModelCallUsageSettlementEvent,
     )
 }
 

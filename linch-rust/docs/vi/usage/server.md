@@ -110,13 +110,14 @@ sẽ bị từ chối. Một tenant chỉ do worker phục vụ thì không cầ
 | Trường `allow` | Khi không có | Cho phép gì |
 |---|---|---|
 | `scripted_provider` | `false` | Provider `scripted`, cho kiểm thử và đánh giá |
+| `provider_info` | `false` | `provider.capabilities`, `provider.models` và `provider.model`: các lời gọi model gửi key của server đến `base_url` của provider, nên `base_url` đó cũng phải được cho phép. `provider.models` và `provider.model` bị giới hạn 10 lần một phút cho mỗi tenant (`-32005`, `kind: provider_calls`); `provider.capabilities` không gửi key |
 | `exec_tools` | `false` | `Bash` cho agent có workspace, chạy lệnh qua execution backend của agent |
 | `max_runs` | 16 | Số run mà tenant điều khiển cùng lúc, trên tất cả các kết nối của nó |
 | `max_agents` | 16 | Số agent mà tenant giữ mở cùng lúc, trên tất cả các kết nối của nó |
 | `max_connections` | 8 | Số kết nối hành động thay mặt tenant cùng lúc |
 | `max_pool_connections` | Kích thước pool mặc định của server: số core, trong khoảng 10 đến 32 | `stores.max_connections` lớn nhất mà một cấu hình có thể yêu cầu; pool của tenant trên mỗi đích có tối đa chừng này kết nối |
 | `max_provider_concurrency` | không có: không có trần | Số lời gọi provider tối đa mà các run của tenant thực hiện cùng lúc trên mỗi key và endpoint provider; một cấu hình có thể xin ít hơn ([Provider](./providers.md#limit-concurrent-calls)) |
-| `provider_base_urls` | không có | Các endpoint mà `base_url` của provider có thể nêu, khớp theo scheme, host và cổng |
+| `provider_base_urls` | không có | Các endpoint mà `base_url` của provider có thể nêu, khớp theo scheme, host, cổng và path. Một mục có path (`https://gw.example/openai/v1`) chỉ cho phép path đó; một mục không có path (`https://gw.example`) cho phép path của chính từng provider ở đó (`/v1` cho OpenAI, không có cho DeepSeek, Anthropic và Gemini, `/v1` hoặc không có cho vLLM, SGLang và llama.cpp). Một `base_url` có query, fragment, userinfo, mã hóa phần trăm, dấu gạch ngược hoặc đoạn path `.`/`..`/rỗng bị từ chối dù có liệt kê gì |
 | `permission_modes` | `default`, `accept_edits` | Các chế độ mà một cấu hình có thể chọn |
 | `workspace_roots` | không có | Các thư mục mà `workspace`, `project_root` hoặc `config_dir` có thể là hoặc nằm dưới |
 | `postgres_dsns` | không có | Các đích Postgres mà DSN của kho lưu trữ có thể dùng: host, cổng hoặc socket, cơ sở dữ liệu, người dùng, tùy chọn khởi động và tệp TLS đều phải khớp một mục, và `sslmode` của nó phải bằng hoặc chặt hơn `sslmode` của mục đó |
@@ -346,7 +347,7 @@ kiểm tra: `NotAllowed` trong Python, có `kind` là tên đó.
 | `namespace` | Namespace không thuộc tenant | Kho lưu trữ được giới hạn theo namespace |
 | `principal` | `principal.tenant` là tenant khác | Một client không thể hành động thay mặt tenant khác |
 | `provider` | Provider `scripted` mà không có `scripted_provider` | Nó dành cho kiểm thử và đánh giá |
-| `provider_base_url` | Một `base_url` ngoài `provider_base_urls`; vLLM, SGLang và llama.cpp luôn nêu một giá trị | Khóa của server sẽ bị gửi đến đó |
+| `provider_base_url` | Một `base_url` ngoài `provider_base_urls` (origin hoặc path), hoặc không phải dạng thường (query, fragment, userinfo, mã hóa phần trăm, đoạn dấu chấm); vLLM, SGLang và llama.cpp luôn nêu một giá trị | Khóa của server sẽ bị gửi đến đó, hoặc đến một path khác của origin đó |
 | `permission_mode` | Một chế độ ngoài `permission_modes` | Chế độ quyết định cái gì chạy mà không hỏi |
 | `auto_allow` | Các mục `auto_allow`, `tasks: True` hoặc `deep_agent`, mà không có `skip_dangerous` trong `permission_modes` | Chúng cho phép lệnh gọi chạy mà không hỏi, như `skip_dangerous`; `tasks` và `deep_agent` thêm bốn tool task vào `auto_allow` |
 | `permission_rule` | Một quy tắc cho phép, mà không có `skip_dangerous` | Tương tự; các quy tắc hỏi hoặc từ chối luôn được chấp nhận |

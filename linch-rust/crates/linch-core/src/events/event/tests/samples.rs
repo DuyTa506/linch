@@ -35,6 +35,10 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
             tool_choice: None,
             final_tool: None,
         }),
+        Event::ScheduleFire(ScheduleFireEvent {
+            schedule_id: "nightly".into(),
+            fire_at_ms: 1_762_400_000_000,
+        }),
         Event::User(UserEvent {
             message: crate::message::Message::user_text("hi"),
             subtype: UserEventSubtype::Prompt,

@@ -48,6 +48,8 @@ pub enum Persistence {
 pub enum Event {
     /// Run initialization.
     Init(InitEvent),
+    /// The schedule fire that started the run, right after `init`.
+    ScheduleFire(ScheduleFireEvent),
     /// A user-authored or user-visible message.
     User(UserEvent),
     /// A completed assistant response.
@@ -194,6 +196,7 @@ impl Event {
         };
         match type_name.as_str() {
             "init" => Ok(Event::Init(payload("init", obj)?)),
+            "schedule_fire" => Ok(Event::ScheduleFire(payload("schedule_fire", obj)?)),
             "user" => Ok(Event::User(payload("user", obj)?)),
             "assistant" => Ok(Event::Assistant(payload("assistant", obj)?)),
             "partial_assistant" => Ok(Event::PartialAssistant(payload("partial_assistant", obj)?)),
@@ -302,6 +305,7 @@ impl Event {
             Event::ModelCallReceipt(_) => JournalOnly,
             Event::ModelCallUsageSettlement(_) => JournalOnly,
             Event::Init(_) => Both,
+            Event::ScheduleFire(_) => Both,
             Event::User(_) => Both,
             Event::Assistant(_) => Both,
             Event::Usage(_) => Both,
@@ -332,6 +336,14 @@ impl Event {
         }
     }
 
+    /// Whether a build that predates this kind may skip it: the producer
+    /// marks its envelope `ignorable`. True only for a kind added after the
+    /// first release that a reader loses nothing by skipping
+    /// (`schedule_fire`, which only names the schedule behind the run).
+    pub(crate) fn skippable_by_older_builds(&self) -> bool {
+        matches!(self, Event::ScheduleFire(_))
+    }
+
     /// Whether this event, or a nested `subagent` event, is an
     /// [`IgnorableEvent`] — i.e. whether an enclosing [`super::Envelope`]
     /// must set `ignorable: true` for this event to decode back.
@@ -356,6 +368,7 @@ impl Serialize for Event {
 
         match self {
             Event::Init(e) => tagged("init", e).serialize(serializer),
+            Event::ScheduleFire(e) => tagged("schedule_fire", e).serialize(serializer),
             Event::User(e) => tagged("user", e).serialize(serializer),
             Event::Assistant(e) => tagged("assistant", e).serialize(serializer),
             Event::PartialAssistant(e) => tagged("partial_assistant", e).serialize(serializer),

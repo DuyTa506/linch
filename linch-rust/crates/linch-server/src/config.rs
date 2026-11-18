@@ -123,6 +123,11 @@ impl fmt::Debug for TokenSource {
 pub struct AllowConfig {
     /// Whether the `scripted` provider is allowed (for tests and evals).
     pub scripted_provider: bool,
+    /// Whether the tenant may ask a provider for its capabilities and its
+    /// model list (`provider.capabilities`, `provider.models`,
+    /// `provider.model`), which sends the server's key to the provider's
+    /// `base_url` (that must be allowed too); off when absent.
+    pub provider_info: bool,
     /// Whether a workspace agent gets `Bash`, which runs commands through
     /// its execution backend (unconfined, as the server's user, with
     /// `local`), with `BashOutput` and `BashKill`; off when absent.
@@ -178,7 +183,9 @@ pub struct AllowConfig {
     /// Memories the tenant may keep in each database, in all its
     /// namespaces, at least 1; required with `memory`.
     pub max_memories: Option<u64>,
-    /// Endpoints a provider `base_url` may name.
+    /// Endpoints a provider `base_url` may name, matched on origin and
+    /// path: an entry with a path allows that path alone, one with none
+    /// allows each provider's own path (`ProviderConfig::default_base_paths`).
     pub provider_base_urls: Vec<String>,
     /// Permission modes a config may choose; `default` and `accept_edits`
     /// when absent. `auto_allow` and rules that allow need
@@ -393,6 +400,7 @@ impl AllowConfig {
     pub fn build(&self) -> Result<Allowlists, AccessError> {
         let mut allow = Allowlists::new()
             .scripted_provider(self.scripted_provider)
+            .provider_info(self.provider_info)
             .exec_tools(self.exec_tools)
             .tool_cache(self.tool_cache)
             .tool_cache_shared(self.tool_cache_shared)

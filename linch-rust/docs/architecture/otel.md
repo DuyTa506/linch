@@ -48,6 +48,8 @@ keeps a convention update local.
 | `compaction` | Identity attributes and turn, `linch.compaction.strategy`; it starts the `compaction` event's `duration_ms` before that event, and holds the summary call's `chat` from there to its `usage` |
 | `execute_tool {tool}` | `gen_ai.operation.name`, `gen_ai.conversation.id`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `linch.run_id`, `linch.turn_index` |
 
+A run a schedule fire started has `linch.schedule.id` on every one of these spans, and `linch.schedule.fire_at_ms` (when the fire was due, in Unix milliseconds) on its `invoke_agent` span. Both come from the run's `schedule_fire` event, which follows `init`, so the run span has them set after it opens. A resumed stream does not repeat that event and has neither. The metrics do not carry them. A worker does not trace its runs; a host that reads a worker run's events can feed them to an observer.
+
 An attribute whose value the observer does not know is left out rather than
 filled with a placeholder.
 

@@ -3,7 +3,10 @@
 use std::error::Error;
 
 use linch::mcp::McpError;
-use linch::{BuildError, JournalError, JsonValue, OpenError, RunError, StoreError};
+use linch::{
+    BuildError, JournalError, JsonValue, ModelsError, OpenError, ProviderError, RunError,
+    StoreError,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -51,7 +54,9 @@ pub mod code {
     /// agent or connection ends. `data` is `{kind, max}`: `kind` is
     /// `runs`, `agents` or `connections` (the tenant's, across its
     /// connections) or `logins` (socket connections waiting to log in),
-    /// `max` the cap.
+    /// `max` the cap. `provider_calls` is a rate, not a count of what is
+    /// open: at most `max` `provider.models` and `provider.model` calls
+    /// per `per_seconds` for the tenant; try again later.
     pub const LIMIT_REACHED: i64 = -32005;
     /// `BuildError::Missing`: a required binding was not set.
     pub const BUILD_MISSING: i64 = -32010;
@@ -117,6 +122,20 @@ pub mod code {
     /// a tool the run does not offer, or the agent's provider refuses it;
     /// `data.reason` says why. Nothing was written.
     pub const INVALID_TOOL_CHOICE: i64 = -32034;
+    /// `provider.models` or `provider.model` named a provider with no model
+    /// list (`scripted`); `data.provider` is its id.
+    pub const MODELS_UNSUPPORTED: i64 = -32035;
+    /// `provider.model` named a model the provider's list does not hold;
+    /// `data.model` is the id asked for, and `data.truncated` is `true`
+    /// when the list was cut short, so the model may exist past the cut.
+    pub const MODEL_NOT_FOUND: i64 = -32036;
+    /// The provider could not be asked, or answered with an error:
+    /// `data.kind` is `unreachable` (a refused connection, a reset, a
+    /// timeout and any other transport failure alike), `status` (with
+    /// `data.status`), `invalid_request` or `other`. The message is one
+    /// fixed text per kind: never the key, the provider's URL or the
+    /// vendor's own words.
+    pub const PROVIDER_REQUEST_FAILED: i64 = -32037;
     /// The agent cannot run in the background, so `schedule.create` and
     /// `job.enqueue` refuse it: `data.reason` is `memory_store` (its runs
     /// would live in this connection only), `host_tools` or `callbacks`
@@ -165,6 +184,15 @@ pub(crate) fn invalid_params(message: &str) -> ErrorObject {
 pub(crate) fn limit_reached(kind: &str, max: usize) -> ErrorObject {
     let message = format!("at most {max} {kind} at once; try again once one ends");
     ErrorObject::new(code::LIMIT_REACHED, message).with_data(json!({ "kind": kind, "max": max }))
+}
+
+/// More than `max` calls of `kind` within `per`: `-32005` with
+/// `data: {kind, max, per_seconds}`.
+pub(crate) fn rate_limited(kind: &str, max: usize, per: std::time::Duration) -> ErrorObject {
+    let seconds = per.as_secs();
+    let message = format!("at most {max} {kind} per {seconds} s; try again later");
+    let data = json!({ "kind": kind, "max": max, "per_seconds": seconds });
+    ErrorObject::new(code::LIMIT_REACHED, message).with_data(data)
 }
 
 /// `error`'s text followed by each cause not already part of it.
@@ -240,6 +268,44 @@ fn store_code(error: &StoreError) -> i64 {
         StoreError::LeaseLost { .. } => code::LEASE_LOST,
         StoreError::Conflict { .. } => code::CONFLICT,
         _ => code::STORE,
+    }
+}
+
+impl From<&ModelsError> for ErrorObject {
+    fn from(error: &ModelsError) -> Self {
+        let message = chain(error);
+        match error {
+            ModelsError::Unsupported { provider } => Self::new(code::MODELS_UNSUPPORTED, message)
+                .with_data(json!({ "provider": provider })),
+            ModelsError::NotFound { model, truncated } => {
+                // A cut list may hold the model past the cut.
+                let data = match truncated {
+                    true => json!({ "model": model, "truncated": true }),
+                    false => json!({ "model": model }),
+                };
+                Self::new(code::MODEL_NOT_FOUND, message).with_data(data)
+            }
+            // One fixed text per kind, so an answer never tells a closed
+            // port from a slow host, and never carries the vendor's words.
+            ModelsError::Provider(error) => {
+                let (message, data) = match error {
+                    ProviderError::Connect { .. } | ProviderError::Transport { .. } => (
+                        "the provider could not be reached",
+                        json!({ "kind": "unreachable" }),
+                    ),
+                    ProviderError::Status { status, .. } => (
+                        "the provider answered with an error status",
+                        json!({ "kind": "status", "status": status }),
+                    ),
+                    ProviderError::InvalidRequest { .. } => (
+                        "the provider request is not valid",
+                        json!({ "kind": "invalid_request" }),
+                    ),
+                    _ => ("the provider request failed", json!({ "kind": "other" })),
+                };
+                Self::new(code::PROVIDER_REQUEST_FAILED, message).with_data(data)
+            }
+        }
     }
 }
 

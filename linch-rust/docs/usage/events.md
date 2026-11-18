@@ -448,6 +448,30 @@ parent's stream this way; a background worker's durable ones do. See
 A background worker's child run changed status: `child_run_id` and `status`
 (`running`, then `completed`, `failed` or `aborted`).
 
+### `ScheduleFireEvent` (`schedule_fire`)
+
+A worker started this run for a [schedule](./scheduler.md#trace-a-run-to-its-schedule)
+fire: `schedule_id` and `fire_at_ms`, when the fire was due in Unix
+milliseconds. It follows the run's first `init` in the same write; a run no
+schedule started, a queued job and a resume have none. Its envelope is
+written `ignorable`, so a Rust build that predates the kind skips it when it
+reads the run's events instead of failing on an unknown type.
+
+### Journal-only kinds
+
+`ModelCallDeliveryEvent` (`model_call_delivery`), `ModelCallReceiptEvent`
+(`model_call_receipt`) and `ModelCallUsageSettlementEvent`
+(`model_call_usage_settlement`) are the accounting journal's records. The
+server writes them to the journal and neither streams them nor returns them
+from `Agent.events`, so the client decodes them only from envelopes read from
+a journal. `ModelCallDeliveryEvent` has `logical_call_id`,
+`delivery_attempt_id`, `kind` (`primary` or `compaction`), `requested_model`
+and `turn_index`; `ModelCallReceiptEvent` the same ids and `kind` with
+`disposition` (`accepted`, `rejected`, `cancelled`, `failed` or
+`not_dispatched`), `duration_ms`, `actual_model`, `usage` and `cost_usd`;
+`ModelCallUsageSettlementEvent` `logical_call_id`, `usage`, `budget_owner_id`
+and `cost_usd`.
+
 ### Kinds the server does not emit yet
 
 The core declares these kinds and the client decodes each into its class,

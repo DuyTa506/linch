@@ -98,6 +98,10 @@ pub use provider::{
     Assembler, AssistantAssembly, CacheControl, CacheTtl, OutputSchema, ProviderEvent,
     ProviderRequest, ReasoningEffort, StreamError, Thinking, ToolChoice, ToolDefinition, assemble,
 };
+pub use provider::{
+    ContextSource, ModelInfo, ModelList, ModelsError, OutputSchemaMode, PromptCache,
+    ProviderCapabilities, Support, ThinkingCaps, ThinkingState, ToolChoiceCaps,
+};
 pub use provider::{DEFAULT_CONTEXT_WINDOW, Provider, ProviderError, ProviderStream};
 pub use provider::{ProviderGate, ProviderPermit, WeakProviderGate};
 pub use registration::Registration;

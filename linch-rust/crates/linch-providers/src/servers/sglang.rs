@@ -24,18 +24,23 @@
 //!   HTTP status in `code`. A graceful abort ends with `finish_reason`
 //!   `abort`.
 //! - **`output_schema`** is refused in a request: the profile sends no
-//!   `response_format`, since the server's guided decoding would bind the
-//!   tool-call text to the schema too, and that was not checked live.
-//!   [`linch_core::Provider::native_output_schema`] is false, so a run with
-//!   a schema offers its final tool instead.
+//!   `response_format`, as vLLM's must not (its guided decoding binds the
+//!   whole answer to the schema, so the model never calls a tool), and
+//!   this server was not checked live for it: the same rule is kept
+//!   rather than assumed away.
+//!   [`linch_core::Provider::native_output_schema`] is false and the
+//!   capabilities say `output_schema: final_tool`, so a run with a schema
+//!   offers its final tool instead.
 
 use linch_core::JsonObject;
 use serde_json::json;
 
 use super::{kwargs, sglang_usage};
 use crate::context::ContextRule;
-use crate::openai::{ChatProfile, ToolChoiceSupport};
+use crate::models::OpenAiRow;
+use crate::openai::{ChatProfile, ModelList, ToolChoiceSupport};
 use crate::openai_compat::stream::ReasoningField;
+use linch_core::{PromptCache, Support};
 
 pub(super) static PROFILE: ChatProfile = ChatProfile {
     id: "sglang",
@@ -52,6 +57,18 @@ pub(super) static PROFILE: ChatProfile = ChatProfile {
     usage: sglang_usage,
     context: ContextRule::Models,
     overflow: &crate::overflow::SGLANG,
+    vision: Support::ModelDependent,
+    streams_tool_arguments: true,
+    prompt_cache: PromptCache::Automatic,
+    stop_sequences: true,
+    models: ModelList {
+        row: OpenAiRow {
+            context: Some("max_model_len"),
+            output: None,
+            modalities: false,
+        },
+        props_context: false,
+    },
 };
 
 pub(super) fn thinking_off_kwargs() -> JsonObject {

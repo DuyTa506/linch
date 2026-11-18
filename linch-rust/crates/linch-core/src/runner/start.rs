@@ -134,6 +134,9 @@ pub(super) async fn new_run(
         tool_choice: options.tool_choice.clone(),
         final_tool: final_tool.as_ref().map(|tool| tool.name.clone()),
     }));
+    if let Some(fire) = &options.schedule {
+        journal.stage(Event::ScheduleFire(fire.clone()));
+    }
     // A session's first run lists the agent's skills, as
     // Python does once per session, when the run offers `Skill` (a child
     // may not); it rides the create write.

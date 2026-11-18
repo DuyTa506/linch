@@ -51,6 +51,7 @@ pub const DEFAULT_TOOL_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 #[derive(Debug)]
 pub struct Allowlists {
     pub(super) scripted_provider: bool,
+    pub(super) provider_info: bool,
     pub(super) exec_tools: bool,
     pub(super) tool_cache: bool,
     pub(super) tool_cache_shared: bool,
@@ -65,7 +66,7 @@ pub struct Allowlists {
     pub(crate) max_queued_jobs: Option<u64>,
     pub(super) memory: bool,
     pub(super) max_memories: Option<u64>,
-    pub(super) provider_origins: Vec<Origin>,
+    pub(super) provider_endpoints: Vec<Endpoint>,
     pub(super) permission_modes: Vec<PermissionMode>,
     pub(super) workspace_roots: Vec<PathBuf>,
     pub(super) postgres: Vec<PgTarget>,
@@ -233,6 +234,7 @@ impl Allowlists {
     pub fn new() -> Self {
         Self {
             scripted_provider: false,
+            provider_info: false,
             exec_tools: false,
             tool_cache: false,
             tool_cache_shared: false,
@@ -247,7 +249,7 @@ impl Allowlists {
             max_queued_jobs: None,
             memory: false,
             max_memories: None,
-            provider_origins: Vec::new(),
+            provider_endpoints: Vec::new(),
             permission_modes: vec![PermissionMode::Default, PermissionMode::AcceptEdits],
             workspace_roots: Vec::new(),
             postgres: Vec::new(),
@@ -294,14 +296,40 @@ impl Allowlists {
         self
     }
 
+    /// Whether the connection may ask a provider for its capabilities and
+    /// its model list (`provider.capabilities`, `provider.models` and
+    /// `provider.model`). Off by default: the model calls send the server's
+    /// key to the provider, outside every run's cap. The provider's
+    /// `base_url` must be allowed too.
+    pub fn provider_info(mut self, allowed: bool) -> Self {
+        self.provider_info = allowed;
+        self
+    }
+
     /// Endpoints a provider `base_url` may name, so they receive the
     /// server's key: `http` or `https` URLs, matched on scheme, host and
-    /// port; the path does not matter.
+    /// port, and on the path. An entry with a path (`https://gw.example/openai/v1`)
+    /// allows that path alone, a trailing slash aside, for any provider. An
+    /// entry with none (`https://gw.example`) allows each provider's own
+    /// path on that origin: `/v1` for OpenAI, none for DeepSeek, Anthropic
+    /// and Gemini, `/v1` or none for a self-hosted server
+    /// ([`linch::ProviderConfig::default_base_paths`]). A `base_url` with a
+    /// query, a fragment, userinfo, an escape, a backslash, or a dot or
+    /// empty path segment is refused whatever is listed, since the adapter
+    /// appends its path to the text as written.
     ///
     /// Raises:
-    ///     AccessError: If an entry is not an `http` or `https` URL.
+    ///     AccessError: If an entry is not an `http` or `https` URL, or is
+    ///         refused for the reasons above.
     pub fn provider_base_urls(mut self, urls: &[String]) -> Result<Self, AccessError> {
-        self.provider_origins = origins("provider_base_urls", urls)?;
+        self.provider_endpoints = (urls.iter().enumerate())
+            .map(|(index, url)| {
+                Endpoint::parse(url).ok_or(AccessError::Url {
+                    list: "provider_base_urls",
+                    index,
+                })
+            })
+            .collect::<Result<_, _>>()?;
         Ok(self)
     }
 
@@ -578,6 +606,42 @@ fn origins(list: &'static str, urls: &[String]) -> Result<Vec<Origin>, AccessErr
             _ => Err(AccessError::Url { list, index }),
         })
         .collect()
+}
+
+/// One entry of `provider_base_urls`: an origin, and the path allowed on
+/// it, empty when the entry names none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Endpoint {
+    origin: Origin,
+    path: String,
+}
+
+impl Endpoint {
+    fn parse(entry: &str) -> Option<Self> {
+        linch::providers::check_base_url(entry).ok()?;
+        let url = Url::parse(entry).ok()?;
+        Some(Self {
+            origin: url.origin(),
+            path: plain_path(&url),
+        })
+    }
+
+    /// Whether this entry allows `url`, which already passed
+    /// [`linch::providers::check_base_url`]: the same origin, and the path
+    /// the entry names, or with none, one of the provider's `defaults`.
+    pub(super) fn allows(&self, url: &Url, defaults: &[&str]) -> bool {
+        let path = plain_path(url);
+        url.origin() == self.origin
+            && match self.path.is_empty() {
+                true => defaults.contains(&path.as_str()),
+                false => path == self.path,
+            }
+    }
+}
+
+/// The path of `url` without its trailing slash.
+fn plain_path(url: &Url) -> String {
+    url.path().trim_end_matches('/').to_owned()
 }
 
 /// Whether `url` shares an origin with one of `allowed`.

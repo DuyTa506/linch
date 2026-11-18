@@ -105,6 +105,7 @@ impl WorkflowContext {
                 trace_id: None,
                 output_schema: None,
                 tool_choice: None,
+                schedule: None,
             };
             let stream = match agent.events(&run_id, 0).await {
                 Err(RunError::Store(StoreError::NotFound { .. })) => agent.run(prompt, options),

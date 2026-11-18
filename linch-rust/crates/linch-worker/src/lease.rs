@@ -8,6 +8,7 @@
 use std::future::Future;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use linch_core::{Principal, RunId, SessionId};
 use linch_postgres::PgPool;
 use tokio::time::Instant;
@@ -35,6 +36,9 @@ pub(crate) struct Job {
     pub(crate) agent: Option<String>,
     /// Who the run acts for; `Err` keeps a row that does not decode.
     pub(crate) principal: Option<Result<Principal, String>>,
+    /// The schedule fire that made the job: the schedule's id and the
+    /// time it was due, which a start job's run names in its events.
+    pub(crate) schedule: Option<(String, DateTime<Utc>)>,
 }
 
 /// Which jobs a worker takes: those without an agent definition in the
@@ -68,6 +72,8 @@ type JobRow = (
     i32,
     Option<String>,
     Option<String>,
+    Option<String>,
+    Option<DateTime<Utc>>,
 );
 
 /// Most times a fenced write runs while it fails with a serialization
@@ -186,7 +192,7 @@ pub(crate) async fn dequeue(
                    j.attempts, j.failures, \
                    (SELECT a.config FROM linch_worker_agents AS a \
                     WHERE a.namespace = j.namespace AND a.digest = j.agent), \
-                   j.principal",
+                   j.principal, j.schedule_id, j.fire_at",
     )
     .bind(queue)
     .bind(&served.namespaces)
@@ -211,6 +217,8 @@ fn decode(row: JobRow, since: Instant) -> JobLease {
         failures,
         agent,
         principal,
+        schedule_id,
+        fire_at,
     ) = row;
     let start = session_id.zip(prompt).map(|(s, p)| (SessionId::new(s), p));
     let approvals = approvals
@@ -225,6 +233,7 @@ fn decode(row: JobRow, since: Instant) -> JobLease {
         principal: principal.map(|text| {
             serde_json::from_str::<Principal>(&text).map_err(|error| error.to_string())
         }),
+        schedule: schedule_id.zip(fire_at),
     };
     JobLease {
         job,

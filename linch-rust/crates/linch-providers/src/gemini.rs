@@ -30,14 +30,18 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use linch_core::{Provider, ProviderError, ProviderRequest, ProviderStream};
+use linch_core::{
+    ContextSource, ModelList, ModelsError, OutputSchemaMode, PromptCache, Provider,
+    ProviderCapabilities, ProviderError, ProviderRequest, ProviderStream, Support, ThinkingCaps,
+    ToolChoiceCaps,
+};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use tokio_util::sync::CancellationToken;
 
 use crate::ApiKey;
 
 mod http;
-mod payload;
+pub(crate) mod payload;
 mod stream;
 
 /// The Gemini API root.
@@ -110,6 +114,7 @@ impl Gemini {
     /// [`ProviderError::Transport`] when the HTTP client cannot be built,
     /// for example when no TLS roots are available.
     pub fn new(options: GeminiOptions) -> Result<Self, ProviderError> {
+        crate::base_url::require(&options.base_url)?;
         let client = crate::transport::client(CONNECT_TIMEOUT, READ_TIMEOUT)
             .map_err(|err| http::transport(&options.api_key, &err))?;
         Ok(Self { client, options })
@@ -125,6 +130,64 @@ impl Provider for Gemini {
     /// Python's table: 2000000 for `gemini-1.5-pro`, else 1048576.
     fn context_window(&self, model: &str) -> u64 {
         crate::context::known(KNOWN_CONTEXT, model, DEFAULT_CONTEXT_WINDOW)
+    }
+
+    /// Gemini's own rules: native JSON schema output, a thinking budget or
+    /// level, implicit caching, and a function call whose arguments arrive
+    /// whole in one part.
+    fn capabilities(&self, model: &str) -> ProviderCapabilities {
+        let table = crate::context::in_table(KNOWN_CONTEXT, model);
+        ProviderCapabilities {
+            provider: self.id().to_owned(),
+            model: model.to_owned(),
+            declared: true,
+            context_window: table.unwrap_or(DEFAULT_CONTEXT_WINDOW),
+            context_source: if table.is_some() {
+                ContextSource::Table
+            } else {
+                ContextSource::Default
+            },
+            output_schema: OutputSchemaMode::Native,
+            tool_choice: ToolChoiceCaps::probe(|choice, thinking| {
+                self.tool_choice_refusal(choice, thinking)
+            }),
+            thinking: ThinkingCaps {
+                disable: true,
+                budget: true,
+                effort: true,
+                reasoning_text: true,
+            },
+            vision: Support::Supported,
+            streams_tool_arguments: false,
+            prompt_cache: PromptCache::Automatic,
+            stop_sequences: true,
+        }
+    }
+
+    /// `GET /v1beta/models`, paged by `pageToken` while `nextPageToken`.
+    async fn list_models(&self) -> Result<ModelList, ModelsError> {
+        let base = self.options.base_url.trim_end_matches('/');
+        let key = &self.options.api_key;
+        let headers = [("x-goog-api-key", key.expose())];
+        let mut models = Vec::new();
+        let mut token: Option<String> = None;
+        let mut truncated = false;
+        for n in 0..crate::models::MAX_PAGES {
+            let mut url = format!("{base}/v1beta/models?pageSize=1000");
+            if let Some(token) = &token {
+                url.push_str("&pageToken=");
+                url.extend(utf8_percent_encode(token, PATH_SEGMENT));
+            }
+            let page = crate::models::get_json(&self.client, &url, &headers, Some(key)).await?;
+            let (listed, next) = crate::models::gemini_page(&page);
+            models.extend(listed);
+            match next {
+                Some(next) => token = Some(next),
+                None => break,
+            }
+            truncated = n + 1 == crate::models::MAX_PAGES;
+        }
+        Ok(ModelList { models, truncated })
     }
 
     async fn stream(

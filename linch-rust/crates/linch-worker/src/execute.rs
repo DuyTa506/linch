@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
+use linch_core::events::kinds::ScheduleFireEvent;
 use linch_core::{Agent, Phase, Principal, RunOptions, RunRecord, RunStore, RunStream};
 use linch_core::{SessionId, StoreError};
 use linch_postgres::{PgPool, PgRunStore};
@@ -146,10 +147,14 @@ async fn open(
             "the job names neither a run nor a prompt".into(),
         ));
     };
-    let stream = agent.run(
-        prompt.clone(),
-        shared.options(session_id.clone(), principal),
-    );
+    let mut options = shared.options(session_id.clone(), principal);
+    // A fire's run names it in its first events. A retried job finds the
+    // run it recorded and resumes it above, so the fire is staged once.
+    options.schedule = job.schedule.as_ref().map(|(id, due)| ScheduleFireEvent {
+        schedule_id: id.clone(),
+        fire_at_ms: u64::try_from(due.timestamp_millis()).unwrap_or(0),
+    });
+    let stream = agent.run(prompt.clone(), options);
     // Nothing is written until the stream is polled, so the job knows its
     // run before the run exists.
     match lease.record_run(&shared.pool, stream.run_id()).await {

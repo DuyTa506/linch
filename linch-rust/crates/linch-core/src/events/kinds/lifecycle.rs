@@ -59,6 +59,23 @@ pub struct InitEvent {
     pub final_tool: Option<String>,
 }
 
+/// The schedule fire that started the run, staged with its `init` by a run
+/// a worker started for a schedule ([`crate::RunOptions::schedule`]). A run
+/// not started by a fire has none, so its stream is unchanged.
+///
+/// A resume or approve of the run does not repeat it: it stays in the
+/// run's durable events (`run.events`), where a reader finds the schedule
+/// that made the run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduleFireEvent {
+    /// The schedule that fired.
+    pub schedule_id: String,
+    /// The time the schedule was due to fire, in Unix milliseconds: the
+    /// planned time, not when the worker got to it.
+    pub fire_at_ms: u64,
+}
+
 /// Why a [`UserEvent`] was emitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

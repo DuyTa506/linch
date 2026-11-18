@@ -26,18 +26,24 @@
 //!   the HTTP status as an integer `code`, also as a mid-stream frame
 //!   before `[DONE]`. `finish_reason` may be `abort` or `repetition`.
 //! - **`output_schema`** is refused in a request: the profile sends no
-//!   `response_format`, since the server's guided decoding would bind the
-//!   tool-call text to the schema too, and that was not checked live.
-//!   [`linch_core::Provider::native_output_schema`] is false, so a run with
-//!   a schema offers its final tool instead.
+//!   `response_format`. The server takes one, but with it and tools in the
+//!   same request its guided decoding binds the whole answer to the
+//!   schema, and the model never calls a tool: a request that asked for a
+//!   tool call still came back as schema JSON with zero tool calls
+//!   (checked by hand against a live vLLM server, 2026-11-17).
+//!   [`linch_core::Provider::native_output_schema`] is false and the
+//!   capabilities say `output_schema: final_tool`, so a run with a schema
+//!   offers its final tool instead.
 
 use linch_core::{JsonObject, Usage};
 use serde_json::json;
 
 use super::kwargs;
 use crate::context::ContextRule;
-use crate::openai::{ChatProfile, ToolChoiceSupport};
+use crate::models::OpenAiRow;
+use crate::openai::{ChatProfile, ModelList, ToolChoiceSupport};
 use crate::openai_compat::stream::{ReasoningField, WireUsage};
+use linch_core::{PromptCache, Support};
 
 pub(super) static PROFILE: ChatProfile = ChatProfile {
     id: "vllm",
@@ -54,6 +60,18 @@ pub(super) static PROFILE: ChatProfile = ChatProfile {
     usage,
     context: ContextRule::Models,
     overflow: &crate::overflow::VLLM,
+    vision: Support::ModelDependent,
+    streams_tool_arguments: true,
+    prompt_cache: PromptCache::Automatic,
+    stop_sequences: true,
+    models: ModelList {
+        row: OpenAiRow {
+            context: Some("max_model_len"),
+            output: None,
+            modalities: false,
+        },
+        props_context: false,
+    },
 };
 
 pub(super) fn thinking_off_kwargs() -> JsonObject {

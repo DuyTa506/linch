@@ -309,6 +309,17 @@ không thấy được một worker ở process khác, nên `max_schedules` là 
 một worker đang chạy. Worker cũng kiểm tra lại ở mỗi lần kích hoạt: một tenant bị gỡ
 `max_schedules` sẽ làm job của lần kích hoạt thất bại.
 
+## Truy vết một run về lịch của nó
+
+Một run mà một lần kích hoạt lịch bắt đầu có một event `schedule_fire` (`ScheduleFireEvent`
+trong client) ngay sau `init` của nó, với `schedule_id` và
+`fire_at_ms`, thời điểm lần kích hoạt đến hạn tính bằng mili giây Unix. Nó bền vững,
+nên `Agent.events(run_id)` tìm thấy nó, và nó đến trên stream của run khi một
+client đọc stream. Một run được đưa vào hàng đợi bằng `job.enqueue` không có nó, và một lần resume
+không lặp lại nó. Envelope của nó là `ignorable`, nên một bản build cũ hơn đọc các
+event của run sẽ bỏ qua nó. Các span OpenTelemetry của run mang `linch.schedule.id`
+([Khả năng quan sát](./observability.md)).
+
 ## Độ bền vững
 
 - **Mỗi lần kích hoạt được đưa vào hàng đợi đúng một lần.** Hàng của một lịch đến hạn bị

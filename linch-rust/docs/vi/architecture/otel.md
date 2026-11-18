@@ -50,6 +50,8 @@ giúp một lần cập nhật convention chỉ ảnh hưởng cục bộ.
 | `compaction` | Các attribute định danh và lượt, `linch.compaction.strategy`; nó bắt đầu `duration_ms` của event `compaction` trước event đó, và giữ `chat` của lời gọi tóm tắt từ đó đến `usage` của nó |
 | `execute_tool {tool}` | `gen_ai.operation.name`, `gen_ai.conversation.id`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `linch.run_id`, `linch.turn_index` |
 
+Một run mà một lần kích hoạt lịch bắt đầu có `linch.schedule.id` trên mọi span này, và `linch.schedule.fire_at_ms` (lúc lần kích hoạt đến hạn, tính bằng mili giây Unix) trên span `invoke_agent` của nó. Cả hai đến từ event `schedule_fire` của run, event này theo sau `init`, nên span của run có chúng được đặt sau khi nó mở. Một stream được resume không lặp lại event đó và không có cả hai. Các metric không mang chúng. Một worker không trace các run của nó; một host đọc các event của một run worker có thể đưa chúng cho một observer.
+
 Một attribute mà observer không biết giá trị sẽ bị bỏ qua thay vì được điền một
 placeholder.
 

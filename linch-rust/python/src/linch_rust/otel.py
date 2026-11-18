@@ -62,6 +62,7 @@ from .events import (
     InitEvent,
     JsonObject,
     ResultEvent,
+    ScheduleFireEvent,
     SuspendedEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
@@ -101,6 +102,10 @@ TOKEN_TYPE = "gen_ai.token.type"
 RUN_ID = "linch.run_id"
 TURN_INDEX = "linch.turn_index"
 RESUMED = "linch.resumed"
+# Rust only: Python Linch has no schedules. On every span of a scheduled run;
+# the fire time (Unix ms) is on the run span only.
+SCHEDULE_ID = "linch.schedule.id"
+SCHEDULE_FIRE_AT = "linch.schedule.fire_at_ms"
 STOP_REASON = "linch.stop_reason"
 COMPACTION_STRATEGY = "linch.compaction.strategy"
 # Rust only: Python Linch does not export cost.
@@ -326,6 +331,9 @@ class RunObserver:
         self._turn = turn
         self._run_id: str | None = None
         self._run: _Open | None = None
+        # From the `schedule_fire` event that follows `init`: the run span is
+        # already open, so it is set there, and later spans take it from here.
+        self._schedule_id: str | None = None
         self._trace_id: str | None = None
         self._step: _Open | None = None
         # When the next turn begins: the prompt, or the end of the last turn.
@@ -361,7 +369,9 @@ class RunObserver:
             self._close_answered_chat()
         if self._run is None:
             self._start_run(event, at)
-        if isinstance(event, UserEvent):
+        if isinstance(event, ScheduleFireEvent):
+            self._schedule_fire(event)
+        elif isinstance(event, UserEvent):
             self._user(event, at)
         elif isinstance(event, ContextBuildEvent):
             self._context_build(event, at)
@@ -419,7 +429,15 @@ class RunObserver:
                 attributes[key] = value
         if with_turn and self._turn is not None:
             attributes[TURN_INDEX] = _count(self._turn)
+        if self._schedule_id is not None:
+            attributes[SCHEDULE_ID] = self._schedule_id
         return attributes
+
+    def _schedule_fire(self, event: ScheduleFireEvent) -> None:
+        self._schedule_id = event.schedule_id
+        if self._run is not None:
+            self._run.set(SCHEDULE_ID, event.schedule_id)
+            self._run.set(SCHEDULE_FIRE_AT, _count(event.fire_at_ms))
 
     def _start_run(self, event: Event, at: int) -> None:
         resumed = True
@@ -639,6 +657,8 @@ class RunObserver:
             attributes[RUN_ID] = self._run_id
         if self._turn is not None:
             attributes[TURN_INDEX] = _count(self._turn)
+        if self._schedule_id is not None:
+            attributes[SCHEDULE_ID] = self._schedule_id
         return self._start(parent, f"{EXECUTE_TOOL} {name}", SpanKind.INTERNAL, at, attributes)
 
     def _tool_end(self, event: ToolCallEndEvent, at: int) -> None:

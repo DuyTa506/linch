@@ -66,7 +66,9 @@ class LimitReached(RpcError):
 
     @property
     def kind(self) -> str:
-        """`runs`, `agents`, `connections`, `logins`, `schedules` or `jobs`."""
+        """`runs`, `agents`, `connections`, `logins`, `schedules`, `jobs` or
+        `provider_calls` (a rate: `max` calls of `provider.models` and
+        `provider.model` per minute, so try again later)."""
         return _field(self.data, "kind")
 
     @property
@@ -277,7 +279,64 @@ class InvalidSchedule(SchedulerError):
         return _field(self.data, "reason")
 
 
+class ProviderInfoError(RpcError):
+    """A question about a provider failed (-32035 to -32037): see
+    `ModelsUnsupported`, `ModelNotFound` and `ProviderRequestFailed`."""
+
+
+class ModelsUnsupported(ProviderInfoError):
+    """The provider has no model list (-32035), such as `scripted`."""
+
+    @property
+    def provider(self) -> str:
+        """The provider's id."""
+        return _field(self.data, "provider")
+
+
+class ModelNotFound(ProviderInfoError):
+    """The provider's list does not hold the model (-32036)."""
+
+    @property
+    def model(self) -> str:
+        """The model id asked for."""
+        return _field(self.data, "model")
+
+    @property
+    def truncated(self) -> bool:
+        """The list was cut short, so the model may exist past the cut."""
+        try:
+            return bool(self.data["truncated"])
+        except (TypeError, KeyError):
+            return False
+
+
+class ProviderRequestFailed(ProviderInfoError):
+    """The provider could not be asked, or answered with an error (-32037).
+
+    The message is fixed text per `kind`: it names neither the key, the
+    provider's URL nor the vendor's own words.
+    """
+
+    @property
+    def kind(self) -> str:
+        """`unreachable` (a refused connection, a reset, a timeout and any
+        other transport failure look alike), `status`, `invalid_request` or
+        `other`."""
+        return _field(self.data, "kind")
+
+    @property
+    def status(self) -> int | None:
+        """The HTTP status of a `status` failure, else `None`."""
+        try:
+            return int(self.data["status"])
+        except (TypeError, KeyError, ValueError):
+            return None
+
+
 _BY_CODE: dict[int, type[RpcError]] = {
+    -32035: ModelsUnsupported,
+    -32036: ModelNotFound,
+    -32037: ProviderRequestFailed,
     -32040: NotBackground,
     -32041: ScheduleNotFound,
     -32042: ScheduleExists,
@@ -313,6 +372,8 @@ def error_from(obj: dict[str, Any]) -> RpcError:
             cls = OpenError
         elif -32034 <= code <= -32020:
             cls = RunError
+        elif -32037 <= code <= -32035:
+            cls = ProviderInfoError
         else:
             cls = RpcError
     return cls(code, str(obj.get("message", "")), obj.get("data"))

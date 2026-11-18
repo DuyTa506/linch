@@ -386,7 +386,8 @@ bật nó (`deepseek.rs:129`). Khi thinking bật, mọi lượt assistant trư�
 thất bại với 400 (`deepseek.rs:147-153`). Một `tool_choice` bắt buộc khi thinking bật,
 và mọi `output_schema`, thất bại ngay tại chỗ với `InvalidRequest`:
 DeepSeek không có response format JSON-schema và chế độ `json_object` không
-mang schema. `native_output_schema` là `false`, nên một run có schema đưa ra
+mang schema. `native_output_schema` là `false` (capabilities báo
+`output_schema: final_tool`), nên một run có schema đưa ra
 final tool của nó thay thế, và `tool_choice_refusal` (cùng quy tắc với của
 payload) từ chối một lựa chọn bị ép trừ khi thinking là `Disabled`.
 Effort ánh xạ `medium` và `xhigh` sang `high` (`deepseek.rs:184`).
@@ -415,8 +416,15 @@ bỏ ra (`profile.rs:144-154`). Một `output_schema` được gửi dưới d�
 `response_format: {"type": "json_schema", "json_schema": {name, strict,
 schema, description?}}` khi quy tắc `json_schema` của profile bật, mà chỉ
 profile của OpenAI bật; vLLM, SGLang và llama.cpp từ chối nó ngay tại chỗ với
-`InvalidRequest` cho đến khi từng cái được đối chiếu với tài liệu của server, và
-báo `native_output_schema` là `false`, nên một run đưa ra final tool ở đó.
+`InvalidRequest`, và báo `native_output_schema` là `false`
+(`output_schema: final_tool`), nên một run đưa ra final tool ở đó. Lý do chỉ
+được kiểm chứng với vLLM: với `response_format` `json_schema` và tool trong cùng
+một request, guided decoding của nó ràng buộc cả câu trả lời vào schema và model
+không bao giờ gọi tool (một request yêu cầu gọi tool vẫn trả về JSON theo schema
+với 0 lời gọi tool, chạy với một server thật ngày 2026-11-17). Vì vậy
+`final_tool` không có nghĩa là vLLM không làm được structured output; nó có
+nghĩa là một run có cả tool không được gửi schema. SGLang và llama.cpp giữ cùng
+quy tắc, chưa kiểm chứng.
 `tool_choice_refusal` là hàng `tool_choice` của profile, quy tắc mà
 `build_payload` kiểm tra.
 
@@ -630,6 +638,82 @@ async fn main() {
     }
 }
 ```
+
+## Khả năng và danh sách model
+
+`Provider::capabilities(model)` (`crates/linch-core/src/provider/client.rs`)
+trả lời adapter hỗ trợ gì dưới dạng dữ liệu thuần,
+`ProviderCapabilities` (`provider/capabilities.rs`). Nó không có I/O: một cửa sổ
+mà server báo được `prepare` đọc một lần. Mọi adapter đều ghi đè nó và nêu từng
+trường; phần mặc định của trait chỉ lặp lại những gì trait đã nói
+(`declared: false`, vision `unknown`, không hỗ trợ gì khác), nên không adapter nào
+dùng quy tắc của adapter khác. Các server profile nêu `vision`,
+`streams_tool_arguments`, `prompt_cache`, `stop_sequences` và hình dạng danh sách
+model của chúng thành các trường `ChatProfile` bắt buộc, nên trình biên dịch buộc
+mỗi profile phải nêu từng cái.
+
+| Trường | Ý nghĩa |
+|---|---|
+| `context_window`, `context_source` | Cửa sổ mà một run sẽ dùng, và nó là `configured`, từ `server`, từ `table` của adapter hay một phỏng đoán `default` |
+| `output_schema` | `native` (`Provider::native_output_schema` là true: schema nằm trong request theo dạng riêng của provider) hoặc `final_tool` (nó là false: request không mang schema và run đưa ra một final tool làm từ schema). Không phải "server có làm được structured output không": vLLM nhận một `response_format` mà vẫn là `final_tool`, vì khi tool nằm trong cùng request nó không bao giờ gọi chúng |
+| `tool_choice` | `auto`, `none`, `required`, `named`, và `forced_refused_with`: các trạng thái thinking (`unset`, `adaptive`, `budgeted`) mà trong đó một lựa chọn ép buộc bị từ chối. Được đọc bằng cách thăm dò `tool_choice_refusal`, nên đó là quy tắc của agent |
+| `thinking` | `disable` (`thinking: disabled` được gửi), `budget`, `effort`, `reasoning_text` (stream mang văn bản reasoning; adapter Responses chỉ có nó với một `reasoning_summary`) |
+| `vision` | `supported` (Anthropic, Gemini), `model_dependent` (adapter gửi ảnh, model được phục vụ quyết định) |
+| `streams_tool_arguments` | Chỉ false với Gemini, nơi một lời gọi đến nguyên vẹn |
+| `prompt_cache` | `explicit` (`cache_control` của Anthropic) hoặc `automatic` (server cache một prefix dùng chung; không gửi điều khiển nào) |
+| `stop_sequences` | False với Responses API, nơi chúng bị từ chối |
+
+`crates/linch-providers/src/capabilities_tests.rs` kiểm tra mọi quy tắc đã khai báo
+so với hành vi của adapter: mỗi lựa chọn tool với mỗi trạng thái thinking so với
+cả lời từ chối lẫn việc payload có dựng được hay không, output schema và stop
+sequence so với payload, và thinking, effort, budget và `cache_control` so với việc
+chúng có thay đổi phần thân request hay không.
+
+`list_models()` và `model_info(model)` hỏi API của vendor
+(`crates/linch-providers/src/models.rs`): OpenAI, adapter Responses và
+DeepSeek dùng `GET {base}/models`; vLLM và SGLang giống vậy với `max_model_len`;
+llama.cpp giống vậy với cửa sổ lấy từ `/props`; Anthropic `GET /v1/models`
+(giới hạn 1000, phân trang bằng `after_id`) với `max_input_tokens`, `max_tokens` và
+`image_input`; Gemini `GET /v1beta/models` (cỡ trang 1000, `pageToken`),
+bỏ các model không có `generateContent`. `list_models` trả về một
+`ModelList`: `models`, và `truncated`, true (và không có trên wire khi false)
+khi vendor có nhiều hơn 10 trang được đọc, nên danh sách chỉ là phần đầu. Một
+request tối đa 15 giây và 4 MiB (một câu trả lời lỗi chỉ đọc 8 KiB đầu), một
+redirect bị từ chối, và id model không bao giờ được đưa vào URL (`model_info`
+đọc danh sách; một lần không thấy trong danh sách bị cắt là `NotFound { truncated: true }`,
+không kết luận được). Một `display_name` được làm sạch trước khi trả về: ký tự
+điều khiển và ký tự đổi chiều chữ bị bỏ, và nó bị cắt ở 100 ký tự. Một lỗi là một
+`ModelsError`: `Unsupported` (provider scripted), `NotFound`, hoặc một
+`ProviderError` có message với văn bản cố định cho lỗi kết nối hoặc
+timeout và, với một câu trả lời lỗi, chỉ `error.message`, đã xóa key, rút gọn
+còn ký tự ASCII in được và cắt ở 120, nên không key lẫn URL nào có thể xuất hiện.
+
+### Quy tắc `base_url`
+
+Một adapter dựng mỗi URL bằng cách nối thêm vào base như đã viết
+(`{base}/models`, `{base}/v1/models?limit=1000`), và gửi key của nó đến đó. Vì vậy
+mọi adapter, khi được dựng (`check_base_url`,
+`crates/linch-providers/src/base_url.rs`; `ProviderError::InvalidRequest`), từ
+chối một base không phải URL `http` hoặc `https` tuyệt đối có host, hoặc có
+userinfo, query hay fragment (`https://host/v1/files#` biến request thành
+`GET /v1/files`), một mã hóa phần trăm, dấu gạch ngược, khoảng trắng hoặc ký tự
+điều khiển, hoặc một đoạn path là `.`, `..` hay rỗng trước đoạn cuối. Việc kiểm
+tra đọc văn bản như đã viết, vì bộ phân tích URL xử lý các đoạn dấu chấm trước khi
+ai thấy chúng. Message không nêu phần nào của URL.
+
+Một host nhận cấu hình provider từ tenant thêm quy tắc path (`provider_base_urls`
+của `linch-rpc`, dùng chung cho `agent.open` và các câu hỏi provider): path phải là
+path của chính provider (`ProviderConfig::default_base_paths`: `/v1` cho OpenAI
+Chat và Responses, không có cho DeepSeek, Anthropic và Gemini, `/v1` hoặc không có
+cho vLLM, SGLang và llama.cpp) khi mục chỉ nêu một origin; hoặc, khi mục có path,
+đúng path đó. Một caller cục bộ giữ mọi path thường, như tiền tố của một gateway.
+
+### Câu hỏi không cần key
+
+`ProviderConfig::build_keyless` không bao giờ đọc key từ môi trường: provider giữ
+một giá trị giữ chỗ (key tùy chọn của server tự host để trống), và
+`provider.capabilities`, dùng nó, nhiều nhất gửi một lần thăm dò cửa sổ không xác
+thực. Câu trả lời của một lần thăm dò chỉ được đọc tối đa 64 KiB.
 
 ## Test adapter
 

@@ -11,6 +11,7 @@
 
 mod assembler;
 pub mod call;
+mod capabilities;
 mod client;
 mod event;
 mod gate;
@@ -18,6 +19,10 @@ mod request;
 pub mod scripted;
 
 pub use assembler::{Assembler, AssistantAssembly, StreamError, assemble};
+pub use capabilities::{
+    ContextSource, ModelInfo, ModelList, ModelsError, OutputSchemaMode, PromptCache,
+    ProviderCapabilities, Support, ThinkingCaps, ThinkingState, ToolChoiceCaps,
+};
 pub use client::{DEFAULT_CONTEXT_WINDOW, Provider, ProviderError, ProviderStream};
 pub use event::{
     MessageEndEvent, MessageStartEvent, ProviderEvent, TextDeltaEvent, ThinkingDeltaEvent,

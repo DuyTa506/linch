@@ -39,6 +39,7 @@ bỏ tag bằng tay (`events/kinds/mod.rs:1-9`). `Event::type_name`
 | `type` | Payload, trong `events/` | Stored | Delivered | Ghi chú |
 |---|---|---|---|---|
 | `init` | `InitEvent`, `kinds/lifecycle.rs:19` | yes | yes | Một event cho mỗi lần gọi của run: lúc bắt đầu, và mỗi lần resume hoặc approve, với `resumed` và `turn` mà nó tiếp tục. Event của lúc bắt đầu mang `output_schema` và `tool_choice` riêng của run, và tên final tool của nó (`final_tool`), thứ mà một lần resume đọc lại |
+| `schedule_fire` | `ScheduleFireEvent`, `kinds/lifecycle.rs` | yes | yes | Một run mà worker bắt đầu cho một lần kích hoạt lịch: `schedule_id` và `fire_at_ms` mà nó đến hạn, được stage ngay sau `init` trong cùng một lần ghi, nên không thêm lần ghi nào. Mọi run khác không có nó. Một lần resume không lặp lại nó; nó vẫn nằm trong `run.events` |
 | `user` | `UserEvent`, `kinds/lifecycle.rs:62` | yes | yes | `subtype`: `prompt`, `tool_result`, `alignment`, `notification` |
 | `assistant` | `AssistantEvent`, `kinds/lifecycle.rs:72` | yes | yes | |
 | `partial_assistant` | `PartialAssistantEvent`, `kinds/lifecycle.rs:82` | no | yes | |
@@ -87,12 +88,14 @@ run yield ra, và do đó gửi tới client. Hai cột này là
 | `seq` | Số thứ tự của run. Các event bền vững nhận seq liên tiếp từ 1; một event chỉ có trong stream mang seq bền vững gần nhất, nên các seq trên stream lặp lại và có khoảng trống |
 | `run_id` | Run mà event thuộc về |
 | `ts_ms` | Đồng hồ thực của bên tạo ra, tính bằng mili giây Unix, lúc nó tạo envelope (`envelope.rs:170-174`). Hãy sắp xếp theo `seq`, không bao giờ theo `ts_ms`: một run gặp sự cố và lần resume của nó có thể chạy trên các đồng hồ không khớp nhau |
-| `ignorable` | Cam kết của bên tạo rằng một `event.type` không biết có thể bị bỏ qua. Không xuất hiện trên wire khi là false |
+| `ignorable` | Cam kết của bên tạo rằng một `event.type` không biết có thể bị bỏ qua. Không xuất hiện trên wire khi là false. Journal chỉ đặt nó cho `schedule_fire` |
 | `event` | Event |
 
 Journal của run tạo mọi envelope (`crates/linch-core/src/journal.rs:315`):
 `v` là `WIRE_VERSION`, `ts_ms` là thời điểm event được stage, và
-`ignorable` là false. Thời điểm một envelope trở nên bền vững theo quy tắc
+`ignorable` là false, trừ của event `schedule_fire` là true: nó chỉ nêu lịch đứng
+sau một run, nên một bản build có trước loại này có thể bỏ qua nó
+(`Event::skippable_by_older_builds`). Thời điểm một envelope trở nên bền vững theo quy tắc
 [group commit](./stores.md#số-lần-ghi-của-group-commit): một event bền vững
 được giữ lại đến lần ghi barrier kế tiếp, lần ghi đó mang nó đi.
 
@@ -194,6 +197,13 @@ Mỗi event của nó cũng đến log của run cha bên trong một event `sub
 
 [Skill và subagent](./skills-subagents.md) nói về thời điểm các run con chạy.
 
+### Golden sample
+
+`crates/linch-core/src/events/golden/accounting.json` chứa một wire sample của
+`schedule_fire` và của mỗi loại `model_call_*`. Một test Rust giải mã rồi mã hóa
+lại từng sample về chính nó; `test_events.py` giải mã cùng tệp đó vào các lớp của
+client.
+
 ## Client Python
 
 `python/src/linch_rust/events.py` có một dataclass frozen cho mỗi loại được delivery,
@@ -210,7 +220,10 @@ với tên wire là biến lớp `type`, được gom trong union `Event` (`even
   `ignorable`.
 - Các giá trị lồng nhau (message, usage, các block kết quả tool) vẫn là
   các dict JSON mà server đã gửi.
-- Các loại chỉ dành cho journal không có lớp; server không bao giờ gửi chúng.
+- Ba loại chỉ dành cho journal cũng có lớp (`ModelCallDeliveryEvent`,
+  `ModelCallReceiptEvent`, `ModelCallUsageSettlementEvent`), cho các envelope
+  đọc từ một journal; server không bao giờ stream chúng, cũng không trả chúng từ
+  `run.events`, nên client chỉ thấy chúng theo cách đó.
 
 Vậy hai phía khác nhau có chủ ý: Rust từ chối những gì nó không biết, còn
 client chấp nhận. Một client cũ hơn server của nó vẫn hoạt động nhờ
@@ -225,10 +238,9 @@ client chấp nhận. Một client cũ hơn server của nó vẫn hoạt độn
 - các variant của `pub enum Event {` trong `events/event/mod.rs`, được viết dưới dạng
   `Name(Payload),` mỗi dòng một variant;
 - các nhánh `Serialize` được viết dưới dạng `Event::Name(e) => tagged("name", e)`;
-- phần thân `pub struct Payload {` của mỗi payload trong `events/event/mod.rs` hoặc
-  `events/kinds/*.rs`, và các dòng `pub field:` của nó;
-- `subagent` bằng tay, và không có loại nào trong `JOURNAL_ONLY`
-  (`test_events.py:26`).
+- phần thân `pub struct Payload {` của mỗi payload trong `events/event/mod.rs`,
+  `events/kinds/*.rs` hoặc `events/model_call.rs`, và các dòng `pub field:` của nó;
+- `subagent` bằng tay.
 
 Sau đó nó khẳng định rằng tập các loại và tên trường của mỗi loại bằng với
 tập của các lớp Python. Nó chỉ so sánh tên, không so sánh kiểu hay tính tùy chọn. Một loại
@@ -375,7 +387,10 @@ những cái khác, và có một danh sách không có gì kiểm tra:
 Sau đó chạy `cargo test -p linch-core events` và test parity ở trên.
 Thêm một variant là một thay đổi wire đối với các bộ đọc cũ hơn: một bản build Rust cũ
 hơn đọc loại mới thành `UnknownType` trừ khi bên tạo đánh dấu envelope là
-`ignorable`, và lõi không bao giờ làm vậy.
+`ignorable`. Lõi chỉ làm vậy với một loại mà bộ đọc không mất gì khi bỏ qua:
+`schedule_fire` (`Event::skippable_by_older_builds`, được kiểm bởi
+`the_fire_is_ignorable_to_an_older_build_and_nothing_else_is`). Quyết định điều đó
+trong method ấy, không bao giờ theo từng run.
 
 ## Test
 

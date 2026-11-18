@@ -1,7 +1,7 @@
 use linch_core::provider::Thinking;
 use linch_core::{
-    ContentBlock, Message, Provider, ProviderError, ProviderRequest, ReasoningEffort, Role,
-    StopReason, ThinkingBlock, ToolChoice, Usage,
+    ContentBlock, Message, OutputSchemaMode, Provider, ProviderError, ProviderRequest,
+    ReasoningEffort, Role, StopReason, ThinkingBlock, ToolChoice, Usage,
 };
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -275,6 +275,12 @@ fn servers_refuse_at_open_what_their_payload_refuses() {
         let options = ServerOptions::new(server, "http://localhost/v1");
         let provider = OpenAiChat::server(options).unwrap();
         assert!(!provider.native_output_schema(), "{server:?}");
+        let caps = provider.capabilities("m");
+        assert_eq!(
+            caps.output_schema,
+            OutputSchemaMode::FinalTool,
+            "{server:?}"
+        );
         for choice in choices.clone() {
             let request = ProviderRequest {
                 tool_choice: Some(choice.clone()),
