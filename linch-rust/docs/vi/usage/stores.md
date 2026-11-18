@@ -324,11 +324,15 @@ trên cùng schema:
 - Một đợt xóa 67k run cùng 536k event của chúng và 66k session cùng 214k mục
   log (khoảng 0,9M hàng) trong 187 giây, 4,7k hàng/giây, với lô 500 hàng và
   quãng nghỉ bên dưới. Một đợt trên 263k run và 259k session (3,4M hàng) mất
-  24 phút với quãng nghỉ và không có client, trên máy bận hơn.
+  24 phút với quãng nghỉ, trên máy bận hơn (một mẫu duy nhất; một job của
+  người dùng khác đang chạy).
 - Sau mỗi lô là một quãng nghỉ bằng thời gian lô đó chạy, nên một đợt chỉ làm
   database bận tối đa một nửa. Thông lượng run của 4 client (lô 100 run) trung
-  bình 58 run/giây trong đợt và 67 run/giây khi không có đợt, thấp hơn 13%, và
-  mọi run đều thành công.
+  bình 58 run/giây trong đợt và 67 run/giây ở một cửa sổ đối chứng không có
+  đợt (mỗi bên một mẫu, trên database nhỏ hơn bốn lần, giữa các lô dao động từ
+  3 đến 123 run/giây: chỉ mang tính tham khảo, không phải một cận), và mọi run
+  đều thành công. Gán thời điểm kết thúc cho 500k run mà không nghỉ làm cùng
+  các client đó giảm xuống trung bình 24 run/giây, vì vậy đợt có quãng nghỉ.
 - Chọn một lô run đọc 500 mục index trong khoảng 5 ms ở mọi độ sâu của đợt; một
   đợt không có gì để xóa tốn 0,05 ms. Chọn một lô session mất 7 ms; quét session
   khi không có gì để xóa là quét đủ theo thứ tự khóa, 0,45 giây ở 516k session,
@@ -344,13 +348,18 @@ trên cùng schema:
 - `batch_size` lớn hơn xóa nhanh hơn và giữ khóa của các hàng nó xóa lâu hơn;
   mặc định là 500.
 
-Các hàng terminal không làm chậm một run: với 520k run và 4,2M event này trong
-schema và chưa xóa gì, thông lượng run scripted ở 1, 4 và 16 client là 42, 173
-và 481 run/giây so với 48, 137 và 709 run/giây trên schema trống (cùng mức
-nhiễu như giữa hai lần chạy của mỗi bên), còn các truy vấn claim, lease, hết hạn
-và due-fire giữ nguyên kế hoạch vì chúng đọc các index một phần trên hàng còn
-sống. Vì vậy retention là giới hạn về đĩa (kích thước bảng và index ở trên) chứ
-không phải yêu cầu về tốc độ.
+Các hàng terminal không làm chậm một run theo cách đo được: với 520k run và
+4,2M event này trong schema và chưa xóa gì, thông lượng run scripted ở 1, 4 và
+16 client (trung vị của ba lô 600 run, hai chuỗi mỗi bên) là 43, 159 đến 221 và
+539 đến 728 run/giây so với 44 đến 46, 187 đến 204 và 583 đến 649 run/giây trên
+schema trống: các chuỗi chồng lên nhau và nhiễu của máy lớn hơn mọi chênh lệch.
+(Chuỗi đầu tiên gồm các lô 200 run đọc được 481 run/giây ở 16 client so với 709
+trên schema trống; các chuỗi 600 run không lặp lại điều đó.) Các truy vấn
+claim, lease, hết hạn và due-fire giữ nguyên kế hoạch (0,02 đến 1,4 ms) vì chúng
+đọc các index một phần trên hàng còn sống; một lần resume run, từ lúc spawn
+server đến kết quả, mất 80 ms ở cả hai. Cái giá của việc giữ mọi run là đĩa
+(các kích thước ở trên) và các lượt quét đọc cả một namespace như `job.list`
+(205 ms ở 180k hàng history), không phải đường đi của run.
 
 ## Hệ thống tệp ảo
 

@@ -316,9 +316,13 @@ Each batch is one transaction: a keyset pick in index order after the pass's
 cursor (`FOR UPDATE ... SKIP LOCKED`, `batch_size` rows), then one statement
 that deletes the run (or session), its events (or log, tasks and edges) and
 writes the tombstone, with the terminal status (or the idle clock and the
-absence of a live run) checked again in the delete. Each batch takes a
-transaction-scoped try-lock keyed by database and schema, so one pruner runs
-at a time across the fleet and a crashed one leaves nothing locked.
+absence of a live run) checked again in the delete. A pass holds a
+session-level try-lock keyed by database and schema on one pool connection
+from its first batch to its last, so one pruner runs at a time across the
+fleet, a second pass cannot start in the pauses between batches (each batch
+is followed by a pause as long as it took, which keeps the pass at most half
+as busy as the database), and a crashed pruner's connection releases the lock.
+A pass that finds the lock taken deletes nothing and reports `contended`.
 
 What it never deletes follows from what other code reads of a run later: a
 run that is not terminal; a child run while its parent is not terminal (the

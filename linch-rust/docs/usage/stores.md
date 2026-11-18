@@ -329,11 +329,16 @@ while 4 clients started scripted runs on the same schema:
 - A pass deleted 67k runs with their 536k events and 66k sessions with their
   214k entries (about 0.9M rows) in 187 s, 4.7k rows/s, with a 500-row batch
   and the pause below. A pass over 263k runs and 259k sessions (3.4M rows)
-  took 24 minutes with the pause and no clients, on a busier host.
+  took 24 minutes with the pause, on a busier host (a single sample; a
+  concurrent job of another user was running).
 - Each batch is followed by a pause as long as the batch took, so a pass
   keeps the database at most half busy for it. The run throughput of the 4
   clients (batches of 100 runs) averaged 58 runs/s during the pass and 67
-  runs/s without it, 13% lower, and every run succeeded.
+  runs/s in a separate control window with no pass (single samples, on a
+  database a quarter of the size, with 3 to 123 runs/s between batches:
+  indicative, not a bound), and every run succeeded. Stamping 500k runs
+  without a pause took the same clients down to 24 runs/s on average, which
+  is why the pass pauses.
 - Picking a batch of runs reads 500 index entries in about 5 ms at any
   depth into the pass; a pass with nothing to delete costs 0.05 ms. Picking a
   batch of sessions is 7 ms; a session scan with nothing to delete is a full
@@ -349,13 +354,19 @@ while 4 clients started scripted runs on the same schema:
 - A larger `batch_size` deletes faster and holds the locks of the rows it
   deletes for longer; 500 is the default.
 
-Terminal rows do not slow a run down: with these 520k runs and 4.2M events in
-the schema and nothing deleted, the scripted-run throughput at 1, 4 and 16
-clients was 42, 173 and 481 runs/s against 48, 137 and 709 runs/s on an empty
-schema (the same noise as between two runs of either), and the claim, lease,
-expiry and due-fire queries kept their plans, because they read the partial
-indexes over live rows. Retention is therefore a disk bound (the table and
-index sizes above) and not a speed requirement.
+Terminal rows did not measurably slow a run down: with these 520k runs and
+4.2M events in the schema and nothing deleted, the scripted-run throughput at
+1, 4 and 16 clients (medians of three 600-run batches, two series each) was
+43, 159 to 221 and 539 to 728 runs/s against 44 to 46, 187 to 204 and 583 to
+649 runs/s on an empty schema: the series overlap, and the host's noise is
+larger than any difference. (A first series of 200-run batches read 481 runs/s
+at 16 clients against 709 on the empty schema; the 600-run series did not
+repeat it.) The claim, lease, expiry and due-fire queries kept their plans
+(0.02 to 1.4 ms), because they read the partial indexes over live rows; a
+resume of a run, from a spawned server to its result, took 80 ms on both. The
+cost of keeping every run is the disk (the sizes above) and the scans that
+read a whole namespace, such as `job.list` (205 ms at 180k history rows),
+not the run path.
 
 ## The virtual filesystem
 
