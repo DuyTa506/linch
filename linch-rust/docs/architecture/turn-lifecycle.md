@@ -524,8 +524,8 @@ continues it, and `Agent::answer` answers its pending `AskUser` calls
    previous owner ([stores](./stores.md#fencing)); a child run is seized
    instead (`start.rs:277-290`). On a store whose claims expire, a run
    another holder keeps alive is refused with `RunLeased` before anything
-   is written, and from here on the run future renews the lease and
-   releases it if the run stops without settling
+   is written, and from here on a heartbeat task renews the lease and
+   the run releases it if it stops without settling
    ([leases](./stores.md#leases), `runner/lease.rs`).
 4. `reconcile` reads the checkpoint, the events and the session log, and
    returns what to do next. It is pure (`journal/reconcile.rs:197-219`).

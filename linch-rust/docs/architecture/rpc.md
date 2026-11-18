@@ -263,8 +263,10 @@ There is no buffer that grows without bound on the server:
    it.
 2. A run's task waits for room before it polls the run's stream again, and
    a run advances only while its stream is polled (the core spawns no task
-   for it), so the run pauses. A server request waiting for room counts it
-   against its timeout.
+   for it), so the run pauses. Its lease heartbeat is a task of its own,
+   so the run stays its server's while it waits: no other server can
+   resume it, and it goes on when the client reads again. A server request
+   waiting for room counts it against its timeout.
 3. Reading stops at 64 calls in flight.
 4. The Rust client keeps at most 1024 unread notifications
    (`NOTIFICATION_CAPACITY`, `crates/linch-rpc/src/client.rs:29`), then

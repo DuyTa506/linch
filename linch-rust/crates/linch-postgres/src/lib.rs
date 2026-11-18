@@ -37,10 +37,11 @@ use std::time::Duration;
 
 use sqlx::migrate::{Migration, MigrationType, Migrator};
 use sqlx::postgres::{PgConnectOptions, PgConnection, PgPoolOptions};
-use sqlx::{Connection, Postgres, SqlSafeStr, Transaction};
+use sqlx::{AssertSqlSafe, Connection, Postgres, SqlSafeStr, Transaction};
 
 mod codec;
 mod files;
+mod lease_line;
 mod mailbox;
 mod memory;
 mod pool_size;
@@ -51,6 +52,7 @@ mod tool_cache;
 
 pub use codec::CodecError;
 pub use files::PgFileBackend;
+pub use lease_line::LeaseLine;
 pub use mailbox::{DEFAULT_LEASE, PgMailbox};
 pub use memory::{DEFAULT_STATEMENT_TIMEOUT, PgMemoryStore};
 pub use pool_size::{MAX_DEFAULT_CONNECTIONS, MIN_DEFAULT_CONNECTIONS, default_max_connections};
@@ -268,14 +270,51 @@ fn migrator() -> Migrator {
 ///     MigrateError: If the database is unreachable, a migration fails, or
 ///         an applied migration differs from the embedded one.
 pub async fn migrate(pool: &PgPool) -> Result<(), MigrateError> {
+    let migrator = migrator();
+    // Starting a server on a schema that is already migrated only reads: it
+    // takes no lock, so it does not wait behind a migration that is running
+    // (or hold others up for the milliseconds of a lock and a connection).
+    if all_applied(pool, &migrator).await {
+        return Ok(());
+    }
     // The lock lives on a connection of its own, outside the pool, so a
     // one-connection pool can still migrate; closing it (or dropping this
     // future) releases the lock.
     let mut lock = PgConnection::connect_with(&pool.connect_options()).await?;
     sqlx::query(MIGRATE_LOCK).execute(&mut lock).await?;
-    let migrated = migrator().run(pool).await;
+    let migrated = migrator.run(pool).await;
     let _ = lock.close().await;
     migrated
+}
+
+/// Whether the migrations table of the connection's own schema holds exactly
+/// the embedded migrations, each applied with the embedded checksum. Any
+/// other answer (a missing table, a missing, extra or changed migration, a
+/// failed read) is `false`, and [`migrate`] takes its locked path, which
+/// applies what is missing and reports the rest as it always did.
+async fn all_applied(pool: &PgPool, migrator: &Migrator) -> bool {
+    let applied: Result<Vec<(i64, bool, Vec<u8>)>, _> =
+        sqlx::query_as(applied_sql()).fetch_all(pool).await;
+    let Ok(applied) = applied else {
+        return false;
+    };
+    applied.len() == migrator.migrations.len()
+        && applied.iter().zip(migrator.iter()).all(|(row, embedded)| {
+            let (version, success, checksum) = row;
+            *success && *version == embedded.version && checksum[..] == embedded.checksum[..]
+        })
+}
+
+/// The applied migrations of the connection's own schema, oldest first:
+/// the table must be the one in `current_schema()`.
+fn applied_sql() -> impl SqlSafeStr {
+    AssertSqlSafe(format!(
+        "SELECT m.version, m.success, m.checksum FROM {MIGRATIONS_TABLE} m \
+         WHERE '{MIGRATIONS_TABLE}'::regclass = ( \
+             SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE c.relname = '{MIGRATIONS_TABLE}' AND n.nspname = current_schema()) \
+         ORDER BY m.version"
+    ))
 }
 
 const MIGRATE_LOCK: &str = "SELECT pg_advisory_lock(hashtextextended(\

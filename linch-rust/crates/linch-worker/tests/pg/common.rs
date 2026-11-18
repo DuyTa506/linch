@@ -3,7 +3,7 @@
 //! `fixtures`, re-exported here.
 //!
 //! Tests read the database from `LINCH_TEST_PG_DSN` and skip without it.
-//! Each test gets its own schema `p9_<name>` (reset at start, dropped at the
+//! Each test gets its own schema `p9_<pid>_<name>` (reset at start, dropped at the
 //! end) through the pool's `search_path`. `NOTIFY` channels are per
 //! database, so parallel tests wake each other's workers; that is harmless.
 
@@ -58,7 +58,7 @@ impl TestDb {
             eprintln!("skipping {name}: {DSN_VAR} is not set");
             return None;
         };
-        let schema = format!("p9_{name}");
+        let schema = format!("p9_{}_{name}", std::process::id());
         let admin = PgPoolOptions::new()
             .max_connections(2)
             .connect(&dsn)

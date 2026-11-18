@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use linch_core::{Principal, RunId, SessionId};
-use linch_postgres::PgPool;
+use linch_postgres::{LeaseLine, PgPool};
 use tokio::time::Instant;
 
 use crate::error::{WorkerError, non_blank};
@@ -254,25 +254,27 @@ impl JobLease {
         self.failures
     }
 
-    /// Hide the job for another `timeout`. `false` means another worker
-    /// holds it now.
+    /// Hide the job for another `timeout`, on `line` so that no job work
+    /// delays it. `false` means another worker holds it now.
     pub(crate) async fn heartbeat(
         &self,
-        pool: &PgPool,
+        line: &LeaseLine,
         timeout: Duration,
     ) -> Result<bool, WorkerError> {
-        let done = retried(|| {
-            sqlx::query(
-                "UPDATE linch_worker_jobs SET visible_at = now() + $3 * interval '1 millisecond' \
-                 WHERE id = $1 AND attempts = $2 AND failed_at IS NULL",
-            )
-            .bind(self.job.id.0)
-            .bind(self.attempts)
-            .bind(millis(timeout))
-            .execute(pool)
+        let rows = retried(|| {
+            line.execute(|| {
+                sqlx::query(
+                    "UPDATE linch_worker_jobs \
+                     SET visible_at = now() + $3 * interval '1 millisecond' \
+                     WHERE id = $1 AND attempts = $2 AND failed_at IS NULL",
+                )
+                .bind(self.job.id.0)
+                .bind(self.attempts)
+                .bind(millis(timeout))
+            })
         })
         .await?;
-        Ok(done.rows_affected() == 1)
+        Ok(rows == 1)
     }
 
     /// Record the run a start job created, before that run's first write.
