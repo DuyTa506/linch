@@ -43,6 +43,13 @@ pub enum Scorer {
         /// JSON Schema; draft 2020-12 unless it names another in `$schema`.
         schema: JsonObject,
     },
+    /// Passes when the run's `total_cost_usd` is below `budget_usd`
+    /// (strictly); unknown when the run has no result or no cost, which is
+    /// every run on a model without a price.
+    CostUnder {
+        /// The most the run may cost, in USD, exclusive.
+        budget_usd: f64,
+    },
     /// Passes when a `context_build` event offered `tool`; unknown when the
     /// run has none.
     ContextSelectedTool {
@@ -86,6 +93,7 @@ impl Scorer {
             Self::TextContains { substring } => format!("text_contains:{substring}"),
             Self::ToolCalled { tool } => format!("tool_called:{tool}"),
             Self::SchemaValid { .. } => "schema_valid".to_owned(),
+            Self::CostUnder { budget_usd } => format!("cost_under:{budget_usd:?}"),
             Self::ContextSelectedTool { tool } => format!("context_selected_tool:{tool}"),
             Self::ContextNotTrimmed {} => "context_not_trimmed".to_owned(),
             Self::ContextMetadataContains { key, .. } => {
@@ -118,6 +126,9 @@ impl Scorer {
                 matches!(&envelope.event, Event::ToolCallStart(start) if start.tool_name == *tool)
             })),
             Self::SchemaValid { schema } => Some(schema_accepts(schema, output)),
+            Self::CostUnder { budget_usd } => result_event(events)
+                .and_then(|result| result.total_cost_usd)
+                .map(|cost| cost < *budget_usd),
             Self::ContextSelectedTool { tool } => context(events, |builds| {
                 builds.iter().any(|build| {
                     build

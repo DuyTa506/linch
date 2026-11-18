@@ -15,6 +15,9 @@ pub(super) struct Chunk {
     pub choices: Option<Vec<Choice>>,
     #[serde(default)]
     pub usage: Option<WireUsage>,
+    /// llama.cpp's per-response timings, next to `usage`.
+    #[serde(default)]
+    pub timings: Option<Timings>,
     /// An error frame sent after the stream started.
     #[serde(default)]
     pub error: Option<JsonValue>,
@@ -78,6 +81,25 @@ pub(crate) struct WireUsage {
     /// DeepSeek's cache-hit count; `prompt_tokens` = hit + miss.
     #[serde(default)]
     pub prompt_cache_hit_tokens: Option<u64>,
+    /// A cache-hit count some servers put on `usage` itself (SGLang
+    /// without details, llama.cpp).
+    #[serde(default)]
+    pub cached_tokens: Option<u64>,
+    /// Another name for the same count, read by llama.cpp's adapter.
+    #[serde(default)]
+    pub cache_read_tokens: Option<u64>,
+    /// `timings.cache_n` of the stream, stamped on by the translator;
+    /// never on the wire inside `usage`.
+    #[serde(skip)]
+    pub timings_cache_n: Option<u64>,
+}
+
+/// A chunk's `timings` object (llama.cpp).
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct Timings {
+    /// Prompt tokens served from the KV cache.
+    #[serde(default)]
+    pub cache_n: Option<u64>,
 }
 
 /// `usage.prompt_tokens_details`.
@@ -85,6 +107,12 @@ pub(crate) struct WireUsage {
 pub(crate) struct PromptTokensDetails {
     #[serde(default)]
     pub cached_tokens: Option<u64>,
+    /// Another name for the cache-hit count, read by llama.cpp's adapter.
+    #[serde(default)]
+    pub cache_read_tokens: Option<u64>,
+    /// DeepSeek-style name for the same count, read by llama.cpp's adapter.
+    #[serde(default)]
+    pub prompt_cache_hit_tokens: Option<u64>,
     /// OpenAI's cache writes, also counted in `prompt_tokens`.
     #[serde(default)]
     pub cache_write_tokens: Option<u64>,

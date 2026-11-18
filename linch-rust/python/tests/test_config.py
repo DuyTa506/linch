@@ -328,3 +328,14 @@ async def test_an_invalid_profile_does_not_open() -> None:
         with pytest.raises(OpenError) as raised:
             await server.open_agent(config([], profile={"id": "", "version": "1"}))
     assert "profile id must not be blank" in str(raised.value)
+
+
+async def test_pricing_prices_a_model_the_table_lacks() -> None:
+    model = "local-model"
+    spec = {"model": model}
+    turns = [text_turn("hi", model=model)]
+    unpriced = final(await run_once(config(turns, spec=spec)))
+    assert unpriced.total_cost_usd is None
+    rates = {model: {"input": 0.2, "output": 0.6}}
+    priced = final(await run_once(config(turns, spec=spec, pricing=rates)))
+    assert priced.total_cost_usd == pytest.approx(3 * 0.2e-6 + 1 * 0.6e-6)

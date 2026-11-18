@@ -13,6 +13,7 @@ use crate::error::ErrorObject;
 
 mod call;
 mod hook;
+pub mod monitor;
 mod open;
 
 pub use call::{CancelRequestParams, ToolCallParams, tool_code};
@@ -21,6 +22,7 @@ pub use hook::{
     HookCallParams, ObserveAnswer, PostToolUseAnswer, PostTurnAnswer, PreToolUseAnswer, StopAnswer,
     UserPromptAnswer, WireToolResult,
 };
+pub use monitor::{EvalReport, EvalRunParams, ReportParams, RunReportResult};
 pub use open::{HostToolSpec, OpenParams};
 
 /// Method and notification names.

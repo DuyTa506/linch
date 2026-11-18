@@ -14,6 +14,26 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Required, TypedDict
 
 
+class ModelRates(TypedDict, total=False):
+    """USD per million tokens for one model, in `AgentConfig.pricing`.
+
+    Every rate must be finite and not negative.
+
+    Attributes:
+        input: Uncached input tokens.
+        output: Generated output tokens.
+        cache_read: Input tokens served from the prompt cache; `input` when
+            absent.
+        cache_creation: Input tokens written to the prompt cache; `input`
+            when absent.
+    """
+
+    input: Required[float]
+    output: Required[float]
+    cache_read: float
+    cache_creation: float
+
+
 class Workers(TypedDict, total=False):
     """How subagents keep their workers. It needs `subagents`.
 
@@ -499,6 +519,10 @@ class AgentConfig(TypedDict, total=False):
             absent.
         deep_agent: The deep agent preset; see `DeepAgent`.
         profile: The domain profile its runs take; see `Profile`.
+        pricing: Rates by exact model id (see `ModelRates`) that this agent
+            prices a model with, in place of the published table or in
+            addition to it. A model neither lists costs `None`, as does any
+            model a local server (`vllm`, `sglang`, `llamacpp`) serves.
     """
 
     namespace: Required[str]
@@ -520,3 +544,4 @@ class AgentConfig(TypedDict, total=False):
     ask_user: bool
     deep_agent: DeepAgent
     profile: Profile
+    pricing: Mapping[str, ModelRates]

@@ -2,7 +2,7 @@
 
 use futures::StreamExt;
 use linch_core::events::kinds::ResultEvent;
-use linch_core::{Agent, Envelope, Event, JsonObject, JsonValue, RunOptions, SessionId};
+use linch_core::{Agent, Envelope, Event, JsonObject, JsonValue, RunOptions, SessionId, Usage};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
@@ -77,9 +77,32 @@ impl CaseResult {
             .collect()
     }
 
+    /// What the run cost in USD, from its `result` event; `None` when it
+    /// has none or the model has no price.
+    pub fn total_cost_usd(&self) -> Option<f64> {
+        result_event(&self.events).and_then(|result| result.total_cost_usd)
+    }
+
+    /// The run's total token usage, from its `result` event.
+    pub fn usage(&self) -> Option<Usage> {
+        result_event(&self.events).map(|result| result.total_usage)
+    }
+
+    /// How long the run took in milliseconds, from its `result` event.
+    pub fn duration_ms(&self) -> Option<u64> {
+        result_event(&self.events).map(|result| result.duration_ms)
+    }
+
+    /// The run's id, from its first event; `None` for a run with none.
+    pub fn run_id(&self) -> Option<String> {
+        self.events
+            .first()
+            .map(|envelope| envelope.run_id.to_string())
+    }
+
     /// This result as JSON: the case, output, verdict, scores, error, the
-    /// event count and the tools called, plus every event when
-    /// `include_events` is set. An event that cannot be encoded (a
+    /// run id, cost, usage, duration, the event count and the tools called,
+    /// plus every event when `include_events` is set. An event that cannot be encoded (a
     /// non-finite cost) is written as `null`.
     pub fn to_value(&self, include_events: bool) -> JsonValue {
         let mut value = json!({
@@ -88,8 +111,12 @@ impl CaseResult {
             "passed": self.passed,
             "scores": self.scores,
             "error": self.error,
+            "run_id": self.run_id(),
             "event_count": self.events.len(),
             "tool_calls": self.tool_calls(),
+            "total_cost_usd": self.total_cost_usd(),
+            "usage": self.usage(),
+            "duration_ms": self.duration_ms(),
         });
         if include_events {
             let events = self
@@ -128,8 +155,31 @@ impl EvalResult {
         self.passed() as f64 / self.total() as f64
     }
 
-    /// This result as JSON: the totals and each case's
-    /// [`CaseResult::to_value`].
+    /// The sum of the cases' costs; `None` when no case has one.
+    pub fn total_cost_usd(&self) -> Option<f64> {
+        let costs: Vec<f64> = self
+            .cases
+            .iter()
+            .filter_map(CaseResult::total_cost_usd)
+            .collect();
+        (!costs.is_empty()).then(|| costs.iter().sum())
+    }
+
+    /// The sum of the cases' token usage.
+    pub fn usage(&self) -> Usage {
+        self.cases
+            .iter()
+            .filter_map(CaseResult::usage)
+            .fold(Usage::default(), |sum, usage| sum + usage)
+    }
+
+    /// The sum of the cases' run durations in milliseconds.
+    pub fn duration_ms(&self) -> u64 {
+        self.cases.iter().filter_map(CaseResult::duration_ms).sum()
+    }
+
+    /// This result as JSON: the totals (pass rate, cost, usage, duration)
+    /// and each case's [`CaseResult::to_value`].
     pub fn to_value(&self, include_events: bool) -> JsonValue {
         let cases: Vec<JsonValue> = self
             .cases
@@ -140,6 +190,9 @@ impl EvalResult {
             "total": self.total(),
             "passed": self.passed(),
             "pass_rate": self.pass_rate(),
+            "total_cost_usd": self.total_cost_usd(),
+            "usage": self.usage(),
+            "duration_ms": self.duration_ms(),
             "cases": cases,
         })
     }
@@ -153,8 +206,8 @@ impl EvalResult {
             format!("- passed: {}", self.passed()),
             format!("- pass_rate: {}", percent(self.pass_rate())),
             String::new(),
-            "| # | Passed | Scores | Tool Calls | Output | Error |".to_owned(),
-            "|---:|---|---|---|---|---|".to_owned(),
+            "| # | Passed | Scores | Cost USD | Tool Calls | Output | Error |".to_owned(),
+            "|---:|---|---|---:|---|---|---|".to_owned(),
         ];
         for (index, case) in self.cases.iter().enumerate() {
             let scores: Vec<String> = case
@@ -163,10 +216,12 @@ impl EvalResult {
                 .map(|score| format!("{}={}", score.name, verdict(score.verdict)))
                 .collect();
             lines.push(format!(
-                "| {} | {} | {} | {} | {} | {} |",
+                "| {} | {} | {} | {} | {} | {} | {} |",
                 index + 1,
                 case.passed,
                 cell(&scores.join(", ")),
+                case.total_cost_usd()
+                    .map_or_else(String::new, |cost| cost.to_string()),
                 cell(&case.tool_calls().join(", ")),
                 cell(&case.output),
                 cell(case.error.as_deref().unwrap_or("")),

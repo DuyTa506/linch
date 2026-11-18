@@ -93,19 +93,30 @@ pub struct Fixture {
 }
 
 pub fn scripted(turns: Vec<ScriptedTurn>) -> Fixture {
-    build(turns, PermissionMode::Default, None)
+    build(turns, PermissionMode::Default, None, false)
+}
+
+/// Like [`scripted`], priced at 1 USD per million tokens of any kind.
+pub fn scripted_priced(turns: Vec<ScriptedTurn>) -> Fixture {
+    build(turns, PermissionMode::Default, None, true)
 }
 
 /// An agent like [`scripted`]'s that allows every call and has foreground
 /// subagents: a `Subagent` call runs a child on the same provider.
 pub fn with_subagents(turns: Vec<ScriptedTurn>) -> Fixture {
-    build(turns, PermissionMode::SkipDangerous, Some(Vec::new()))
+    build(
+        turns,
+        PermissionMode::SkipDangerous,
+        Some(Vec::new()),
+        false,
+    )
 }
 
 fn build(
     turns: Vec<ScriptedTurn>,
     mode: PermissionMode,
     subagents: Option<Vec<SubagentDefinition>>,
+    priced: bool,
 ) -> Fixture {
     let provider = Arc::new(ScriptedProvider::new(turns));
     let tools = ToolRegistry::new();
@@ -132,6 +143,12 @@ fn build(
         });
     if let Some(definitions) = subagents {
         builder = builder.subagents(definitions);
+    }
+    if priced {
+        builder = builder.pricing(|_, usage| {
+            let tokens = usage.total_input_tokens() + usage.output_tokens;
+            Some(tokens as f64 / 1_000_000.0)
+        });
     }
     let agent = builder.build().unwrap();
     Fixture {

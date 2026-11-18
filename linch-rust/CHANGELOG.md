@@ -114,6 +114,31 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 - `LeaseLost` (-32022) and `RunLeased` (-32033) in the Python client, both `RunError`s.
 - `Agent::released` waits for the lease releases of runs that were dropped; `OpenedAgent::close` waits for them (at most `RELEASE_WAIT`, 5 s), so a `linch-server` that exits normally frees the runs it was driving at once.
 - A workflow `agent` call whose run is still leased to a runner that crashed waits until the lease runs out (or the workflow is cancelled) instead of failing.
+- Local-server cache usage reads Python's fields: SGLang's top-level
+  `cached_tokens` without `prompt_tokens_details`, llama.cpp's
+  `cache_read_tokens` and `prompt_cache_hit_tokens` (details or `usage`) and
+  `timings.cache_n` when usage reports no cache hit.
+- `pricing` in the agent config: rates per model id (`input`, `output`, and
+  `cache_read` and `cache_creation`, which default to `input`) that this agent
+  prices a model with, replacing the published table for it or adding a model
+  the table lacks, such as one a local server serves. Without it a model the
+  table does not list costs `None`, as in Python.
+- Eval scorer `cost_under` (`budget_usd`): passes when the run's total cost is
+  below the budget, unknown when it has none. Python's `cost_under`.
+- Eval results report each case's `run_id`, `total_cost_usd`, `usage` and
+  `duration_ms` and the same totals for the whole eval; the Markdown report has
+  a Cost USD column, as Python's does.
+- RPC `eval.run`: runs cases with built-in scorers on an open agent and
+  returns the per-case and total pass rate, cost, tokens and duration plus a
+  Markdown report; each case's `run_id` is a stored run. It takes a place among
+  a tenant's live runs and refuses `agent.close` while it runs.
+- RPC `run.report`: the run report (tool calls and timings, usage, context,
+  recovery, risk) of a stored run as JSON and Markdown, from `Agent::run_record`
+  and its events.
+- Python client: `Agent.eval(cases, scorers, include_events=)` and
+  `Agent.report(run_id, timeline=)` with the `EvalCase`, `Scorer`, `CaseResult`,
+  `EvalReport`, `RunReport` and `RunReportResult` typed dicts; a scorer may also be
+  a Python callable, applied to each case result once the cases are done.
 
 ### Changed
 

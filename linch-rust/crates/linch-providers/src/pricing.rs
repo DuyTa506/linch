@@ -3,6 +3,12 @@
 //! Rates are USD per million tokens, sourced 2026-06-08 from
 //! <https://www.anthropic.com/pricing>. Cache write rates are the 5-minute
 //! TTL tier.
+//!
+//! The table is Python's, and Python prices only these Claude ids; it has
+//! no rate for an OpenAI, Gemini or DeepSeek model, and none for a model a
+//! local server (vLLM, SGLang, llama.cpp) serves. Those cost `None`, never
+//! a silent zero and never a guess; an agent prices them itself with
+//! `AgentConfig.pricing`.
 
 use linch_core::Usage;
 
@@ -186,6 +192,28 @@ mod tests {
             cache_creation_tokens: 234,
         };
         assert_eq!(cost("claude-sonnet-4-6", &usage), Some(0.0157548));
+    }
+
+    /// Python prices no model of the other providers and none that a local
+    /// server serves, so each costs `None` here too.
+    #[test]
+    fn models_python_does_not_price_have_no_cost() {
+        let usage = Usage {
+            input_tokens: 10,
+            ..Usage::default()
+        };
+        for model in [
+            "gpt-5.5",
+            "gpt-5.4",
+            "o1",
+            "gemini-3-pro",
+            "deepseek-chat",
+            "deepseek-reasoner",
+            "Qwen/Qwen3-32B",
+            "gpt-oss-20b",
+        ] {
+            assert_eq!(cost(model, &usage), None, "{model}");
+        }
     }
 
     #[test]

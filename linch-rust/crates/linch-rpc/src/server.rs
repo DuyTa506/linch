@@ -35,6 +35,7 @@ mod callback;
 mod connection;
 mod host;
 mod login;
+mod monitor;
 mod outgoing;
 mod peer;
 mod run;
@@ -87,6 +88,8 @@ struct Tables {
     /// workers still running here: each is held until the workers end, or
     /// until an approve or resume of the run takes it over.
     parked: HashMap<RunId, Parked>,
+    /// Evals running now, by agent handle.
+    evals: HashMap<String, usize>,
 }
 
 /// A suspended run's place, shared with the task that frees it once the
@@ -302,6 +305,12 @@ impl Server {
             method::RUN_ANSWER => self.answer_run(parse(params)?),
             method::RUN_CANCEL => to_value(&self.cancel(parse(params)?)).map(Reply::Value),
             method::RUN_EVENTS => self.events(parse(params)?).await.map(Reply::Value),
+            crate::protocol::monitor::EVAL_RUN => {
+                self.eval_run(parse(params)?).await.map(Reply::Value)
+            }
+            crate::protocol::monitor::RUN_REPORT => {
+                self.run_report(parse(params)?).await.map(Reply::Value)
+            }
             method::CONNECTION_AUTH => Err(invalid_request(
                 "connection.auth is only accepted as the first message of a socket connection",
             )),

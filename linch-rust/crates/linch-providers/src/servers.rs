@@ -84,14 +84,37 @@ impl ServerOptions {
     }
 }
 
-/// `prompt_tokens` includes the cached prefix, reported as
-/// `prompt_tokens_details.cached_tokens`; Linch counts it apart.
-fn prompt_minus_cached(wire: &WireUsage) -> Usage {
-    let cached = wire
-        .prompt_tokens_details
-        .as_ref()
-        .and_then(|details| details.cached_tokens)
-        .unwrap_or(0);
+/// SGLang: `prompt_tokens` includes the cached prefix, reported as
+/// `prompt_tokens_details.cached_tokens`; Linch counts it apart. Without
+/// `prompt_tokens_details` (the server started without
+/// `--enable-cache-report`) a `cached_tokens` on `usage` itself stands in,
+/// as in Python's adapter.
+fn sglang_usage(wire: &WireUsage) -> Usage {
+    let cached = match &wire.prompt_tokens_details {
+        Some(details) => details.cached_tokens.unwrap_or(0),
+        None => wire.cached_tokens.unwrap_or(0),
+    };
+    split_cached(wire, cached)
+}
+
+/// llama.cpp: the cache-hit count is the first non-zero of the names
+/// Python's generic reader tries (the details, then `usage` itself), else
+/// `timings.cache_n`, which llama.cpp reports when the details are null.
+fn llamacpp_usage(wire: &WireUsage) -> Usage {
+    let details = wire.prompt_tokens_details.as_ref();
+    let named = [
+        details.and_then(|details| details.cached_tokens),
+        details.and_then(|details| details.cache_read_tokens),
+        details.and_then(|details| details.prompt_cache_hit_tokens),
+        wire.cached_tokens,
+        wire.cache_read_tokens,
+        wire.prompt_cache_hit_tokens,
+    ];
+    let cached = named.into_iter().flatten().find(|count| *count > 0);
+    split_cached(wire, cached.or(wire.timings_cache_n).unwrap_or(0))
+}
+
+fn split_cached(wire: &WireUsage, cached: u64) -> Usage {
     Usage {
         input_tokens: wire.prompt_tokens.saturating_sub(cached),
         output_tokens: wire.completion_tokens,

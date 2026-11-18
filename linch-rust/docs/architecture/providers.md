@@ -471,6 +471,15 @@ run's total adds only priced calls. Costs appear as `cost_usd` on the
 receipt and `Usage` events and `total_cost_usd` on `Result`. Pricing is not
 part of the run contract.
 
+Python's table is the only source: it prices six Claude ids and nothing
+else, so no OpenAI, Gemini, DeepSeek or local-server model has a price
+unless the agent gives one. `AgentConfig.pricing`
+(`crates/linch/src/config/pricing.rs`) holds per-model `ModelRates` that
+`open` puts in front of the table: `crate::config::pricing` returns the
+override of a model, else `linch_providers::cost`. It is per agent and not
+part of the contract. Local servers cost `None` without an override, as in
+Python.
+
 ## Add a provider in Rust
 
 An out-of-tree provider implements `Provider` directly; `Decoder` and

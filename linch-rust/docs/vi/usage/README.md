@@ -70,6 +70,7 @@ Server ─────── one linch-server child process, or a connection to 
 | [Deep agent](./deep-agent.md) | Preset `deep_agent` và các profile của nó |
 | [Profile](./profiles.md) | Domain profile có phiên bản cho các run của một agent |
 | [Observability](./observability.md) | Span và metric OpenTelemetry từ client |
+| [Monitoring](./monitoring.md) | Cái gì được trace, cách tính và đặt giá chi phí, chạy eval, đọc run report |
 | [Server](./server.md) | Chạy `linch-server` cho các tenant từ xa, và `Server.connect`: token, allowlist, giới hạn |
 
 Sẽ có sau:

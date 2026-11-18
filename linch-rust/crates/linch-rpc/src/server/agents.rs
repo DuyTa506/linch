@@ -55,7 +55,9 @@ impl Server {
         let opened: Opened = {
             let mut tables = lock(&self.0.tables);
             tables.agent(&params.agent)?;
-            if tables.runs.values().any(|run| run.agent == params.agent) {
+            if tables.runs.values().any(|run| run.agent == params.agent)
+                || tables.evals.contains_key(&params.agent)
+            {
                 return Err(ErrorObject::new(
                     code::RUN_BUSY,
                     format!(

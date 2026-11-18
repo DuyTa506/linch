@@ -242,7 +242,7 @@ final: Hello over WebSocket.
   `connection.auth` kèm token, được trả lời bằng `{"tenant": "acme"}`; sau đó kết nối
   nhận các method giống stdio: `agent.open` với một [cấu hình agent](./agent.md),
   `run.start`, `run.resume`, `run.approve`, `run.cancel`, `run.events`,
-  `session.close`, `agent.close`. Một message đầu tiên không phải `connection.auth`,
+  `eval.run`, `run.report`, `session.close`, `agent.close`. Một message đầu tiên không phải `connection.auth`,
   hoặc một token không xác định, nhận `-32003` và kết nối đóng; 10 giây im lặng cũng
   vậy.
 - **HTTP:** `GET /rpc` với `Authorization: Bearer <token>` nâng cấp lên một WebSocket

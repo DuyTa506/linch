@@ -90,8 +90,8 @@ fn every_scorer_type_decodes_with_its_fields() {
 
 #[test]
 fn unknown_types_and_fields_are_rejected() {
-    let unknown = r#"{"cases": [], "scorers": [{"type": "cost_under", "budget_usd": 1}]}"#;
-    assert!(decode_error(unknown).contains("cost_under"));
+    let unknown = r#"{"cases": [], "scorers": [{"type": "latency_under", "ms": 1}]}"#;
+    assert!(decode_error(unknown).contains("latency_under"));
     // Python's `text` and `contains` aliases are not accepted.
     let alias = r#"{"cases": [], "scorers": [{"type": "text_contains", "text": "x"}]}"#;
     assert!(decode_error(alias).contains("text"));

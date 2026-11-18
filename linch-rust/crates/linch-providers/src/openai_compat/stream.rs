@@ -39,6 +39,10 @@ pub(crate) struct Translator {
     calls: Vec<Call>,
     by_index: HashMap<u32, usize>,
     finish: Option<StopReason>,
+    /// The last `usage` object seen, and the stream's `timings.cache_n`,
+    /// which may ride on another chunk.
+    wire_usage: Option<WireUsage>,
+    cache_n: Option<u64>,
     usage: Option<Usage>,
     /// How the target refuses a prompt too long for it, for an error sent
     /// inside the stream; `None` maps none (see [`Self::refusing`]).
@@ -61,6 +65,8 @@ impl Translator {
             calls: Vec::new(),
             by_index: HashMap::new(),
             finish: None,
+            wire_usage: None,
+            cache_n: None,
             usage: None,
             overflow: None,
         }
@@ -95,8 +101,14 @@ impl Translator {
         }
         // Usage may ride on the last content chunk or on a chunk of its own
         // with no choices; the last one seen wins.
-        if let Some(usage) = &chunk.usage {
-            self.usage = Some((self.usage_of)(usage));
+        let timings = chunk.timings.and_then(|timings| timings.cache_n);
+        if chunk.usage.is_some() || timings.is_some() {
+            self.cache_n = timings.or(self.cache_n);
+            self.wire_usage = chunk.usage.or(self.wire_usage.take());
+            if let Some(wire) = &mut self.wire_usage {
+                wire.timings_cache_n = self.cache_n;
+                self.usage = Some((self.usage_of)(wire));
+            }
         }
         let Some(choice) = chunk.choices.and_then(|choices| choices.into_iter().next()) else {
             return Ok(());

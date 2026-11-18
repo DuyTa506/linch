@@ -171,7 +171,44 @@ async fn results_render_as_json_and_markdown() {
     assert!(markdown.starts_with("# Linch Eval Report\n\n- total: 1\n- passed: 1\n"));
     assert!(markdown.contains("- pass_rate: 100.00%"));
     assert!(
-        markdown.contains("| 1 | true | text_contains:{expected}=true | Probe | a \\| b c |  |")
+        markdown.contains("| 1 | true | text_contains:{expected}=true |  | Probe | a \\| b c |  |")
+    );
+}
+
+/// Each case reports what its run cost, in tokens and in time; the result
+/// sums them, and a case without a cost leaves the cost total unknown only
+/// when none has one.
+#[tokio::test]
+async fn results_report_cost_tokens_and_duration() {
+    let fixture = scripted_priced(vec![text_turn("one"), text_turn("two")]);
+    let cases = [EvalCase::new("a", ""), EvalCase::new("b", "")];
+    let result = run_eval(&fixture.agent, &cases, &[]).await;
+    let first = &result.cases[0];
+    assert_eq!(first.total_cost_usd(), Some(0.000_015));
+    assert_eq!(first.usage(), Some(usage(10, 5)));
+    assert_eq!(result.total_cost_usd(), Some(0.000_03));
+    assert_eq!(result.usage(), usage(20, 10));
+
+    let value = result.to_value(false);
+    assert_eq!(value["total_cost_usd"], 0.000_03);
+    assert_eq!(value["usage"]["input_tokens"], 20);
+    assert!(value["duration_ms"].is_u64());
+    let case_value = &value["cases"][1];
+    assert_eq!(case_value["total_cost_usd"], 0.000_015);
+    assert_eq!(case_value["usage"]["output_tokens"], 5);
+    assert!(case_value["duration_ms"].is_u64());
+    assert!(
+        result
+            .to_markdown()
+            .contains("| # | Passed | Scores | Cost USD | Tool Calls |")
+    );
+
+    let unpriced = scripted(vec![text_turn("one")]);
+    let result = run_eval(&unpriced.agent, &cases[..1], &[]).await;
+    assert_eq!(result.total_cost_usd(), None);
+    assert_eq!(
+        result.to_value(false)["total_cost_usd"],
+        serde_json::Value::Null
     );
 }
 

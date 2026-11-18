@@ -12,6 +12,15 @@ from ._rpc import Connection, RunQueue
 from .config import OutputSchema, Principal
 from .errors import LinchError
 from .events import Envelope, decode_envelope
+from .monitor import (
+    CustomScorer,
+    EvalCase,
+    EvalReport,
+    RunReportResult,
+    Scorer,
+    evaluate,
+    run_report,
+)
 from .run import Observer, Run
 
 
@@ -267,6 +276,55 @@ class Agent:
         params = {"agent": self.handle, "run_id": run_id, "after_seq": after_seq}
         answer = await self._conn.request("run.events", params)
         return [decode_envelope(raw) for raw in answer["events"]]
+
+    async def eval(
+        self,
+        cases: Sequence[EvalCase],
+        scorers: Sequence[Scorer | CustomScorer] = (),
+        *,
+        include_events: bool = False,
+    ) -> EvalReport:
+        """Run `cases` on this agent, one after another, and score each run.
+
+        Each case runs on a fresh session and is stored like any run, so its
+        `run_id` reads with `report`. A case passes when its run records no
+        error and no scorer fails. The call returns when every case has run.
+
+        Args:
+            cases: The cases, in order; each prompt is not empty.
+            scorers: Built-in scorers (see `Scorer`), which run in the
+                server, and Python callables (see `CustomScorer`), which
+                run here on each case's result once the cases are done. With
+                none, a case passes when its run records no error.
+            include_events: Whether each case carries every event of its run.
+
+        Returns:
+            The report: pass counts, cost, tokens and duration in total and
+            per case, and the Markdown form.
+
+        Raises:
+            ProtocolError: A case or built-in scorer is invalid.
+            AgentNotFound: The agent is closed.
+            LimitReached: A remote tenant has no place for another run.
+            TypeError: A custom scorer returned something but a bool or None.
+        """
+        return await evaluate(self._conn, self.handle, cases, scorers, include_events)
+
+    async def report(self, run_id: str, *, timeline: bool = False) -> RunReportResult:
+        """Return the report of a stored run, as a dict and as Markdown.
+
+        It covers tool calls with their timings, token usage, cost, context
+        builds, recovery and risk figures.
+
+        Args:
+            run_id: A run of this agent, finished or not.
+            timeline: Whether the report carries every event.
+
+        Raises:
+            RunNotFound: The run is unknown.
+            RunError: The stores could not be read.
+        """
+        return await run_report(self._conn, self.handle, run_id, timeline)
 
     async def _start(self, method: str, params: dict[str, Any], principal: Principal | None) -> Run:
         if principal is not None:

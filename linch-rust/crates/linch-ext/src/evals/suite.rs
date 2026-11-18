@@ -56,13 +56,16 @@ impl EvalSuite {
     ///         tool or metadata key is empty.
     pub fn from_json(text: &str) -> Result<Self, SuiteError> {
         let suite: Self = serde_json::from_str(text)?;
-        suite.check()?;
+        suite.validate()?;
         Ok(suite)
     }
 
-    /// Reject the empty strings Python rejects: an empty substring or tool
-    /// name would match everything or nothing.
-    fn check(&self) -> Result<(), SuiteError> {
+    /// Reject the empty strings Python rejects: an empty prompt, substring
+    /// or tool name would match everything or nothing.
+    ///
+    /// Raises:
+    ///     SuiteError: `Empty`, naming the field.
+    pub fn validate(&self) -> Result<(), SuiteError> {
         for (index, case) in self.cases.iter().enumerate() {
             if case.prompt.is_empty() {
                 return Err(SuiteError::Empty(format!("cases[{index}].prompt")));
