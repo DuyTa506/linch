@@ -368,6 +368,12 @@ fn boundary(view: &[Arc<Message>], keep_recent_turns: u32) -> Option<usize> {
     Some(at)
 }
 
+/// Where the last turn starts: the last assistant message. It is the part of
+/// a view no summary can fold, so what does not fit in it must be clipped.
+pub(crate) fn last_turn_start(view: &[Arc<Message>]) -> Option<usize> {
+    boundary(view, 1)
+}
+
 /// Where the kept turns start: the `keep_recent_turns`-th assistant message
 /// from the end, so no tool result is cut off from its call. `None` when
 /// the part between the first message and that point holds no assistant
@@ -807,7 +813,7 @@ pub(crate) fn replacement(
 mod clip;
 pub(crate) use clip::{
     CLIP_REASON, CLIP_STRATEGY, MAX_SUMMARY_TRIES, SIZE_REFUSED, Scope, clip, clip_from,
-    folded_budget, kept_budget,
+    folded_budget, last_turn_budget,
 };
 
 #[cfg(test)]

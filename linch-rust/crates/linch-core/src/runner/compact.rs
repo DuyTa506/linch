@@ -38,8 +38,8 @@
 //! long lets the turn go on, and the primary call's own refusal forces the
 //! clipped shape.
 //!
-//! When the kept turns are what does not fit, a summary cannot help: the
-//! view's tool results from the kept turns on are clipped, a logged
+//! When the last turn is what does not fit, a summary cannot help (it folds
+//! every turn before it): the view's tool results from that turn on are clipped, a logged
 //! projection (`Cleared` with a `clip` budget, strategy `clip`), half the
 //! budget at each further refusal of the turn.
 //!
@@ -467,12 +467,13 @@ impl Runner {
                 .await
                 .map(Some);
         }
-        // The kept turns alone may be what does not fit, which no summary
-        // helps: clip their tool results in the view, to half the window,
-        // then half of that at each further refusal of the turn.
-        let start = compaction::forced_keep_from(&view, spec.keep_recent_turns).unwrap_or(1);
+        // The last turn alone may be what does not fit, which no summary
+        // helps (it folds every turn before it, never that one): clip its
+        // tool results in the view, to half the window, then half of that at
+        // each further refusal of the turn.
+        let start = compaction::last_turn_start(&view).unwrap_or(1);
         let window = agent.context_window();
-        if let Some(budget) = compaction::kept_budget(window, attempt - 1)
+        if let Some(budget) = compaction::last_turn_budget(window, attempt - 1)
             && let Some(clipped) = compaction::clip_from(&view, start, budget)
         {
             let clip = Some((budget, clipped.bytes));

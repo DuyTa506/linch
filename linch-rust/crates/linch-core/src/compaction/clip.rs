@@ -10,7 +10,7 @@
 //!
 //! - A forced summary request reads the folded part clipped (tool results
 //!   first, then other text), a smaller budget at each refusal of it.
-//! - The kept turns clip in the view itself, tool results only, as a logged
+//! - The last turn clips in the view itself, tool results only, as a logged
 //!   projection: the session's log keeps every byte.
 //!
 //! The estimate undercounts a provider's prompt by up to 2x, which is why the
@@ -26,7 +26,7 @@ use super::estimate_tokens;
 /// reading half the folded part the one before it did.
 pub(crate) const MAX_SUMMARY_TRIES: u32 = 4;
 
-/// Refusals of one turn's primary call that a clip of the kept turns answers,
+/// Refusals of one turn's primary call that a clip of the last turn answers,
 /// each against half the budget the one before it used.
 pub(crate) const MAX_CLIP_ROUNDS: u32 = 3;
 
@@ -78,10 +78,10 @@ pub(crate) fn folded_budget(window: u64, max_output_tokens: u32, tries: u32, fol
     }
 }
 
-/// Tokens (estimated) the kept turns may weigh after their `round`-th
+/// Tokens (estimated) the last turn may weigh after the `round`-th
 /// refusal of a turn's primary call (0 for the first): half the window, then
 /// half of that, and so on. `None` once the rounds are spent.
-pub(crate) fn kept_budget(window: u64, round: u32) -> Option<u64> {
+pub(crate) fn last_turn_budget(window: u64, round: u32) -> Option<u64> {
     (round <= MAX_CLIP_ROUNDS).then(|| ((window / 2) >> round).max(1))
 }
 

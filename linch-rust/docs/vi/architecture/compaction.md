@@ -132,12 +132,15 @@ chậm gì cả.
   (`compaction::measure_after`). Event mang số đo dưới tên `measured_tokens` (không có trên
   dây khi ước lượng là số đo), nên resume đọc lại đúng phán đoán đó.
 
-Các khoảng trống: lời gọi tóm tắt ở đầu lượt gửi toàn bộ view, nên một ngưỡng vượt quá
-mức vừa cửa sổ (một `threshold_tokens` gần hoặc trên cửa sổ) vẫn gặp lời từ chối; một bản
-tóm tắt bắt buộc gửi phần đã gộp, mà bản thân nó có thể không vừa, và khi đó run kết thúc
-`failed`. Ngưỡng suy ra từ cửa sổ chừa một phần năm cửa sổ cho lời gọi đó. Một ngưỡng thấp
-hơn trọng lượng của các lượt được giữ và overhead của provider bị giữ sau hai bản tóm
-tắt, như ở trên.
+Khoảng trống đã biết: lời gọi tóm tắt ở đầu lượt gửi toàn bộ view, nên một ngưỡng vượt quá
+mức vừa cửa sổ (một `threshold_tokens` gần hoặc trên cửa sổ) khiến lời gọi đó bị từ chối.
+Lượt vẫn đi tiếp mà không compact, và chính lần từ chối của lời gọi chính sẽ ép bản tóm
+tắt theo dạng đã cắt (xem [Khôi phục theo độ dài ngữ cảnh](#context-length-recovery)),
+nên run không còn kết thúc `failed` vì chuyện này; nó vẫn tốn một request bị từ chối ở mỗi
+lượt đến hạn. Ngưỡng suy ra từ cửa sổ chừa một phần năm cửa sổ cho lời gọi đó. Một ngưỡng
+thấp hơn trọng lượng của các lượt được giữ và overhead của provider bị giữ sau hai bản tóm
+tắt, như ở trên. Trường hợp kích thước duy nhất còn kết thúc `failed` là prompt mà system
+prompt, tool và lượt cuối, sau khi cắt, vẫn vượt cửa sổ.
 
 `keep_from` là message assistant thứ `keep_recent_turns` tính từ cuối view. Phần được
 giữ bắt đầu từ message đó, nên một kết quả tool không bao giờ bị cắt rời khỏi lời gọi
@@ -344,19 +347,54 @@ phí, như mọi lần từ chối kiểu đó (`provider/call.rs:257`). `kind` 
 
 1. Với `micro`, nếu có kết quả tool cũ nào đáng xóa, `clear` ghi lại view đã xóa (với
    `forced` được đặt trên event) và chuyển sang attempt chính kế tiếp của lượt.
-2. Nếu không, chừng nào số bản tóm tắt bắt buộc đã tạo còn ít hơn `max_forced` và
+2. Nếu không, khi lượt cuối (từ message assistant cuối trở đi, phần duy nhất một bản tóm
+   tắt không bao giờ gộp) nặng hơn ngân sách cắt, `clear` ghi lại view với kết quả tool của
+   nó đã bị cắt, như một projection có ghi log (strategy `clip`, lý do `clip`, `Cleared`
+   với ngân sách `clip`): một bản tóm tắt không giúp được một lượt vốn đã quá lớn. Ngân sách là một nửa cửa sổ tính bằng token ước lượng ở lần từ chối đầu
+   của lượt, rồi một phần tư, một phần tám và một phần mười sáu ở các lần sau
+   (`compaction::last_turn_budget`); quá đó thì không còn lần cắt nào.
+3. Nếu không, chừng nào số bản tóm tắt bắt buộc đã tạo còn ít hơn `max_forced` và
    `forced_keep_from` tìm được một điểm để gộp, run tạo một bản tóm tắt với `redispatch`
    đặt thành attempt chính kế tiếp. `forced_keep_from` giữ `keep_recent_turns`, hoặc chỉ
    lượt cuối khi cách đó không gộp được gì, vì chính các lượt được giữ có thể là thứ
    không vừa (`compaction.rs:314-321`).
-3. Nếu không, `overflow` không cho gì và lần từ chối kết thúc run như mọi lỗi provider.
+4. Nếu không, `overflow` không cho gì và lần từ chối kết thúc run, với thông báo nói run
+   đo được gì (bên dưới).
 
-Một bản tóm tắt bắt buộc mà thất bại, trả lời không có văn bản, bị từ chối, hoặc không
-tìm được chỗ để giữ sẽ kết thúc run qua `unshortened` (`runner/end.rs:124`): một event `error` tên
-`ProviderError`, kind `context_length`, với thông báo "the prompt exceeds the model's
-context window, and the compaction it forced could not shorten it", và một run `failed`.
-Provider đã từ chối prompt mà view chưa compact sẽ gửi, nên tiếp tục chỉ mua lại cùng một
-lần từ chối.
+**Request tóm tắt bắt buộc được cắt cho vừa.** Phần đã gộp là thứ duy nhất một bản tóm tắt
+phải đọc, và nó có thể lớn hơn chính cửa sổ (một kết quả tool khổng lồ trong đó, hoặc
+nhiều kết quả cỡ vừa trong một view chưa bao giờ chạm ngưỡng). Vì vậy một bản tóm tắt
+bắt buộc đọc nó đã cắt (`compaction/clip.rs`): kết quả tool trước, rồi văn bản của bất kỳ
+message nào, giữ đầu và đuôi quanh một dấu `[... N bytes omitted ...]`, cắt ở ranh giới
+UTF-8 bằng một mức cắt chung cho mọi văn bản, mức lớn nhất đưa ước lượng xuống dưới ngân
+sách (không message nào bị bỏ và mọi `tool_use_id` vẫn ghép cặp). Ngân sách của delivery
+đầu là cửa sổ trừ `max_output_tokens` của bản tóm tắt, và một phần vừa dưới mức đó được
+gửi nguyên, nên một bản tóm tắt bắt buộc của view đã vừa không đổi. Ước lượng đếm ít hơn
+provider tới 2x, nên ngân sách không được tin: khi provider cũng từ chối request tóm tắt
+vì quá dài cửa sổ, một event `compaction` ghi lại điều đó (`rejected` bắt đầu bằng
+`context_length`, `forced`, `clipped_bytes`) bền cùng receipt, và delivery kế tiếp đọc
+một nửa, tối đa bốn delivery (`MAX_SUMMARY_TRIES`; mỗi cái được trả tiền và ghi log như
+mọi lời gọi provider, và chỉ tính một lần vào `max_forced`). Một request không thể cắt
+thêm thì không được gửi lại. Không có gì bị cắt cho bản tóm tắt ở đầu lượt: request của nó
+giữ nguyên các byte mà cache đang giữ (`tests/golden/compaction_proactive_request.json`).
+
+Một bản tóm tắt bắt buộc mà thất bại vì lý do khác, trả lời không có văn bản, bị từ chối,
+hoặc không tìm được chỗ để giữ sẽ kết thúc run qua `unshortened` (`runner/end.rs`): một
+event `error` tên `ProviderError`, kind `context_length`, với thông báo "the prompt exceeds
+the model's context window, and the compaction it forced could not shorten it", và một run
+`failed`. Provider đã từ chối prompt mà view chưa compact sẽ gửi, nên tiếp tục chỉ mua lại
+cùng một lần từ chối.
+
+**Trường hợp kích thước duy nhất còn thất bại.** Khi không gì rút ngắn được view (request
+tóm tắt bị từ chối ở mọi kích thước, hoặc không còn gì để gộp hay cắt, `max_forced` đã hết),
+run kết thúc `failed` với cùng dạng `error` (`ProviderError`, `context_length`, `retryable`
+false, `status` của provider được giữ) và một thông báo nêu cửa sổ cùng số token ước lượng
+của system prompt, tool và phần hội thoại còn lại, rồi lời của chính provider: "the prompt
+exceeds the model's context window of 8000 tokens and nothing is left to shorten: the system
+prompt and tools take about 40 estimated tokens and the conversation 170, after summarizing
+and clipping it as far as it goes. Shrink the system prompt or the tool set, or use a model
+with a larger window (the provider said: ...)". Các kích thước là ước lượng của harness,
+không phải số đếm của provider (`Runner::overflow_message`).
 
 Lời gọi chính kế tiếp là attempt delivery kế tiếp của cùng lượt đó. Nó không phải một
 retry của provider: không có event `provider_retry`, và số lần thử của retry policy không
@@ -366,12 +404,20 @@ số điểm có thể gộp giới hạn một lượt.
 
 ### Một lần resume đọc lại gì
 
-Không có gì mới được ghi để nhớ một compaction bắt buộc. `Forced::of` đọc nó từ các
-delivery bền vững (`compaction.rs:382-445`): một delivery tóm tắt đến sau một delivery
-chính của cùng lượt là bắt buộc; số lượng những cái đó là `max_forced` đã tiêu của run;
-số delivery chính và tóm tắt của lượt cho ra các attempt kế tiếp. `runner/start.rs:523-524`
-đặt các bộ đếm của runner từ nó, nên một run được resume không quên một bản tóm tắt bắt
-buộc cũng không dùng lại một delivery id.
+Không có gì được giữ trong bộ nhớ. `Forced::of` đọc nó từ các delivery và event bền vững
+(`compaction.rs`): một delivery tóm tắt đến sau một delivery chính của cùng lượt là bắt
+buộc; số lượng những cái đó là `max_forced` đã tiêu của run; số delivery chính và tóm tắt
+của lượt cho ra các attempt kế tiếp; các delivery tóm tắt kể từ delivery chính cuối của
+lượt là số lần thử của bản tóm tắt bắt buộc (nên delivery kế tiếp đọc ngân sách nào); và
+một event `compaction` có `rejected` bắt đầu bằng `context_length`, không có delivery nào
+sau nó, nói rằng bản tóm tắt cuối bị từ chối vì quá dài (`tries`, `refused`).
+`runner/start.rs` đặt các bộ đếm của runner từ nó, nên một run được resume không quên một
+bản tóm tắt bắt buộc, không dùng lại một delivery id, và một lần từ chối đã ghi trước khi
+crash không bị nhầm với một loại lỗi khác. Các event từ chối đó bị loại khỏi việc giữ theo
+số lần bị từ chối (`Rejections::of`): một request nhỏ hơn trả lời chúng, chúng không phải
+một câu trả lời vô dụng. Một lần cắt được đọc lại từ ngân sách `clip` của checkpoint
+`Cleared`, mà resume áp lại lên view (độ dài session của checkpoint chứng minh nó không
+đổi).
 
 ### Khôi phục
 
@@ -381,11 +427,13 @@ buộc cũng không dùng lại một delivery id.
 |---|---|---|
 | `CompactionPending` | Không có receipt cho delivery của bản tóm tắt | Một lời gọi tóm tắt khác, sau một receipt bị hủy cho lời gọi chưa kết thúc; một bản bắt buộc thì sau đó đi tiếp tới attempt chính của nó |
 | `CompactionPending` | Có một receipt, bản tóm tắt ở đầu lượt | Lời gọi chính ở attempt 1; lời gọi tóm tắt đã kết thúc mà không có bản tóm tắt |
-| `CompactionPending` | Có một receipt, bản tóm tắt bắt buộc | Run kết thúc qua `unshortened` |
+| `CompactionPending` | Có một receipt, bản tóm tắt bắt buộc bị từ chối vì quá dài (event `compaction` của nó đã bền), dưới 4 lần thử | Một lời gọi tóm tắt khác trên một nửa phần cũ, rồi attempt chính của nó |
+| `CompactionPending` | Có một receipt, bất kỳ bản tóm tắt bắt buộc nào khác, hoặc đã hết lần thử | Run kết thúc qua `unshortened` |
 | `Compacted` | Projection chưa có trong session | Nối nó, rồi lời gọi chính ở attempt kế tiếp của lượt |
 | `Compacted` | Projection đã là entry cuối cùng | Lời gọi chính ở attempt kế tiếp của lượt |
 | `Cleared` | Projection chưa có trong session | Xóa lại view từ `before`, nối nó, rồi attempt chính `attempt` |
-| `Cleared` | Một projection ở cuối với lý do `micro-compaction` | Attempt chính `attempt` |
+| `Cleared` với `clip` | Projection chưa có trong session | Cắt lại view từ `before` tới ngân sách `clip`, nối nó, rồi attempt chính `attempt` |
+| `Cleared` | Một projection ở cuối với lý do `micro-compaction` hoặc `clip` | Attempt chính `attempt` |
 
 Phép kiểm tra cho `Compacted` là session có độ dài bằng độ dài của checkpoint, hoặc dài
 hơn một entry với một `Projection` ở cuối mà bản tóm tắt của nó là bản tóm tắt của
@@ -469,6 +517,14 @@ hồi của nó đã bền vững (`truncation.rs`, `runner/start.rs:537-539`).
   từ chối không thể rút ngắn, `max_forced`, một bản tóm tắt bắt buộc thất bại, redaction
   của một bản tóm tắt bắt buộc, và một lần crash ở mọi lần ghi của từng đường, được
   resume về cùng một kết quả.
+- `crates/linch-core/tests/e2e_compaction_estimator.rs`: ngoài anchor, một kết quả khổng lồ
+  trong phần đã gộp (request tóm tắt bị cắt và thử lại), trong lượt cuối (bị cắt trong
+  view, còn nguyên trong session), một ngưỡng bằng cửa sổ, một bản tóm tắt bị từ chối ở mọi
+  kích thước, một overhead tự nó đã vượt cửa sổ, một request tóm tắt ở đầu lượt được ghim
+  từng byte (`tests/golden/compaction_proactive_request.json`), và một lần crash ở mọi lần
+  ghi của từng cái, gồm cả việc giữ được đọc lại từ `measured_tokens`.
+- `crates/linch-core/src/compaction/clip/tests.rs`: phép cắt (dấu, UTF-8, một mức cắt chung,
+  mọi lời gọi vẫn ghép cặp, ngân sách như một hậu điều kiện).
 - `crates/linch-core/tests/e2e_truncation.rs`: các câu trả lời được tiếp tục và ghép lại,
   phép kiểm tra schema trên toàn bộ văn bản, một lần crash ở mọi lần ghi.
 - `crates/linch/tests/compaction.rs`: một lần compaction khiến model đọc lại một tệp

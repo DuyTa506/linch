@@ -319,12 +319,17 @@ View mà model nhìn thấy đã được rút ngắn
 (số đo mà ngưỡng đã dùng cho view, khi nó lớn hơn `tokens_before`: số token prompt
 provider báo gần nhất cộng với ước lượng phần phát sinh sau đó; vắng mặt cho tới khi
 provider báo usage), `strategy`
-(`summary`, hoặc `micro` khi các kết quả tool cũ bị xóa mà không có lời gọi model),
-`duration_ms`, là thời gian từ lúc quyết định nén đến event này (lời gọi tóm tắt và
+(`summary`, `micro` khi các kết quả tool cũ bị xóa mà không có lời gọi model, hoặc `clip`
+khi kết quả tool của lượt cuối trong một prompt bị từ chối bị cắt theo một ngân
+sách), `clipped_bytes` (số byte bị cắt khỏi văn bản để prompt vừa, tính cả dấu cắt: phần
+cũ mà request tóm tắt bắt buộc đọc ít đi, hoặc phần view mất đi vì một `clip`; vắng mặt
+khi không cắt gì), `duration_ms`, là thời gian từ lúc quyết định nén đến event này (lời gọi tóm tắt và
 phép chiếu), và `forced`, là true khi nguyên nhân là provider từ chối một prompt vì quá
 dài ([Memory](./memory.md#when-the-prompt-does-not-fit)). `rejected` được đặt khi bản
 tóm tắt không được áp dụng và view không đổi (các số đếm bằng nhau). Nó bắt đầu bằng một
-mã, `tool_call` (câu trả lời gọi một tool), `empty`, hoặc `not_smaller` (view nó để lại được ước lượng không nhỏ hơn
+mã, `tool_call` (câu trả lời gọi một tool), `empty`, `context_length` (một request tóm tắt
+bắt buộc bị từ chối vì dài hơn cửa sổ: run hỏi lại với một nửa phần cũ, hoặc kết thúc khi
+đã gửi bốn request), hoặc `not_smaller` (view nó để lại được ước lượng không nhỏ hơn
 view hiện tại), rồi nói điều xảy ra tiếp theo: ở đầu một lượt run tiếp tục và lượt đến hạn
 kế tiếp hỏi lại (từ lần từ chối thứ hai liên tiếp: khi view đã lớn thêm một phần mười
 context window hoặc provider từ chối prompt); một bản tóm tắt bắt buộc thì kết thúc run.

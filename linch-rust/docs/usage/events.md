@@ -316,13 +316,20 @@ The view the model sees was shortened
 (what the trigger measured the view at, when that was more than `tokens_before`:
 the provider's last reported prompt tokens plus the estimate of what followed
 them; absent until a provider has reported usage), `strategy`
-(`summary`, or `micro` when old tool results were cleared with no model
-call), `duration_ms`, the time from the decision to compact to this event
+(`summary`, `micro` when old tool results were cleared with no model
+call, or `clip` when the tool results of a refused prompt's last turn were
+clipped to a budget), `clipped_bytes` (the bytes clipped out of text to make a
+prompt fit, markers counted: what a forced summary request read less of the
+older part, or what a `clip` took out of the view; absent when nothing was
+clipped), `duration_ms`, the time from the decision to compact to this event
 (the summary call and the projection), and `forced`, true when the
 provider's refusal of a prompt as too long caused it
 ([Memory](./memory.md#when-the-prompt-does-not-fit)). `rejected` is set when
 the summary was not applied and the view is unchanged (the counts agree). It
-starts with a code, `tool_call` (the reply called a tool), `empty`, or
+starts with a code, `tool_call` (the reply called a tool), `empty`,
+`context_length` (a forced summary request was refused as longer than the
+window: the run asks again on half as much of the older part, or ends when it
+has made four requests), or
 `not_smaller` (the view it would leave is estimated no smaller than the view now), then says what
 follows: at a turn's start the run goes on and the next due turn asks again (from
 the second rejection in a row, once the view has grown by a tenth of the

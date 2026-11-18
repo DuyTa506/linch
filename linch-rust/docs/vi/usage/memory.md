@@ -156,15 +156,31 @@ giờ được [thử lại](./providers.md#lỗi-và-thử-lại).
 Với `spec.compaction` được đặt, run rút ngắn view của nó và gọi lại, theo thứ tự này:
 
 1. Với `micro`, nó xóa các kết quả tool cũ, nếu có cái nào đáng xóa.
-2. Nếu không, nó tạo một bản tóm tắt, giữ `keep_recent_turns` (hoặc chỉ lượt cuối, khi
-   đó chính là thứ không vừa). Mỗi bản tính vào `max_forced`.
-3. Khi không bước nào rút ngắn được view (không còn gì để gộp, hoặc `max_forced` đã hết),
-   hoặc lời gọi tóm tắt thất bại, run kết thúc.
+2. Nếu không, khi lượt cuối có kết quả tool tự nó đã quá lớn so với cửa sổ (một bản tóm
+   tắt không bao giờ gộp lượt đó), nó cắt chúng trong view: giữ đầu và đuôi quanh một
+   dấu `[... N bytes omitted ...]`, xuống một nửa cửa sổ, rồi một phần tư, một phần tám và
+   một phần mười sáu ở mỗi lần từ chối tiếp theo của lượt. Log của session giữ nguyên kết
+   quả đầy đủ; chỉ những gì model thấy bị cắt (`strategy` là `clip`).
+3. Nếu không, nó tạo một bản tóm tắt, giữ `keep_recent_turns` (hoặc chỉ lượt cuối, khi
+   đó chính là thứ không vừa). Mỗi bản tính vào `max_forced`. Request tóm tắt đọc phần cũ
+   đã cắt theo cách tương tự khi nó không vừa cửa sổ, và khi provider cũng từ chối request
+   đó vì quá dài, run hỏi lại với một nửa lượng đó, tối đa bốn request (mỗi cái là một lời
+   gọi được trả tiền và ghi log, với một event `compaction` có `rejected` bắt đầu bằng
+   `context_length`). Bản tóm tắt ở đầu lượt không bao giờ bị cắt.
+4. Khi không bước nào rút ngắn được view, run kết thúc.
 
-Mỗi bước là một event `compaction` với `forced` là true. Lời gọi theo sau là lần thử kế
+Mỗi bước là một event `compaction` với `forced` là true. `clipped_bytes` cho biết một lần
+cắt đã lấy bao nhiêu văn bản khỏi request hay view. Lời gọi theo sau là lần thử kế
 tiếp của cùng lượt đó, không phải một retry của provider, và không có event
 `provider_retry` nào được gửi cho nó. Một lần từ chối từ một lời gọi không tốn gì thì
 không bị tính phí.
+
+Trường hợp duy nhất còn kết thúc `failed` vì kích thước là một prompt không vừa dù cuộc
+hội thoại đã được tóm tắt và cắt hết mức: riêng system prompt và tool cộng với lượt được
+cuối đã vượt cửa sổ. Thông báo của `error` khi đó nói rõ điều này, kèm cửa sổ và số token
+ước lượng của system prompt, tool và phần hội thoại ("... and nothing is left to shorten:
+the system prompt and tools take about N estimated tokens ..."); hãy thu nhỏ system prompt
+hoặc bộ tool, hoặc dùng một model có cửa sổ lớn hơn.
 
 Khi không có `spec.compaction`, hoặc khi các bước đã hết, run kết thúc bằng một event
 `error` như dưới đây và một `result` có subtype `error`:

@@ -180,7 +180,7 @@ fn budgets_halve_with_each_refusal() {
     assert_eq!(folded_budget(8000, 4096, 2, 3300), 825);
     assert_eq!(folded_budget(8000, 4096, 1, 90_000), 1952);
     assert_eq!(folded_budget(100, 4096, 3, 50), 1, "never zero");
-    assert_eq!(kept_budget(8000, 0), Some(4000));
-    assert_eq!(kept_budget(8000, 2), Some(1000));
-    assert_eq!(kept_budget(8000, MAX_CLIP_ROUNDS + 1), None);
+    assert_eq!(last_turn_budget(8000, 0), Some(4000));
+    assert_eq!(last_turn_budget(8000, 2), Some(1000));
+    assert_eq!(last_turn_budget(8000, MAX_CLIP_ROUNDS + 1), None);
 }
