@@ -372,9 +372,20 @@ async fn a_compaction_keeps_the_prefix_and_tells_the_folded_changes_once() {
         .text("summary")
         .usage(usage(3, 2))
         .build();
+    // The folded turn is longer than the checkpoint that replaces it (a
+    // summary that does not shorten the view is rejected).
+    let long = |turn: usize, tool: &str| {
+        let value = json!({"value": format!("v{turn}.0")});
+        linch_core::provider::scripted::TurnBuilder::new(MODEL)
+            .text("working ".repeat(60))
+            .input_chunk(4)
+            .tool_call(&format!("call_{turn}_0"), tool, &value)
+            .usage(usage(10, 5))
+            .build()
+    };
     let turns = vec![
-        tool_turn(0, 1, "Mutate"),
-        tool_turn(1, 1, "Echo"),
+        long(0, "Mutate"),
+        long(1, "Echo"),
         summary,
         text_turn("done"),
     ];

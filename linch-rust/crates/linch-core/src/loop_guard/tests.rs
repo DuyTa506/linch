@@ -86,7 +86,7 @@ fn delivery(kind: ModelCallKind, turn: u64) -> Event {
 
 #[test]
 fn identical_calls_trip_at_the_limit_whatever_the_key_order() {
-    let mut watch = Watch::new(&LoopGuard::default(), HashSet::new());
+    let mut watch = Watch::new(&LoopGuard::default(), HashSet::new(), HashSet::new());
     let (read, other) = (json!({"a": 1, "b": 2}), json!({"b": 2, "a": 1}));
     batch(&mut watch, &[("Read", read.clone(), false)]);
     batch(
@@ -109,7 +109,7 @@ fn identical_calls_trip_at_the_limit_whatever_the_key_order() {
 
 #[test]
 fn a_call_is_a_repeat_only_with_the_same_result() {
-    let mut watch = Watch::new(&LoopGuard::default(), HashSet::new());
+    let mut watch = Watch::new(&LoopGuard::default(), HashSet::new(), HashSet::new());
     let read = json!({"path": "a"});
     for text in ["v1", "v1", "v2", "v2", "v3"] {
         once(&mut watch, "Read", read.clone(), text);
@@ -130,7 +130,7 @@ fn a_call_is_a_repeat_only_with_the_same_result() {
 #[test]
 fn identical_inputs_trip_whatever_the_result_and_the_other_calls_between() {
     for kinds in [2, 3] {
-        let mut watch = Watch::new(&LoopGuard::default(), HashSet::new());
+        let mut watch = Watch::new(&LoopGuard::default(), HashSet::new(), HashSet::new());
         let calls: Vec<_> = (0..kinds).map(|k| json!({"call": k})).collect();
         let mut n = 0;
         for round in 0.. {
@@ -164,7 +164,7 @@ fn identical_inputs_trip_whatever_the_result_and_the_other_calls_between() {
 /// An error counts for the input (Python's rule), though never as a repeat.
 #[test]
 fn failed_calls_count_as_identical_inputs_not_as_repeats() {
-    let mut watch = Watch::new(&LoopGuard::default(), HashSet::new());
+    let mut watch = Watch::new(&LoopGuard::default(), HashSet::new(), HashSet::new());
     for n in 0..9 {
         watch.see(&calling(&[("Grep", json!({"n": n})), ("Read", json!({}))]));
         watch.see(&answered(&[("fine", false), (&format!("nope {n}"), true)]));
@@ -183,7 +183,7 @@ fn a_limit_of_zero_turns_the_input_count_off_alone() {
         max_identical_inputs: 0,
         ..LoopGuard::default()
     };
-    let mut watch = Watch::new(&guard, HashSet::new());
+    let mut watch = Watch::new(&guard, HashSet::new(), HashSet::new());
     for n in 0..60 {
         once(&mut watch, "Date", json!({}), &format!("t{n}"));
     }
@@ -194,7 +194,7 @@ fn a_limit_of_zero_turns_the_input_count_off_alone() {
 /// healthy run, is not a loop: the count looks at the latest results.
 #[test]
 fn repeats_spaced_far_apart_do_not_trip_and_close_ones_do() {
-    let mut watch = Watch::new(&LoopGuard::default(), HashSet::new());
+    let mut watch = Watch::new(&LoopGuard::default(), HashSet::new(), HashSet::new());
     let status = json!({"command": "git status"});
     for round in 0..4 {
         once(&mut watch, "Bash", status.clone(), "clean");
@@ -204,7 +204,7 @@ fn repeats_spaced_far_apart_do_not_trip_and_close_ones_do() {
     }
     assert!(watch.tool_trip().is_none(), "four in 84 results");
 
-    let mut watch = Watch::new(&LoopGuard::default(), HashSet::new());
+    let mut watch = Watch::new(&LoopGuard::default(), HashSet::new(), HashSet::new());
     for round in 0..3 {
         once(&mut watch, "Bash", status.clone(), "clean");
         for n in 0..REPEAT_WINDOW / 2 - 2 {
@@ -214,11 +214,133 @@ fn repeats_spaced_far_apart_do_not_trip_and_close_ones_do() {
     assert!(watch.tool_trip().is_some(), "three in the latest 19");
 }
 
+/// A long healthy run that reads one file now and then (20 times in 500
+/// turns) is never a loop, whatever the results look like.
+#[test]
+fn one_file_read_twenty_times_over_five_hundred_turns_is_not_a_loop() {
+    let mut watch = Watch::new(&LoopGuard::default(), HashSet::new(), HashSet::new());
+    for n in 0..500 {
+        let (input, text) = match n % 25 {
+            0 => (json!({"path": "src/lib.rs"}), "same text".to_string()),
+            _ => (json!({"n": n}), format!("text {n}")),
+        };
+        once(&mut watch, "Read", input, &text);
+        assert!(watch.tool_trip().is_none(), "turn {n}");
+    }
+}
+
+/// The tools of write or exec scope, as the registry names them.
+fn writing() -> HashSet<String> {
+    HashSet::from(["Edit".to_owned(), "Bash".to_owned()])
+}
+
+/// A fix-and-test loop: an edit, then the same test command, ten times.
+/// Each edit changes what the next run finds, so none is a repeat.
+#[test]
+fn ten_test_runs_between_ten_edits_are_not_a_loop() {
+    let mut watch = Watch::new(&LoopGuard::default(), HashSet::new(), writing());
+    for n in 0..200 {
+        once(&mut watch, "Edit", json!({"n": n}), "ok");
+        let test = json!({"command": "cargo test"});
+        once(&mut watch, "Bash", test, &format!("{n} failed"));
+        let read = json!({"path": "src/lib.rs"});
+        once(&mut watch, "Read", read, &format!("v{n}"));
+        assert!(watch.tool_trip().is_none(), "{n}: {:?}", watch.tool_trip());
+    }
+}
+
+/// A write or exec call clears what was asked before it only with an input
+/// it has not had lately, and never its own count: the same test command run
+/// again and again with no edit between still ends the run, whatever its
+/// output.
+#[test]
+fn the_same_exec_call_with_no_edit_between_still_trips() {
+    let mut watch = Watch::new(&LoopGuard::default(), HashSet::new(), writing());
+    let test = json!({"command": "cargo test"});
+    for n in 0..9 {
+        once(&mut watch, "Bash", test.clone(), &format!("timing {n}"));
+        assert!(watch.tool_trip().is_none(), "{n}");
+    }
+    once(&mut watch, "Bash", test, "timing 9");
+    let trip = watch.tool_trip().unwrap();
+    assert!(
+        trip.detail.contains("identical inputs 10 time(s)"),
+        "{}",
+        trip.detail
+    );
+}
+
+/// Cycles of 2, 3 and 5 write or exec calls whose results change every time
+/// are loops, though each call succeeds: none of them is a new edit.
+#[test]
+fn a_cycle_of_exec_calls_still_trips() {
+    for kinds in [2usize, 3, 5] {
+        let mut watch = Watch::new(&LoopGuard::default(), HashSet::new(), writing());
+        let mut tripped = None;
+        for n in 0..500 {
+            let call = json!({"command": format!("step {}", n % kinds)});
+            once(&mut watch, "Bash", call, &format!("t{n}"));
+            if watch.tool_trip().is_some() {
+                tripped = Some(n + 1);
+                break;
+            }
+        }
+        let at = tripped.unwrap_or_else(|| panic!("{kinds}: never tripped"));
+        assert!(at <= 10 * kinds, "{kinds}: tripped at {at}");
+    }
+}
+
+/// An edit and its undo, each followed by a test run, over and over: the
+/// edits repeat, so they change nothing the second time.
+#[test]
+fn an_edit_and_its_undo_over_and_over_still_trip() {
+    let mut watch = Watch::new(&LoopGuard::default(), HashSet::new(), writing());
+    let (forth, back) = (json!({"edit": "a to b"}), json!({"edit": "b to a"}));
+    let test = json!({"command": "cargo test"});
+    let mut tripped = None;
+    for n in 0..200 {
+        once(&mut watch, "Edit", forth.clone(), "ok");
+        once(&mut watch, "Bash", test.clone(), &format!("a {n}"));
+        once(&mut watch, "Edit", back.clone(), "ok");
+        once(&mut watch, "Bash", test.clone(), &format!("b {n}"));
+        if watch.tool_trip().is_some() {
+            tripped = Some(n);
+            break;
+        }
+    }
+    assert!(tripped.is_some_and(|n| n < 12), "{tripped:?}");
+}
+
+/// Reads of the same file, whatever it says, between nothing that writes:
+/// the cycle is a loop as it was.
+#[test]
+fn a_read_only_cycle_trips_with_writing_tools_on_the_agent() {
+    let mut watch = Watch::new(&LoopGuard::default(), HashSet::new(), writing());
+    for n in 0..10 {
+        once(&mut watch, "Read", json!({"path": "a"}), &format!("t{n}"));
+    }
+    assert!(watch.tool_trip().is_some());
+}
+
+/// A write that failed changed nothing, so the reads before it stand.
+#[test]
+fn a_failed_write_does_not_clear_the_count() {
+    let mut watch = Watch::new(&LoopGuard::default(), HashSet::new(), writing());
+    for n in 0..9 {
+        once(&mut watch, "Read", json!({"path": "a"}), &format!("t{n}"));
+        watch.see(&calling(&[("Edit", json!({"n": n}))]));
+        watch.see(&answered(&[("no match", true)]));
+    }
+    assert!(watch.tool_trip().is_none());
+    once(&mut watch, "Read", json!({"path": "a"}), "t9");
+    assert!(watch.tool_trip().is_some());
+}
+
 /// `ResultOffload` replaces a long result with a preview that names a file
 /// made from the call's id, so identical results would never look alike.
 #[test]
 fn an_offloaded_result_repeats_whatever_its_file_name() {
-    let mut watch = Watch::new(&LoopGuard::default(), HashSet::new());
+    let mut watch = Watch::new(&LoopGuard::default(), HashSet::new(), HashSet::new());
     let command = json!({"command": "cargo test"});
     for id in ["toolu_1", "toolu_2", "toolu_3"] {
         let call = ContentBlock::ToolUse(ToolUseBlock {
@@ -246,13 +368,58 @@ fn an_offloaded_result_repeats_whatever_its_file_name() {
     assert!(trip.detail.contains("'Bash'"), "{}", trip.detail);
 }
 
+/// The window arithmetic, pinned: a cycle of 5 calls whose results change
+/// every time trips the input count (10 of one call in the latest 50
+/// results); a cycle of 6 never reaches 10 in 50 and is left to
+/// `max_turns` and the budget, which are unset by default.
+#[test]
+fn a_cycle_of_six_changing_calls_is_beyond_the_input_window() {
+    let cycle = |kinds: usize| {
+        let mut watch = Watch::new(&LoopGuard::default(), HashSet::new(), HashSet::new());
+        for n in 0..500 {
+            once(
+                &mut watch,
+                "Date",
+                json!({"call": n % kinds}),
+                &format!("t{n}"),
+            );
+            if watch.tool_trip().is_some() {
+                return Some(n + 1);
+            }
+        }
+        None
+    };
+    assert_eq!(cycle(5), Some(46), "the 10th call of the first kind");
+    assert_eq!(cycle(6), None, "500 calls and the run is still going");
+}
+
+/// A declared poll whose answer changes on every call (an elapsed time in
+/// a status line) is never "the same answer in a row" and is kept out of
+/// the input count: only the tool's own end (`poll_done`, a process
+/// timeout) or `max_turns` / the budget end such a run. Pinned as the
+/// documented limit.
+#[test]
+fn a_poll_whose_answer_changes_every_time_is_never_a_loop() {
+    let mut watch = Watch::new(&LoopGuard::default(), polling(), HashSet::new());
+    let poll = json!({"process_id": "job_1"});
+    for n in 0..500 {
+        once(
+            &mut watch,
+            "BashOutput",
+            poll.clone(),
+            &format!("elapsed {n}s"),
+        );
+    }
+    assert!(watch.tool_trip().is_none());
+}
+
 #[test]
 fn a_poll_that_runs_on_is_not_a_repeat_until_the_idle_bound() {
     let guard = LoopGuard {
         max_idle_turns: 4,
         ..LoopGuard::default()
     };
-    let mut watch = Watch::new(&guard, polling());
+    let mut watch = Watch::new(&guard, polling(), HashSet::new());
     let poll = json!({"process_id": "bash_1"});
     for _ in 0..4 {
         once(&mut watch, "BashOutput", poll.clone(), "running");
@@ -277,7 +444,7 @@ fn a_poll_that_runs_on_is_not_a_repeat_until_the_idle_bound() {
 /// Ten waits on one command are neither repeats nor identical inputs.
 #[test]
 fn polling_a_running_command_is_not_counted_as_a_repeated_input() {
-    let mut watch = Watch::new(&LoopGuard::default(), polling());
+    let mut watch = Watch::new(&LoopGuard::default(), polling(), HashSet::new());
     for _ in 0..24 {
         once(
             &mut watch,
@@ -293,7 +460,7 @@ fn polling_a_running_command_is_not_counted_as_a_repeated_input() {
 /// again is no wait, and three times is a loop.
 #[test]
 fn a_finished_command_read_again_is_a_repeat() {
-    let mut watch = Watch::new(&LoopGuard::default(), polling());
+    let mut watch = Watch::new(&LoopGuard::default(), polling(), HashSet::new());
     let poll = json!({"process_id": "bash_1"});
     for _ in 0..2 {
         watch.see(&calling(&[("BashOutput", poll.clone())]));
@@ -310,7 +477,7 @@ fn a_finished_command_read_again_is_a_repeat() {
 
     // The same end without `poll_done` is a wait, and another tool's end
     // says nothing about a poll.
-    let mut watch = Watch::new(&LoopGuard::default(), polling());
+    let mut watch = Watch::new(&LoopGuard::default(), polling(), HashSet::new());
     for _ in 0..5 {
         watch.see(&calling(&[("BashOutput", poll.clone())]));
         watch.see(&ended("BashOutput", false));
@@ -322,7 +489,7 @@ fn a_finished_command_read_again_is_a_repeat() {
 
 #[test]
 fn a_poll_is_never_a_repeat_but_its_failures_count() {
-    let mut watch = Watch::new(&LoopGuard::default(), polling());
+    let mut watch = Watch::new(&LoopGuard::default(), polling(), HashSet::new());
     let poll = json!({"process_id": "bash_1"});
     for _ in 0..5 {
         batch(&mut watch, &[("BashOutput", poll.clone(), false)]);
@@ -339,7 +506,7 @@ fn a_poll_is_never_a_repeat_but_its_failures_count() {
 
 #[test]
 fn a_failure_streak_trips_and_a_success_resets_it() {
-    let mut watch = Watch::new(&LoopGuard::default(), HashSet::new());
+    let mut watch = Watch::new(&LoopGuard::default(), HashSet::new(), HashSet::new());
     for batch in [&[true][..], &[true, true], &[false, true], &[true], &[true]] {
         watch.see(&results(batch));
     }
@@ -361,7 +528,7 @@ fn zero_turns_a_tool_check_off() {
         max_consecutive_failures: 0,
         ..LoopGuard::default()
     };
-    let mut watch = Watch::new(&off, polling());
+    let mut watch = Watch::new(&off, polling(), HashSet::new());
     for failed in [true, false, true, true, false, true, true] {
         batch(&mut watch, &[("Read", json!({}), failed)]);
     }
@@ -377,7 +544,7 @@ fn idle_turns_count_from_the_last_primary_call() {
         max_idle_turns: 2,
         ..LoopGuard::default()
     };
-    let mut watch = Watch::new(&guard, HashSet::new());
+    let mut watch = Watch::new(&guard, HashSet::new(), HashSet::new());
     assert!(watch.idle_trip(0).is_none());
     assert!(watch.idle_trip(1).is_none());
     assert_eq!(
@@ -407,7 +574,7 @@ fn the_counts_read_back_from_the_log_are_the_live_ones() {
         calling(&[("Read", json!({}))]),
         ended("BashOutput", true),
     ];
-    let mut live = Watch::new(&LoopGuard::default(), polling());
+    let mut live = Watch::new(&LoopGuard::default(), polling(), HashSet::new());
     for event in &events {
         live.see(event);
     }
@@ -422,7 +589,7 @@ fn the_counts_read_back_from_the_log_are_the_live_ones() {
             event,
         })
         .collect();
-    let read = Watch::of(&LoopGuard::default(), polling(), &envelopes);
+    let read = Watch::of(&LoopGuard::default(), polling(), HashSet::new(), &envelopes);
     let counts = |w: &Watch| {
         (
             w.pending.clone(),

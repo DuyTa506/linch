@@ -54,12 +54,19 @@ compact. Các trường, có kiểu `Compaction`:
 | `max_output_tokens` | `4096` | Số token nhiều nhất bản tóm tắt được dùng; tối thiểu 1 |
 | `micro` | `False` | Xóa các kết quả tool cũ trước khi tóm tắt ([bên dưới](#micro-compaction)) |
 | `max_forced` | `3` | Số bản tóm tắt nhiều nhất một run tạo ra vì provider từ chối một prompt là quá dài ([bên dưới](#when-the-prompt-does-not-fit)); `0` là không bao giờ |
-| `keep_user_tokens` | `15000` | Số token của các message user mà bản tóm tắt gộp đi, được checkpoint mang nguyên văn theo thứ tự mới nhất trước, do harness sao chép; `0` là không mang gì |
+| `keep_user_tokens` | `15000` | Số token của các message user mà bản tóm tắt gộp đi, được checkpoint mang nguyên văn theo thứ tự mới nhất trước, do harness sao chép; `0` là không mang gì. Các block nguyên văn cũng co lại cho vừa: toàn bộ checkpoint nhỏ hơn phần nó thay thế, nếu không bản tóm tắt bị từ chối |
 
 Một bản tóm tắt là một lời gọi provider thêm trên provider và model của agent, với usage
 riêng, được tính vào [budget](./agent.md#budget). Nó được báo cáo bằng một
 [event](./events.md#compactionevent-compaction) `compaction` với `strategy` là `summary`.
 Các callback `pre_compact` và `post_compact` nhìn thấy nó.
+
+Một bản tóm tắt mà model trả về dưới dạng một lời gọi tool, không có gì, hoặc một văn bản
+không nhỏ hơn phần nó thay thế (đo trên toàn bộ checkpoint, gồm cả các message nguyên văn và
+reminder) bị từ chối: view giữ nguyên và một event `compaction` có `rejected` nói lý do. Sau
+hai lần từ chối liên tiếp, run thôi hỏi ở mọi lượt đến hạn: nó hỏi lại khi view đã lớn thêm
+một phần mười context window, hoặc khi provider từ chối prompt (bản tóm tắt bắt buộc không
+bao giờ bị giữ); một bản tóm tắt được chấp nhận xóa bộ đếm.
 
 Spec compaction là một phần của [run contract](./agent.md#the-run-contract): một run bắt
 đầu dưới một cài đặt không được resume dưới một cài đặt khác.

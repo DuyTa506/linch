@@ -228,6 +228,16 @@ impl ToolSnapshot {
             .collect()
     }
 
+    /// The names of the tools that change state (write or exec scope),
+    /// after which the loop guard no longer counts the calls made before
+    /// as repeats.
+    pub(crate) fn writes(&self) -> std::collections::HashSet<String> {
+        (self.tools.iter())
+            .filter(|tool| tool.tool().scope() != crate::tool::ToolScope::Read)
+            .map(|tool| tool.name().to_owned())
+            .collect()
+    }
+
     /// Each tool's definition with its scope, in registration order: the
     /// tool part of the run contract. The scope decides approval and
     /// parallelism, so it counts as much as the schema.

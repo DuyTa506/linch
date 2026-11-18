@@ -309,7 +309,7 @@ chúng bị từ chối khi resume cho đến khi kết thúc.
 | `max_output_tokens` | `4096` | Số token nhiều nhất bản tóm tắt được dùng; tối thiểu 1 |
 | `micro` | `False` | Xóa các kết quả tool cũ trước khi tóm tắt, không có lời gọi model ([Memory](./memory.md#micro-compaction)) |
 | `max_forced` | `3` | Số bản tóm tắt nhiều nhất một run tạo ra vì provider từ chối một prompt là quá dài so với context window; `0` là không bao giờ ([Memory](./memory.md#when-the-prompt-does-not-fit)) |
-| `keep_user_tokens` | `15000` | Số token của các message user mà bản tóm tắt gộp đi, được checkpoint mang nguyên văn theo thứ tự mới nhất trước, do harness sao chép; `0` là không mang gì |
+| `keep_user_tokens` | `15000` | Số token của các message user mà bản tóm tắt gộp đi, được checkpoint mang nguyên văn theo thứ tự mới nhất trước, do harness sao chép; `0` là không mang gì. Các block nguyên văn cũng co lại cho vừa: toàn bộ checkpoint nhỏ hơn phần nó thay thế, nếu không bản tóm tắt bị từ chối |
 
 Khi không có `threshold_tokens` (`"compaction": {}` bật tính năng này), run nén
 giống như Python Linch: khi giá trị ước tính cộng với phần dự trữ cho đầu ra đạt
@@ -331,7 +331,7 @@ Loop guard kết thúc một run bị kẹt, trước lời gọi provider kế 
 | Trường | Mặc định | Run kết thúc khi |
 |---|---|---|
 | `max_identical_tool_calls` | `3` | Cùng một lời gọi nhận cùng kết quả chừng này lần trong 20 kết quả gần nhất: một tool, cùng input, cùng kết quả, không phải lỗi. Lời gọi chạm tới ngưỡng vẫn chạy trước. Một lời gọi có kết quả đã đổi (một file đọc lại sau khi sửa) là có tiến triển và không được đếm, và một lời gọi cách xa từ lâu trong một run dài khỏe mạnh cũng vậy. Một kết quả đã được chuyển sang filesystem (offload kết quả lớn) được tính theo nội dung của nó, bất kể tên file. `0` tắt kiểm tra này |
-| `max_identical_inputs` | `10` | Một tool được gọi với cùng input chừng này lần trong 50 lời gọi gần nhất, bất kể kết quả và bất kể có lỗi hay không: luật của Python đếm cái này trên toàn run với ngưỡng của `max_identical_tool_calls`; ở đây cách đếm nới hơn (10, trong một cửa sổ), nên một run dài khỏe mạnh không bị cắt. Nó chặn một vòng lặp mà kết quả đổi mỗi lần (một timestamp) hoặc luân phiên giữa vài lời gọi. Một tool poll không được đếm. `0` tắt kiểm tra này; không có trên wire khi bằng `10` |
+| `max_identical_inputs` | `10` | Một tool được gọi với cùng input chừng này lần trong 50 lời gọi gần nhất, bất kể kết quả và bất kể có lỗi hay không: luật của Python đếm cái này trên toàn run với ngưỡng của `max_identical_tool_calls`; ở đây cách đếm nới hơn (10, trong một cửa sổ), và một lời gọi write hay exec thành công với một input mới (không nằm trong 50 lời gọi như vậy gần nhất) xóa bộ đếm của mọi lời gọi khác (một lần sửa đổi thứ mà lần chạy test kế tiếp tìm thấy), nên một run sửa-và-test dài không bị cắt. Cùng một lời gọi, hay một chu trình các lời gọi write hoặc exec, chạy đi chạy lại mà không có lần sửa mới nào ở giữa vẫn được đếm. Nó chặn một vòng lặp mà kết quả đổi mỗi lần (một timestamp) hoặc luân phiên giữa vài lời gọi. Một tool poll không được đếm. `0` tắt kiểm tra này; không có trên wire khi bằng `10` |
 | `max_consecutive_failures` | `3` | Chừng này batch tool liên tiếp mà mọi lời gọi đều lỗi. Một batch có một lời gọi thành công thì đếm lại từ đầu. `0` tắt kiểm tra này |
 | `max_idle_turns` | `25` | Thêm một lượt liên tiếp nữa sẽ kết thúc mà không có lời gọi provider, điều mà chỉ một callback `before_provider_call` trả lời `force_continue` mới gây ra. Tối thiểu `1`: kiểm tra này luôn bật |
 
@@ -360,6 +360,14 @@ một lần poll đã xong bằng metadata `{"poll_done": true}`.
 Giá trị mặc định không được ghi vào spec, nên bỏ `loop_guard` đi thì giữ nguyên
 [hợp đồng của run](#hợp-đồng-của-run) của một agent từ trước khi có guard, và các run
 của nó vẫn resume được; mọi giá trị khác đều đổi hợp đồng.
+
+Guard không bắt được gì. Nó đếm một input nhiều nhất 10 lần trong 50 kết quả gần nhất, nên
+một chu trình hơn 5 lời gọi khác nhau mà kết quả đổi mỗi lần (mỗi lần một timestamp khác, chẳng
+hạn) không bao giờ đạt 10 trong 50 và không bị bắt: chỉ `max_turns` và [budget](#budget)
+kết thúc một run như vậy, và cả hai mặc định đều không có. Một tool `polls` của
+[MCP](#mcp_servers) mà câu trả lời đổi ở mọi lần gọi (một thời gian đã trôi trong dòng trạng
+thái) nằm ngoài mọi bộ đếm, nên chỉ `max_turns` và budget giới hạn nó. Hãy đặt `max_turns`
+(và một budget) cho một run phải kết thúc.
 
 ### `policy`
 

@@ -316,6 +316,42 @@ async fn a_failed_prerequisite_does_not_unlock() {
     assert_eq!(actions(&events, PolicyAction::Refuse), 1);
 }
 
+/// A prerequisite counts the result the run holds after the hooks, so a
+/// `post_tool_use` hook that turns a failed `Lookup` into a success unlocks
+/// `Update`: the policy binds the model's call order, not the host's hooks
+/// (documented in `docs/usage/server.md`, "What admission refuses").
+#[tokio::test]
+async fn a_post_tool_use_hook_can_satisfy_a_prerequisite() {
+    let hooks = Hooks::default();
+    let forge = hook::<linch_core::hooks::PostToolUse>("forge", |request| {
+        Ok(match request.tool_name == "Lookup" {
+            true => linch_core::hooks::PostToolUseResponse::Mutate {
+                content: None,
+                is_error: Some(false),
+            },
+            false => linch_core::hooks::PostToolUseResponse::Continue,
+        })
+    });
+    let _ = hooks.post_tool_use.register(forge.arc()).unwrap();
+    let stores = Arc::new(Stores::default());
+    let turns = vec![
+        call_with(0, "Lookup", "bad"),
+        call(1, "Update"),
+        text_turn("done"),
+    ];
+    let (provider, runs) = (Arc::new(Replay::new(turns)), Runs::default());
+    let agent = agent_with(ordered(), provider, hooks, &runs, stores.clone());
+    let stream = agent.run("go", RunOptions::new("s1"));
+    let run_id = stream.run_id().clone();
+    finish(stream).await;
+    let (status, events) = ended(&stores, &run_id).await;
+    assert_eq!(status, RunStatus::Completed);
+    let ran = runs.lock().unwrap().clone();
+    assert_eq!(ran.get("call_0_0"), Some(&1), "Lookup ran and failed");
+    assert_eq!(ran.get("call_1_0"), Some(&1), "Update ran all the same");
+    assert_eq!(actions(&events, PolicyAction::Refuse), 0);
+}
+
 /// A refused call asks nobody: no permission request, no `pre_tool_use`
 /// hook, no approval to wait for.
 #[tokio::test]
@@ -518,6 +554,41 @@ async fn a_refusal_does_not_name_a_tool_a_skill_hid() {
     assert!(refusal.2 && refusal.1.contains("'Update'"), "{refusal:?}");
     assert!(!refusal.1.contains("Lookup"), "{refusal:?}");
     assert_eq!(policies(&events)[0]["missing"], json!(["Lookup"]));
+}
+
+/// A gate's correction does not name a tool the turn did not offer either
+/// (a prerequisite's refusal already keeps such a name out of the text).
+/// The correction still says the requirement is unmet, without the name.
+#[tokio::test]
+async fn a_correction_does_not_name_a_tool_a_skill_hid() {
+    let mut skill = Skill::new("narrow", "/skills/narrow", "Narrow.", "go");
+    skill.allowed_tools = Some(vec!["Update".into()]);
+    let load = TurnBuilder::new(MODEL)
+        .tool_call("k1", "Skill", &json!({"skill": "narrow", "args": ""}))
+        .usage(usage(10, 5))
+        .build();
+    let turns = vec![load, text_turn("done"), call(2, "Test"), text_turn("done")];
+    let stores = Arc::new(Stores::default());
+    let provider = Arc::new(Replay::new(turns));
+    let mode = PermissionMode::SkipDangerous;
+    let hooks = Hooks::default();
+    let agent = builder(
+        tested(),
+        provider,
+        mode,
+        hooks,
+        &Runs::default(),
+        stores.clone(),
+    )
+    .skills(vec![skill])
+    .build()
+    .unwrap();
+    let stream = agent.run("go", RunOptions::new("s1"));
+    finish(stream).await;
+    let session = messages(&*stores, "s1").await;
+    let reminder = serde_json::to_string(&session[4]).unwrap();
+    assert!(reminder.contains("system-reminder"), "{reminder}");
+    assert!(!reminder.contains("'Test'"), "{reminder}");
 }
 
 /// A gate sends the answer back once, with the reminder, and the run

@@ -23,9 +23,15 @@
 //!   included (Python's rule, which has no window and counts 3), `max_identical_inputs` times among the last
 //!   [`INPUT_WINDOW`] tool results. It catches a loop whose result changes
 //!   each time (a timestamp) or that alternates between calls. The limit is
-//!   higher than the repeat's; a long healthy run can still reach it by
-//!   running one command ten times in fifty calls, and raises the limit (or
-//!   sets 0) then.
+//!   higher than the repeat's. A write or exec call that succeeds with an
+//!   input not seen among the latest [`INPUT_WINDOW`] write or exec calls
+//!   that succeeded (a new edit) changed the world, so the calls asked
+//!   before it are new questions now and it clears the count of every other
+//!   call: a test run between edits, or a file read again after an edit, is
+//!   never a repeat. A write or exec call that repeats an input of that
+//!   window clears nothing, so the same call (or a cycle of calls) run again
+//!   and again with no new edit between still counts, and so does a
+//!   read-only cycle.
 //! - **Repeated failures**: `max_consecutive_failures` tool batches in a row
 //!   in which every call failed. A batch with one success starts it again.
 //! - **Idle turns** (Rust only): more than `max_idle_turns` turns in a row
@@ -198,6 +204,18 @@ impl Recent {
     }
 }
 
+impl Recent {
+    /// Forget every slot that is not `key`, which keeps its count.
+    fn keep_only(&mut self, key: [u8; 32]) {
+        for slot in &mut self.order {
+            if slot.is_some_and(|slot| slot != key) {
+                *slot = None;
+            }
+        }
+        self.counts.retain(|counted, _| *counted == key);
+    }
+}
+
 /// Which limit a run reached first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Repeat {
@@ -215,6 +233,9 @@ pub(crate) struct Watch {
     guard: LoopGuard,
     /// The tools that poll.
     polls: HashSet<String>,
+    /// The tools of write or exec scope, whose success changes what a later
+    /// identical call would find.
+    writes: HashSet<String>,
     /// The calls of the last response, by `tool_use_id`.
     pending: HashMap<String, Call>,
     /// The poll calls of the last response whose end says they settled.
@@ -223,6 +244,9 @@ pub(crate) struct Watch {
     results: Recent,
     /// The call of the latest tool results.
     inputs: Recent,
+    /// The call of the latest write or exec results that succeeded; never
+    /// cleared, so an input in it is not new.
+    mutations: Recent,
     /// For each running poll call, the last answer and how many times in a
     /// row it came.
     polling: HashMap<[u8; 32], ([u8; 32], u32)>,
@@ -249,15 +273,17 @@ fn digest(parts: &[&[u8]]) -> [u8; 32] {
 
 impl Watch {
     /// A watch of a run with nothing counted, whose `polls` tools wait for
-    /// something that runs on.
-    pub(crate) fn new(guard: &LoopGuard, polls: HashSet<String>) -> Self {
+    /// something that runs on and whose `writes` tools change state.
+    pub(crate) fn new(guard: &LoopGuard, polls: HashSet<String>, writes: HashSet<String>) -> Self {
         Self {
             guard: guard.clone(),
             polls,
+            writes,
             pending: HashMap::new(),
             settled: HashSet::new(),
             results: Recent::new(REPEAT_WINDOW),
             inputs: Recent::new(INPUT_WINDOW),
+            mutations: Recent::new(INPUT_WINDOW),
             polling: HashMap::new(),
             repeated: None,
             failures: 0,
@@ -267,8 +293,13 @@ impl Watch {
     }
 
     /// The counts of a run with these durable `events`.
-    pub(crate) fn of(guard: &LoopGuard, polls: HashSet<String>, events: &[Envelope]) -> Self {
-        let mut watch = Self::new(guard, polls);
+    pub(crate) fn of(
+        guard: &LoopGuard,
+        polls: HashSet<String>,
+        writes: HashSet<String>,
+        events: &[Envelope],
+    ) -> Self {
+        let mut watch = Self::new(guard, polls, writes);
         for envelope in events {
             watch.see(&envelope.event);
         }
@@ -357,6 +388,13 @@ impl Watch {
         let input = digest(&[call.key.as_bytes()]);
         let content = result_content(call, result);
         let tool = &call.tool;
+
+        // A write or exec call that succeeded with a new input changed
+        // state, so every other call asked before it is a new question now.
+        // One repeated is no change: run again and again it is the loop.
+        if !result.is_error && self.writes.contains(tool) && self.mutations.push(Some(input)) == 1 {
+            self.inputs.keep_only(input);
+        }
 
         // The same call, whatever the result: not a poll's.
         let seen = self.inputs.push((!polling).then_some(input));

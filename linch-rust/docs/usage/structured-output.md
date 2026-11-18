@@ -243,7 +243,10 @@ A named tool is checked against each turn's own request, after any
 narrowed the tools, tool search deferred it) the request goes out as `auto`
 instead of failing with the provider's 400, and that turn's `context_build`
 event has `metadata.tool_choice_dropped` with the tool's name. `required` is
-never dropped: a turn with at least one tool can satisfy it.
+dropped only on a turn a hook left with no tool at all (it cannot be satisfied
+then): the request goes out with no choice, and `tool_choice_dropped` is
+`"required"`. A named tool dropped on a turn with no tool goes out with no
+choice too, not `auto`.
 `agent.open` refuses a named tool the agent does not offer (the final tool
 counts), `required` when it offers no tool at all, and a choice its provider
 refuses; a run's own one is refused with

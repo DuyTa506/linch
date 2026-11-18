@@ -63,8 +63,12 @@ def final(envelopes: list[Envelope]) -> ResultEvent:
 
 
 def tool_calls(n: int) -> list[dict[str, Any]]:
-    """`n` calls of a tool the agent does not have: each gets an error result."""
-    return [tool_turn(f"call_{i}", "lookup", {"key": i}) for i in range(n)]
+    """`n` calls of a tool the agent does not have: each gets an error result.
+
+    The input is long enough that a summary of the folded calls is smaller
+    than they are (a summary that does not shorten the view is rejected).
+    """
+    return [tool_turn(f"call_{i}", "lookup", {"key": i, "note": "x" * 400}) for i in range(n)]
 
 
 async def test_a_refused_prompt_is_summarized_and_called_again() -> None:

@@ -12,7 +12,9 @@ const MODEL: &str = "scripted-model";
 /// edit's result text and whether it failed.
 async fn edit_after_two_reads(compaction: Option<Value>) -> (String, bool) {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("a.txt"), "alpha\n").unwrap();
+    // Long enough that a summary of what the read folded is smaller than it.
+    let body = format!("alpha\n{}\n", "padding ".repeat(60));
+    std::fs::write(dir.path().join("a.txt"), body).unwrap();
     std::fs::write(dir.path().join("b.txt"), "beta\n").unwrap();
     let read = |id: &str, path: &str| {
         TurnBuilder::new(MODEL)

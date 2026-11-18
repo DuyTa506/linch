@@ -520,14 +520,15 @@ impl Gates {
     }
 
     /// How the final answer `text` fails the gates; `None` when it meets
-    /// them all.
+    /// them all. The feedback names the tools a gate needs only when
+    /// `offered` says the model has each one, as [`Gates::refusal`] does.
     ///
     /// A `text` that is a JSON object (a final tool's input, a structured
     /// answer, a hook's rewrite of either) is also judged as the strings it
     /// holds, as they read: the JSON text escapes what a pattern may name (a
     /// quote, a newline). A `forbids` check fails when it matches any of
     /// the texts, any other check when it passes on none.
-    pub(crate) fn check(&self, text: &str) -> Option<Failure> {
+    pub(crate) fn check(&self, text: &str, offered: &dyn Fn(&str) -> bool) -> Option<Failure> {
         let object = (self.rules.checks.iter().any(Option::is_some) && text.starts_with('{'))
             .then(|| serde_json::from_str::<JsonObject>(text).ok())
             .flatten();
@@ -565,6 +566,10 @@ impl Gates {
                 (None, true) if short.is_empty() => format!(
                     "The requirement '{}' is not met: your final answer does not satisfy its \
                      check. Revise it and give your final answer again.",
+                    gate.name
+                ),
+                (None, _) if !short.iter().all(|tool| offered(tool)) => format!(
+                    "The requirement '{}' is not met: a required tool has not succeeded.",
                     gate.name
                 ),
                 (None, _) => {
@@ -766,7 +771,7 @@ mod tests {
         assert!(gates.refused_event("Update", "x", &refusal).is_none());
         assert!(gates.refused_event("Update", "y", &refusal).is_some());
 
-        let failure = gates.check("done").unwrap();
+        let failure = gates.check("done", &|_| true).unwrap();
         assert_eq!(failure.gates, ["tests"]);
         assert!(failure.feedback.contains("at least 2 times each"));
         assert!(gates.can_correct());
@@ -847,7 +852,10 @@ mod tests {
                 live.corrections
             )
         );
-        assert!(live.check("done").is_none(), "two Test successes");
+        assert!(
+            live.check("done", &|_| true).is_none(),
+            "two Test successes"
+        );
         assert_eq!(live.corrections, 1);
     }
 
@@ -858,7 +866,7 @@ mod tests {
             {"name": "polite", "check": {"type": "keywords", "keywords": ["please"]},
              "feedback": "Say please."},
         ]})));
-        let failure = gates.check("plain").unwrap();
+        let failure = gates.check("plain", &|_| true).unwrap();
         assert_eq!(failure.gates, ["cites", "polite"]);
         assert!(failure.missing.is_empty());
         let lines: Vec<_> = failure.feedback.lines().collect();
@@ -868,7 +876,19 @@ mod tests {
             "the pattern stays hidden"
         );
         assert_eq!(lines[1], "Say please.");
-        assert!(gates.check("please see [1]").is_none());
+        assert!(gates.check("please see [1]", &|_| true).is_none());
+    }
+
+    #[test]
+    fn a_correction_does_not_name_a_tool_the_model_was_not_offered() {
+        let gates = Gates::new(policy());
+        let hidden = |name: &str| name != "Test";
+        let failure = gates.check("done", &hidden).unwrap();
+        assert!(!failure.feedback.contains("Test"), "{}", failure.feedback);
+        assert!(failure.feedback.contains("'tests'"));
+        assert_eq!(failure.missing, ["Test"], "the audit event keeps it");
+        let named = gates.check("done", &|_| true).unwrap();
+        assert!(named.feedback.contains("'Test'"), "{}", named.feedback);
     }
 
     #[test]

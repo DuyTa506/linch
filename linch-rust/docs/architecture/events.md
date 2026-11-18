@@ -55,19 +55,19 @@ encoding.
 | `suspended` | `SuspendedEvent`, `kinds/suspend.rs:60` | yes | yes | Ends a suspended run's stream instead of `result`; status `awaiting_approval` or `awaiting_input` |
 | `context_build` | `ContextBuildEvent`, `kinds/control.rs:44` | yes | yes | `budget` is `{}` unless `spec.context_budget` is set |
 | `compaction` | `CompactionEvent`, `kinds/control.rs:64` | yes | yes | |
-| `loop_guard` | `LoopGuardEvent`, `kinds/control.rs:113` | yes | yes | |
+| `loop_guard` | `LoopGuardEvent`, `kinds/control.rs:123` | yes | yes | |
 | `policy` | `PolicyEvent`, `kinds/policy.rs` | yes | yes | A spec `policy` (`crates/linch-core/src/gates.rs`): a refusal with its batch's `ToolBatch` write, a correction with its notification and checkpoint, a stop in the terminal write |
-| `budget` | `BudgetEvent`, `kinds/control.rs:127` | yes | yes | A spec `budget` (`crates/linch-core/src/budget.rs`): `warning` right after the `usage` that crossed the ratio, once per run tree; `exceeded` in the terminal write, before its `error` |
+| `budget` | `BudgetEvent`, `kinds/control.rs:145` | yes | yes | A spec `budget` (`crates/linch-core/src/budget.rs`): `warning` right after the `usage` that crossed the ratio, once per run tree; `exceeded` in the terminal write, before its `error` |
 | `provider_retry` | `ProviderRetryEvent`, `kinds/reliability.rs:13` | yes | yes | A spec `provider_retry` (`crates/linch-core/src/reliability.rs`): before the wait, in one write with the failed receipt |
 | `model_fallback` | `ModelFallbackEvent`, `kinds/reliability.rs:31` | yes | yes | A spec's `fallback_models`: with the failed receipt, on the fallback's dispatch barrier |
-| `prompt_cache_advisory` | `PromptCacheAdvisoryEvent`, `kinds/control.rs:168` | yes | yes | Not emitted at this revision |
+| `prompt_cache_advisory` | `PromptCacheAdvisoryEvent`, `kinds/control.rs:186` | yes | yes | Not emitted at this revision |
 | `skills_loaded` | `SkillsLoadedEvent`, `kinds/skills.rs:10` | yes | yes | |
 | `skill_invoked` | `SkillInvokedEvent`, `kinds/skills.rs:18` | yes | yes | |
 | `skill_completed` | `SkillCompletedEvent`, `kinds/skills.rs:35` | yes | yes | |
 | `subagent` | `SubagentEvent`, `event/mod.rs:118` | as wrapped | as wrapped | See [subagent wrapping](#subagent-wrapping) |
 | `child_run_status` | `ChildRunStatusEvent`, `kinds/suspend.rs:66` | yes | yes | |
 | `workflow` | `WorkflowEvent`, `kinds/skills.rs:76` | yes | yes | Never in a run's log: `linch-ext` workflows hand it to their event sink ([extensions](./ext.md)) |
-| `verification` | `VerificationEvent`, `kinds/control.rs:191` | yes | yes | The answer gates (`runner/structured.rs`): the output-schema check, `verifier` `output_schema`; a built-in verifier, its `name`; a `stop` hook's retry under `spec.verification`, its `policy_id` (`runner/hooks.rs`). `retry` is staged with the feedback beside it, `stop` in the terminal write, `exhausted` with the accepted answer. A resume counts the retries spent from these, the schema's apart from the rest |
+| `verification` | `VerificationEvent`, `kinds/control.rs:209` | yes | yes | The answer gates (`runner/structured.rs`): the output-schema check, `verifier` `output_schema`; a built-in verifier, its `name`; a `stop` hook's retry under `spec.verification`, its `policy_id` (`runner/hooks.rs`). `retry` is staged with the feedback beside it, `stop` in the terminal write, `exhausted` with the accepted answer. A resume counts the retries spent from these, the schema's apart from the rest |
 | `hook` | `HookEvent`, `kinds/hook.rs:14` | no | yes | |
 | `error` | `ErrorEvent`, `kinds/lifecycle.rs:90` | yes | yes | |
 | `result` | `ResultEvent`, `kinds/lifecycle.rs:115` | yes | yes | The terminal outcome |
