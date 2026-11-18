@@ -144,7 +144,8 @@ fn stop_reads_retry_and_force_continue() {
 
 /// Every point that does not honour `retry` or `force_continue` refuses
 /// them, so a callback written for Python fails loudly instead of being
-/// read as something else.
+/// read as something else. `before_provider_call` honours only
+/// `force_continue`: Python ignores a `retry` there.
 #[test]
 fn points_that_do_not_honour_retry_refuse_it() {
     for action in ["retry", "force_continue"] {
@@ -155,12 +156,28 @@ fn points_that_do_not_honour_retry_refuse_it() {
             UserPromptSubmit::decode(answer.clone()).is_err(),
             "{action}"
         );
-        assert!(
-            BeforeProviderCall::decode(answer.clone()).is_err(),
-            "{action}"
-        );
         assert!(PermissionRequest::decode(answer).is_err(), "{action}");
     }
+    let retry = json!({"action": "retry", "feedback": "again"});
+    assert!(BeforeProviderCall::decode(retry).is_err());
+}
+
+/// `force_continue` at `before_provider_call` skips the call and takes
+/// another turn with the feedback, as in Python.
+#[test]
+fn before_provider_call_reads_force_continue() {
+    let answer = json!({"action": "force_continue", "feedback": "plan first"});
+    assert_eq!(
+        BeforeProviderCall::decode(answer).unwrap(),
+        BeforeProviderCallResponse::ForceContinue {
+            feedback: "plan first".into()
+        }
+    );
+    let bare = json!({"action": "force_continue"});
+    assert!(
+        BeforeProviderCall::decode(bare).is_err(),
+        "force_continue needs its feedback"
+    );
 }
 
 #[test]

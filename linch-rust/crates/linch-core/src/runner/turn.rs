@@ -382,6 +382,14 @@ impl Runner {
         }
         let request = match self.before_provider_call(request, self.turn).await {
             BeforeCall::Send(request) => *request,
+            // Python's `_gate_retry_tail`: the turn ends without a call, its
+            // feedback durable before the next turn's. The view ends with a
+            // user message here (a resumed response goes to `received`,
+            // never back to `dispatch`), so no tool call is left unanswered.
+            BeforeCall::ForceContinue(feedback) => {
+                let message = Message::user_text(skills::system_reminder(&feedback));
+                return Ok(Some(self.feedback(message).await?));
+            }
             BeforeCall::Blocked(reason) => {
                 self.hook_failed(reason).await?;
                 return Ok(None);

@@ -31,7 +31,12 @@ Linch bản Python có cùng vòng lặp ([vòng đời của lượt](../../../
   được nối vào từ trước khi `stop` chạy), block việc dừng lại, hoặc đòi trả lời lại
   một lần cho mỗi lần gọi run (`retry` của `before_final_answer` trong Python);
   `continue` của nó là `force_continue` của stop trong Python. `force_continue` của
-  Python tại `before_provider_call` không được port: point đó từ chối nó. `event_emit`, một trong các
+  Python tại `before_provider_call` bỏ qua lời gọi: feedback được ghi log như một
+  stop feedback và run chạy thêm một lượt, chỉ bị giới hạn bởi `max_turns`. Python
+  cũng chạy point đó trên một response được resume mà các lời gọi tool của nó chưa
+  có kết quả, và trả lời chúng bằng feedback (`src/linch/loop/runner.py:767-783`);
+  một lần resume response đó trong Rust đi tiếp tới các lời gọi tool của nó và không
+  bao giờ quay lại point này, nên trường hợp đó không xảy ra. `event_emit`, một trong các
   point chỉ quan sát, chạy một lần cho mỗi event sắp được gửi tới bên gọi, nhưng chỉ
   với event vừa được stream vừa được ghi bền — không bao giờ cho record của chính một
   hook, cũng không cho một delta chỉ stream.
@@ -60,7 +65,10 @@ Linch bản Python có cùng vòng lặp ([vòng đời của lượt](../../../
    Chúng không bao giờ được ghi log. Sau đó `before_provider_call` chạy trên request
    đã dựng: một rewrite thay thế nó trước khi bất cứ thứ gì phía sau thấy nó; một
    block kết thúc run với trạng thái failed và provider không bao giờ được gọi
-   (`hooks/call.rs`, `runner/hooks.rs`).
+   (`hooks/call.rs`, `runner/hooks.rs`). Một `force_continue` bỏ qua các bước
+   4-8: không có gì được stage cho lời gọi, feedback được stage như một
+   `notification` và được giữ dưới dạng `ToolResults`, rồi bước 9 nối nó vào
+   session, như sau một feedback của `stop`.
 4. **Stage và flush delivery.** Event `context_build` và delivery của lời gọi model được
    stage. Checkpoint `ProviderPending` được giữ lại, rồi `flush` ghi các event và
    checkpoint trong một lần commit (`turn.rs:299-305`). Đây là barrier trước khi gọi provider.

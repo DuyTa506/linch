@@ -244,6 +244,59 @@ async fn before_provider_call_rewrites_chain_and_a_block_stops() {
     assert_eq!(calls(&log), ["downgrade", "downgrade", "budget"]);
 }
 
+/// A `force_continue` stops the chain and drops any earlier rewrite with
+/// the call, as Python's dispatcher does.
+#[tokio::test]
+async fn before_provider_call_force_continue_stops_the_chain() {
+    let hooks = Hooks::default();
+    let log = new_log();
+    let _ = register(
+        &hooks.before_provider_call,
+        Scripted::new("downgrade", &log, |req: &BeforeProviderCallRequest| {
+            let mut request = req.request.clone();
+            request.model = "cheaper".into();
+            Act::Answer(BeforeProviderCallResponse::Rewrite {
+                request: Box::new(request),
+            })
+        }),
+    );
+    let _ = register(
+        &hooks.before_provider_call,
+        Scripted::new("plan", &log, |_| {
+            Act::Answer(BeforeProviderCallResponse::ForceContinue {
+                feedback: "plan first".into(),
+            })
+        }),
+    );
+    let _ = register(
+        &hooks.before_provider_call,
+        Scripted::new("never", &log, |_| {
+            Act::Answer(BeforeProviderCallResponse::Block {
+                reason: "unreached".into(),
+            })
+        }),
+    );
+    let mut records = Vec::new();
+    let outcome = hooks
+        .before_provider_call
+        .run_into(before_call("gpt"), &mut records)
+        .await;
+    assert_eq!(
+        outcome,
+        BeforeProviderCallOutcome::ForceContinue {
+            feedback: "plan first".into()
+        }
+    );
+    assert_eq!(calls(&log), ["downgrade", "plan"]);
+    let verdicts: Vec<_> = (records.iter())
+        .map(|record| match record.status {
+            HookStatus::Answered { verdict } => verdict,
+            _ => "failed",
+        })
+        .collect();
+    assert_eq!(verdicts, ["rewrite", "force_continue"]);
+}
+
 fn minimal_assembly(text: &str) -> crate::provider::AssistantAssembly {
     crate::provider::AssistantAssembly {
         message: crate::message::Message::assistant_text(text),

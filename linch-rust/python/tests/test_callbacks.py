@@ -156,6 +156,44 @@ async def test_force_continue_at_after_provider_call_is_a_retry() -> None:
     assert isinstance(final, ResultEvent) and final.final_text == "second"
 
 
+async def test_a_before_provider_call_force_continue_skips_the_call() -> None:
+    @callback("before_provider_call", "plan", 1)
+    async def plan(request: dict[str, Any]) -> dict[str, Any]:
+        if len(request["request"]["messages"]) == 1:
+            return {"action": "force_continue", "feedback": "plan first"}
+        return {"action": "continue"}
+
+    async with Server() as server:
+        agent = await server.open_agent(config([text_turn("Planned.")]), callbacks=[plan])
+        run = await agent.run("s1", "go")
+        envelopes = [e async for e in run]
+
+    assert _verdicts(envelopes, "before_provider_call") == ["force_continue", "continue"]
+    assert _feedback(envelopes) == [_reminder("plan first")]
+    builds = [e for e in envelopes if isinstance(e.event, ContextBuildEvent)]
+    assert len(builds) == 1, "the skipped turn makes no call"
+    final = envelopes[-1].event
+    assert isinstance(final, ResultEvent) and final.final_text == "Planned."
+
+
+async def test_a_before_provider_call_force_continue_ends_at_max_turns() -> None:
+    @callback("before_provider_call", "again", 1)
+    async def again(request: dict[str, Any]) -> dict[str, Any]:
+        return {"action": "force_continue", "feedback": "again"}
+
+    async with Server() as server:
+        limited = config([text_turn("unused")], spec={"model": MODEL, "max_turns": 2})
+        agent = await server.open_agent(limited, callbacks=[again])
+        run = await agent.run("s1", "go")
+        envelopes = [e async for e in run]
+
+    assert _verdicts(envelopes, "before_provider_call") == ["force_continue"] * 2
+    assert _feedback(envelopes) == [_reminder("again")] * 2
+    assert not any(isinstance(e.event, ContextBuildEvent) for e in envelopes)
+    final = envelopes[-1].event
+    assert isinstance(final, ResultEvent) and final.subtype == "error"
+
+
 async def test_a_stop_retry_is_honoured_once_per_run() -> None:
     asked: list[str] = []
 

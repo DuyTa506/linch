@@ -290,6 +290,9 @@ impl Wire for BeforeProviderCall {
             BeforeProviderCallAnswer::Rewrite { request } => {
                 BeforeProviderCallResponse::Rewrite { request }
             }
+            BeforeProviderCallAnswer::ForceContinue { feedback } => {
+                BeforeProviderCallResponse::ForceContinue { feedback }
+            }
             BeforeProviderCallAnswer::Block { reason } => {
                 BeforeProviderCallResponse::Block { reason }
             }
