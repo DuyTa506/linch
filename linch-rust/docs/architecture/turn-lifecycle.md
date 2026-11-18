@@ -58,7 +58,8 @@ What differs in Rust:
    then `flush` writes the events and the checkpoint in one commit
    (`turn.rs:299-305`). This is the barrier before the provider is called.
 5. **Drive the call.** Stream deltas go to the caller at once as stream-only
-   events (`turn.rs:306-317`). The call settles with one receipt, whether it
+   events (`turn.rs:306-317`), unless the spec's redaction covers responses:
+   then none are sent, since a match can span two deltas. The call settles with one receipt, whether it
    was accepted, failed or cancelled (`provider/call.rs:1-9`, `43-55`).
    When an `after_provider_call` hook is attached, an accepted receipt and
    its `Usage` are written at once, with `ProviderPending` re-saved at the
@@ -68,8 +69,13 @@ What differs in Rust:
    keeps the paid usage ([below](#a-crash-between-a-receipt-and-its-response)).
    The response itself is not written yet: an `after_provider_call` rewrite
    (a redaction, say) must be the only version that reaches the log.
-6. **Write the response through.** `after_provider_call` runs on the
-   assembled response first: a rewrite replaces it before it is staged; a
+6. **Write the response through.** The spec's redaction, when it covers
+   responses, scrubs the assembled response's text and unsigned reasoning
+   first (`redaction.rs`, `Runner::after_provider_call` in
+   `runner/hooks.rs`), so the hooks, the log and the next request see only
+   the scrubbed text; it runs even with no hook attached, and again on a
+   hook's rewrite. `after_provider_call` runs on the
+   assembled response next: a rewrite replaces it before it is staged; a
    block ends the run as failed and nothing is staged (`hooks/assembly.rs`,
    `runner/hooks.rs`). On success the run then stages the `Assistant` event,
    and the `Usage` event unless step 5 already wrote it, and saves
@@ -138,10 +144,18 @@ run ends the same way (`turn.rs:322-333`, `runner/end.rs:76-90, 130-139`).
   `action: "stop"`, an `Error` named `StructuredOutputError`, and a `Result`
   with `structured_error`. A resume from `AssistantReceived` checks the same
   stored answer again and stages the same retry; no paid response is bought
-  twice. Then the `stop` hook chain runs, on a valid answer only and with the
+  twice. An answer that satisfies the schema (or any answer, without one)
+  then meets the spec's verifiers (`verification.rs`, `Runner::verify` in
+  `runner/structured.rs`) through the same steps, on their own budget,
+  `verification.max_retries`, counted from every durable `verification`
+  retry but the schema's. A `retry` verifier past it stages `exhausted` and
+  the answer goes on; a `stop` verifier ends the run failed with a
+  `VerificationError`. Then the `stop` hook chain runs, on a valid answer only and with the
   parsed `structured_output` in its request: a hook can keep
   the run going with feedback (`continue`, bounded only by `max_turns`), ask
-  for another answer (`retry`, honoured once per run call, after which it
+  for another answer (`retry`, honoured once per run call, or with a
+  `verification` spec up to its `max_retries`, each staged as a
+  `verification` event under the hook's policy id; past the bound it
   counts as an allow and the later hooks decide), rewrite the final-answer
   text (the value `post_turn` and the terminal `Result` see next), or block
   the stop outright, ending the run failed (`turn.rs:436-440`,

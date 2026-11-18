@@ -11,6 +11,7 @@ use crate::json::JsonObject;
 use crate::message::SystemBlock;
 use crate::permissions::PermissionEngine;
 use crate::provider::Provider;
+use crate::redaction::Redactor;
 use crate::registration::Registration;
 use crate::registry::ToolRegistry;
 use crate::skills::{Skill, SkillSet, SkillTool};
@@ -19,6 +20,7 @@ use crate::structured::OutputContract;
 use crate::subagents::{ContinueTool, Roster, StopTool, SubagentDefinition, SubagentTool, Workers};
 use crate::tool_search::{SearchTool, ToolSearch};
 use crate::usage::Usage;
+use crate::verification::Verifiers;
 
 /// Binds an [`AgentSpec`] to the values an agent runs with.
 ///
@@ -203,7 +205,9 @@ impl AgentBuilder {
     /// Raises:
     ///     BuildError: If a required binding is missing, the model or the
     ///         namespace is blank, the output schema does not compile (or
-    ///         its root is not an object), the compaction, budget or
+    ///         its root is not an object), a redaction rule or verifier
+    ///         cannot run, the
+    ///         compaction, budget or
     ///         provider retry settings cannot run, a fallback model is blank
     ///         or repeats a model, a built-in tool's name is taken, or the
     ///         tool schemas cannot be digested.
@@ -234,6 +238,14 @@ impl AgentBuilder {
             Some(schema) => Some(Arc::new(
                 OutputContract::compile(schema).map_err(BuildError::Invalid)?,
             )),
+            None => None,
+        };
+        let redactor = match &self.spec.redaction {
+            Some(spec) => Some(Arc::new(Redactor::new(spec).map_err(BuildError::Invalid)?)),
+            None => None,
+        };
+        let verifiers = match &self.spec.verification {
+            Some(spec) => Some(Arc::new(Verifiers::new(spec).map_err(BuildError::Invalid)?)),
             None => None,
         };
         let namespace = self.namespace.ok_or(BuildError::Missing("namespace"))?;
@@ -312,6 +324,8 @@ impl AgentBuilder {
             sessions,
             spec: self.spec,
             output,
+            redactor,
+            verifiers,
             tools: self.tools,
             filter: None,
             hooks: self.hooks,

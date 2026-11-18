@@ -340,6 +340,8 @@ is read, no MCP process starts and no database is connected. A refusal is
 | `mcp_command` | A stdio command and argument list that match no entry | The server would start that program |
 | `mcp_env` | An `env` name the matching entry does not list | It could change what the program loads |
 | `mcp_url` | An MCP HTTP URL outside `mcp_urls` | The server would connect there |
+| `redaction` | More than 32 `spec.redaction` rules, or a pattern over 1024 bytes | The server compiles each pattern and runs it on every response and tool result |
+| `verification` | More than 32 `spec.verification` verifiers, a pattern over 1024 bytes, or more than 32 keywords in one | The same, for every final answer |
 
 A path that does not exist is refused like one outside the roots, so a
 client cannot probe the server's file system. Three changes are made

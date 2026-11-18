@@ -312,8 +312,9 @@
 //! An `after_provider_call` `retry` keeps the response, runs none of its
 //! tool calls and sends `feedback` to the model before another turn. At
 //! `stop`, `continue` is bounded only by `max_turns`, and `retry` (Python's
-//! `before_final_answer` retry) is honoured once per run call, after which
-//! it counts as `allow`. Every other point refuses `retry` and
+//! `before_final_answer` retry) is honoured once per run call (with
+//! `spec.verification`, while its `max_retries` lasts, each a
+//! `verification` event), after which it counts as `allow`. Every other point refuses `retry` and
 //! `force_continue`. With an output schema, `stop` runs only on an answer
 //! that satisfies it; a `rewrite` is checked again, and one that does not
 //! satisfy the schema fails the run.

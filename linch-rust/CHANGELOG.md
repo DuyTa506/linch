@@ -8,6 +8,27 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ### Added
 
+- Redaction: `spec.redaction` holds regex rules that scrub assistant
+  responses (text and unsigned reasoning, before `after_provider_call` and
+  before they are logged), tool results (before `post_tool_use`, and
+  `AskUser` answers, background workers' answers and mailbox peer
+  messages) and, when asked, the prompt; a hook's rewrite is
+  scrubbed again, and `partial_assistant` or `tool_progress` events are not
+  streamed while their surface is scrubbed. Python's `RedactionHook`.
+- Final-answer verifiers: `spec.verification` holds built-in checks (a
+  pattern that must or must not match, keywords that must appear) run after
+  the output schema, each failure a `verification` event; a `retry`
+  verifier feeds back while `max_retries` (2) lasts, then the answer is
+  accepted as `exhausted`, and a `stop` verifier fails the run with a
+  `VerificationError`. Python's `FinalAnswerVerifierHook`.
+- With `spec.verification`, a `stop` hook's `retry` draws on its
+  `max_retries`, durably, as a `verification` event under the hook's policy
+  id, instead of one retry per run call: a client callback is a verifier.
+- A remote tenant may give at most 32 redaction rules and 32 verifiers, each
+  pattern at most 1024 bytes (`NotAllowed`, kinds `redaction` and
+  `verification`).
+- `Redaction`, `Verification`, `Verifier`, `VerifierCheck` and
+  `Permissions` TypedDicts in the Python client.
 - Twelve observe-only hook points, for parity with Python's lifecycle hooks:
   `agent_start`, `agent_stop`, `turn_start`, `provider_call_start`,
   `provider_call_stop`, `tool_use_start`, `tool_use_stop`,

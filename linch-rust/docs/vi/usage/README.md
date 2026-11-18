@@ -59,6 +59,7 @@ Server ─────── one linch-server child process, or a connection to 
 | [Run](./runs.md) | Bắt đầu, stream, resume, phê duyệt, hủy; lỗi ở cuối stream; cái gì được lưu bền vững và khi nào |
 | [Event](./events.md) | Mọi loại event mà client giải mã, cùng các trường của chúng; số thứ tự và replay; mức sử dụng và chi phí |
 | [Structured output](./structured-output.md) | Một JSON Schema mà câu trả lời cuối cùng phải thỏa: trên agent hoặc một run, retry, callback, mỗi provider nhận gì |
+| [Bảo mật](./security.md) | Permission mode và auto-allow, redact response, kết quả tool và prompt, verifier của câu trả lời cuối cùng và ngân sách của chúng |
 | [Kho lưu trữ](./stores.md) | Kho memory và Postgres, DSN, schema, migration, namespace, pool |
 | [CLI](./cli.md) | `linch-rust new`, `linch-rust add tool`, `linch-rust docs path`, `linch-rust skill install` |
 | [Khắc phục sự cố](./troubleshooting.md) | Các lỗi từ server binary đến run và tool, cùng nguyên nhân và cách khắc phục |

@@ -72,7 +72,14 @@ bao gồm point, `policy_id` và `policy_version` của từng hook, theo thứ 
 trả lời, kể cả `retry`. Giới hạn riêng của kernel cho các lần retry ở `stop` (một
 lần cho mỗi lần gọi run) là một hằng số, không phải một thiết lập, nên nó không nằm
 trong digest; nó cũng không được checkpoint, và một lần resume bắt đầu lại từ đầu,
-như `_MAX_FINAL_ANSWER_REENTRIES` của Python. `provider_retry` và
+như `_MAX_FINAL_ANSWER_REENTRIES` của Python. Một agent có spec `verification` thì
+giới hạn chúng bằng `max_retries` của spec đó, một thiết lập nằm trong digest cùng
+phần còn lại của spec, được đếm từ các event `verification` bền vững nên một lần resume
+giữ nguyên nó. `redaction` và `verification` của spec bị bỏ khỏi wire khi không đặt,
+nên một agent không có chúng giữ nguyên digest của mình
+(`tests/e2e_guardrails_off.rs` ghim điều này). Chính sách permission không nằm trong
+digest, khác với hợp đồng run của Python: `resume` và `approve` dùng chính sách mà
+agent có lúc đó. `provider_retry` và
 `fallback_models` của spec nằm trong digest cùng phần còn lại của spec, nên model
 fallback của một run được resume, đọc lại từ các event `model_fallback` của nó theo
 vị trí trong danh sách, trỏ tới cùng một model. Retry được bật mặc định, nhưng chính
@@ -175,8 +182,11 @@ Với mỗi lời gọi, theo thứ tự (`plan.rs:168-206`):
 kết quả cho mỗi lời gọi, theo thứ tự lời gọi. Quanh mỗi tool, nó hỏi `ToolSink`:
 tool chỉ bắt đầu sau khi `tool_starting` trả về, và mỗi kết quả được chuyển cho
 `tool_finished` ngay khi nó có (`execute.rs:34-55`, `189-223`). Một giá trị thành công
-được kiểm tra theo `output_schema` của tool, rồi chuỗi `post_tool_use` chạy
-(`execute.rs:310-338`). Một tool bị panic cho ra một kết quả lỗi
+được kiểm tra theo `output_schema` của tool, rồi, khi redaction của spec bao gồm kết quả
+tool, `ExecuteOptions::redactor` che mọi chuỗi của kết quả, rồi chuỗi `post_tool_use`
+chạy trên kết quả đã che, và một bản thay thế mà nó tạo ra lại bị che lần nữa
+(`execute.rs`, `finish`). Khi đặt redactor đó, các báo cáo tiến độ bị bỏ. Một tool bị
+panic cho ra một kết quả lỗi
 (`execute.rs:341-353`).
 
 Để thêm hành vi vào việc thực thi tool, dùng một trong các cách sau:
@@ -188,7 +198,12 @@ tool chỉ bắt đầu sau khi `tool_starting` trả về, và mỗi kết qu�
 - `call_timeout_ms` và `max_tool_concurrency` trong spec cho timeout và
   giới hạn song song (`agent/spec.rs:54-60`).
 
-Đừng sửa `scheduler/` hay `runner/` cho một cổng kiểm soát mới.
+Đừng sửa `scheduler/` hay `runner/` cho một cổng kiểm soát mới. Redaction của spec là
+ngoại lệ chứng minh quy tắc: nó không phải một hook vì nó phải chạy sau mọi hook, kể cả
+khi không có hook nào được gắn, và trước log, nên nó nằm ở những vị trí cố định trong các
+seam sẵn có (`after_provider_call` và `stop` trong `runner/hooks.rs`, `finish` trong
+`scheduler/execute.rs`, prompt trong `submit`) thay vì trong một chuỗi mà host kiểm soát
+thứ tự.
 
 ## Không có biến toàn cục, nhiều agent
 

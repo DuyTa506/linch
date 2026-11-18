@@ -90,7 +90,9 @@ def callback(
     `"force_continue"`) keeps the response, runs none of its tool calls and
     sends the feedback before another turn. At `stop`, `"force_continue"`
     is `"continue"` (bounded only by `max_turns`), and `"retry"` is
-    `before_final_answer`'s retry, honoured once per run call; a ported
+    `before_final_answer`'s retry, honoured once per run call (with
+    `spec.verification`, while its `max_retries` lasts, each a
+    `VerificationEvent` under the callback's `policy_id`); a ported
     `before_final_answer` hook that answered `force_continue` answers
     `"retry"` here. Every other point refuses both as a bad answer.
 

@@ -5,6 +5,7 @@ use std::convert::Infallible;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::pin::pin;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -18,6 +19,7 @@ use crate::events::Event;
 use crate::hooks::{HookRecord, Hooks, PostToolUseFailureRequest, PostToolUseRequest};
 use crate::json::JsonValue;
 use crate::message::ToolResultBlock;
+use crate::redaction::Redactor;
 use crate::registry::OutputContractError;
 use crate::tool::{Report, ToolContext, ToolOutputError, ToolProgress, ToolResult};
 
@@ -97,6 +99,10 @@ pub struct ExecuteOptions {
     /// Run abort. Cancelling it cancels running tools, and calls not yet
     /// started get an aborted error result.
     pub cancel: CancellationToken,
+    /// Scrubs every result before the `post_tool_use` chain and again
+    /// after a hook replaced it; progress reports are then dropped, since
+    /// a match can span two of them. `None` keeps results as they are.
+    pub redactor: Option<Arc<Redactor>>,
 }
 
 /// Run a decided plan and return one result per call, in call order.
@@ -276,6 +282,7 @@ impl<S: ToolSink> Runner<'_, S> {
 
     fn report(&self, call: &PlannedCall, report: Report) {
         match report {
+            Report::Progress(_) if self.options.redactor.is_some() => {}
             Report::Progress(progress) => self.sink.tool_progress(call, progress),
             Report::Event(event) => self.sink.tool_event(call, *event),
         }
@@ -318,7 +325,12 @@ impl<S: ToolSink> Runner<'_, S> {
             )));
             finished.contract_error = Some(violation);
         }
+        let redactor = self.options.redactor.as_deref();
+        if let Some(redactor) = redactor {
+            redactor.result(&mut finished.result);
+        }
         if !self.hooks.post_tool_use.is_empty() {
+            let redacted = redactor.map(|_| finished.result.clone());
             let chain = self
                 .hooks
                 .post_tool_use
@@ -333,6 +345,11 @@ impl<S: ToolSink> Runner<'_, S> {
                 .await;
             finished.result = chain.outcome;
             finished.hook_records = chain.records;
+            if let (Some(redactor), Some(redacted)) = (redactor, redacted)
+                && finished.result != redacted
+            {
+                redactor.result(&mut finished.result);
+            }
         }
         if let Err(error) = &finished.result
             && !self.hooks.post_tool_use_failure.is_empty()

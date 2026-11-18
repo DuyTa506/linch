@@ -32,6 +32,7 @@ pub mod message;
 pub mod permissions;
 pub mod policy;
 pub mod provider;
+pub mod redaction;
 pub mod registration;
 pub mod registry;
 pub mod reliability;
@@ -46,6 +47,7 @@ pub mod subagents;
 pub mod tool;
 pub mod tool_search;
 pub mod usage;
+pub mod verification;
 pub mod vfs;
 
 pub use agent::{Agent, AgentBuilder, AgentSpec, BuildError, ForkError, RunError, RunOptions};

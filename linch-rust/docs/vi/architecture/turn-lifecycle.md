@@ -57,7 +57,8 @@ Linch bản Python có cùng vòng lặp ([vòng đời của lượt](../../../
    stage. Checkpoint `ProviderPending` được giữ lại, rồi `flush` ghi các event và
    checkpoint trong một lần commit (`turn.rs:299-305`). Đây là barrier trước khi gọi provider.
 5. **Điều khiển lời gọi.** Các delta của stream được chuyển ngay cho bên gọi dưới dạng
-   event chỉ có trong stream (`turn.rs:306-317`). Lời gọi kết thúc với một receipt, dù nó
+   event chỉ có trong stream (`turn.rs:306-317`), trừ khi redaction của spec bao gồm response:
+   khi đó không có delta nào được gửi, vì một match có thể nằm vắt qua hai delta. Lời gọi kết thúc với một receipt, dù nó
    được chấp nhận, thất bại hay bị hủy (`provider/call.rs:1-9`, `43-55`).
    Khi có một hook `after_provider_call` được gắn, một receipt được chấp nhận và `Usage`
    của nó được ghi ngay, với `ProviderPending` được lưu lại ở các tổng đã tính chúng,
@@ -66,8 +67,12 @@ Linch bản Python có cùng vòng lặp ([vòng đời của lượt](../../../
    có timeout; một lần crash trong lúc nó chạy vẫn giữ usage đã trả phí
    ([bên dưới](#một-lần-crash-giữa-receipt-và-response-của-nó)). Bản thân response chưa được ghi: một rewrite của
    `after_provider_call` (chẳng hạn một lần redact) phải là phiên bản duy nhất đến được log.
-6. **Ghi write-through response.** `after_provider_call` chạy trên response đã dựng
-   trước: một rewrite thay thế nó trước khi được stage; một block kết thúc run với
+6. **Ghi write-through response.** Redaction của spec, khi nó bao gồm response, che văn bản
+   và reasoning không có chữ ký của response đã dựng trước (`redaction.rs`,
+   `Runner::after_provider_call` trong `runner/hooks.rs`), nên các hook, log và request kế
+   tiếp chỉ thấy văn bản đã che; nó chạy kể cả khi không có hook nào được gắn, và chạy lại
+   trên một rewrite của hook. `after_provider_call` chạy trên response đã dựng
+   tiếp theo: một rewrite thay thế nó trước khi được stage; một block kết thúc run với
    trạng thái failed và không gì được stage (`hooks/assembly.rs`, `runner/hooks.rs`).
    Khi thành công, run sau đó stage event `Assistant`, và event `Usage` trừ khi bước 5 đã
    ghi nó, rồi lưu `AssistantReceived`, thứ được ghi write-through cùng receipt khi bước 5
@@ -133,10 +138,17 @@ tương tự (`turn.rs:322-333`, `runner/end.rs:76-90, 130-139`).
   `action: "stop"`, một `Error` tên `StructuredOutputError`, và một `Result`
   với `structured_error`. Một lần resume từ `AssistantReceived` kiểm tra lại cùng
   câu trả lời đã lưu và stage cùng retry đó; không có response đã trả tiền nào bị mua
-  hai lần. Sau đó chuỗi hook `stop` chạy, chỉ trên một câu trả lời hợp lệ và với
+  hai lần. Một câu trả lời thỏa schema (hoặc mọi câu trả lời, khi không có schema) sau đó gặp
+  các verifier của spec (`verification.rs`, `Runner::verify` trong `runner/structured.rs`)
+  qua cùng các bước, với ngân sách riêng, `verification.max_retries`, được đếm từ mọi lần
+  retry `verification` bền vững trừ của schema. Một verifier `retry` quá ngân sách đó stage
+  `exhausted` và câu trả lời đi tiếp; một verifier `stop` kết thúc run thất bại với một
+  `VerificationError`. Sau đó chuỗi hook `stop` chạy, chỉ trên một câu trả lời hợp lệ và với
   `structured_output` đã parse trong request của nó: một hook có thể giữ run tiếp tục bằng một phản hồi
   (`continue`, chỉ bị giới hạn bởi `max_turns`), đòi một câu trả lời khác (`retry`,
-  được chấp nhận một lần cho mỗi lần gọi run, sau đó được tính như allow và các hook
+  được chấp nhận một lần cho mỗi lần gọi run, hoặc với spec `verification` tối đa
+  `max_retries` của nó, mỗi lần được stage như một event `verification` dưới policy id của
+  hook; quá giới hạn thì được tính như allow và các hook
   phía sau quyết định), viết lại văn bản trả lời cuối cùng (giá trị mà `post_turn` và
   `Result` cuối cùng sẽ thấy), hoặc block việc dừng lại, khiến run thất bại
   (`turn.rs:436-440`, `runner/hooks.rs`). Phản hồi của cả hai đến model như của

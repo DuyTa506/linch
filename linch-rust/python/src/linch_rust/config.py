@@ -4,7 +4,7 @@ A config is still the JSON object the server decodes, so a plain dict works
 at run time; these types let a type checker catch a misspelt field or a
 wrong value before the server refuses it. The server is strict: an unknown
 field at any level is a `ProtocolError` at open. Nested values this client
-does not type (`spec`, `provider`, `stores`, `permissions`, `mcp_servers`)
+does not type (`spec`, `provider`, `stores`, permission rules, `mcp_servers`)
 are documented in the `linch` crate's `AgentConfig`.
 """
 
@@ -217,6 +217,137 @@ class OutputSchema(TypedDict, total=False):
     description: str
 
 
+class RedactionRule(TypedDict, total=False):
+    """Replace each match of `pattern` with `replacement`.
+
+    Attributes:
+        pattern: A regular expression in the `regex` crate's syntax: no
+            look-around or back-references; `(?i)` for any case. One that
+            matches empty text is refused. Required.
+        replacement: What replaces a match; `$1` or `${name}` name a
+            group, `$$` is a literal `$`. `[REDACTED]` when absent.
+    """
+
+    pattern: Required[str]
+    replacement: str
+
+
+class Redaction(TypedDict, total=False):
+    """Rules that scrub text before it is logged, streamed or shown to a hook, as `spec.redaction`.
+
+    Python Linch's `RedactionHook`: Linch ships no patterns. What is
+    scrubbed is what the session logs and the model reads back; the raw
+    text never reaches a store or an event. While a surface is scrubbed its
+    stream-only events are not sent: `partial_assistant` with `response`,
+    `tool_progress` with `tool_results`. A tool call's input and signed
+    reasoning are never changed.
+
+    Attributes:
+        rules: Applied in order; at least one. Required.
+        response: Whether assistant responses (text and unsigned
+            reasoning), the final answer after a `stop` rewrite and
+            compaction summaries are scrubbed. On when absent.
+        tool_results: Whether tool results (every string of the value,
+            metadata, error), `AskUser` answers, background workers'
+            answers and mailbox peer messages are scrubbed. On when absent.
+        prompt: Whether a new run's prompt is scrubbed. Off when absent.
+    """
+
+    rules: Required[Sequence[RedactionRule]]
+    response: bool
+    tool_results: bool
+    prompt: bool
+
+
+class VerifierCheck(TypedDict, total=False):
+    """What a verifier checks the final answer text for.
+
+    Attributes:
+        type: `matches` (the pattern must match), `forbids` (it must not)
+            or `keywords` (each keyword must appear). Required.
+        pattern: The regular expression of `matches` and `forbids`, in the
+            `regex` crate's syntax.
+        keywords: The words of `keywords`, as substrings.
+        any: Whether one keyword is enough. Off when absent.
+        case_sensitive: Whether keyword case matters. Off when absent.
+    """
+
+    type: Required[str]
+    pattern: str
+    keywords: Sequence[str]
+    any: bool
+    case_sensitive: bool
+
+
+class Verifier(TypedDict, total=False):
+    """One built-in verifier of the final answer.
+
+    Attributes:
+        name: Names it in `verification` events; unique, not
+            `output_schema`. Required.
+        check: See `VerifierCheck`. Required.
+        feedback: What the model is told on a retry; a sentence naming the
+            check when absent.
+        on_fail: `retry` (the default: feed back while retries last, then
+            accept the answer with an `exhausted` event) or `stop` (fail
+            the run with a `VerificationError`).
+    """
+
+    name: Required[str]
+    check: Required[VerifierCheck]
+    feedback: str
+    on_fail: str
+
+
+class Verification(TypedDict, total=False):
+    """Checks the final answer must pass, as `spec.verification`.
+
+    Python Linch's `FinalAnswerVerifierHook`. The built-in verifiers run
+    after the output schema, in order, the first failure deciding. A
+    `stop` callback that answers `retry` is the client form of a verifier:
+    with this set, its retries draw on `max_retries` too and each one is a
+    `verification` event under its `policy_id`. The output schema keeps its
+    own `structured_output_retries`.
+
+    Attributes:
+        max_retries: How many times a failed answer goes back to the model
+            per run, verifiers and `stop` callbacks together. 2 when
+            absent.
+        verifiers: See `Verifier`; none when only callbacks verify.
+    """
+
+    max_retries: int
+    verifiers: Sequence[Verifier]
+
+
+class Permissions(TypedDict, total=False):
+    """Which tool calls run, ask or are denied, as `AgentConfig.permissions`.
+
+    Attributes:
+        mode: `default` (read tools run, write and exec tools ask),
+            `accept_edits` (write tools run too, unless they write outside
+            `project_root`; exec tools ask) or `skip_dangerous` (every call
+            runs). Python Linch's `default`, `acceptEdits` and
+            `skip-dangerous`. `default` when absent.
+        project_root: An absolute path that path rules resolve against.
+            Required.
+        layers: Named layers of rules, from least to most specific; see
+            the Tools page of the usage docs.
+        auto_allow: Tool names that run in every mode unless a rule says
+            otherwise; a remote tenant needs `skip_dangerous` among its
+            modes for any.
+        path_fields: Where a tool keeps its target path, by tool name.
+        command_fields: Where a tool keeps its shell command, by tool name.
+    """
+
+    mode: str
+    project_root: Required[str]
+    layers: Sequence[Mapping[str, Any]]
+    auto_allow: Sequence[str]
+    path_fields: Mapping[str, Mapping[str, Any]]
+    command_fields: Mapping[str, str]
+
+
 class AgentConfig(TypedDict, total=False):
     """An agent as data: what `Server.open_agent` opens.
 
@@ -230,8 +361,10 @@ class AgentConfig(TypedDict, total=False):
             `{"model": "deepseek-flash", "system_prompt": "Be brief."}`;
             `system_blocks`, a token or USD `budget`, a `provider_retry`
             policy (see `ProviderRetry`), `fallback_models`, the models to
-            fail over to in order, and an `output_schema` (see
-            `OutputSchema`) with its `structured_output_retries` go here too.
+            fail over to in order, an `output_schema` (see
+            `OutputSchema`) with its `structured_output_retries`, a
+            `redaction` (see `Redaction`) and a `verification` (see
+            `Verification`) go here too.
         provider: The model provider chosen by `id` (`deepseek`,
             `openai-chat`, `openai-responses`, `anthropic`, `gemini`,
             `vllm`, `sglang`, `llamacpp`, or `scripted` with its `turns`),
@@ -248,10 +381,10 @@ class AgentConfig(TypedDict, total=False):
         bash: Whether the workspace tools include `Bash`, which runs
             commands as the server's user, and `BashOutput` and `BashKill`
             for its background commands. On when absent.
-        permissions: `{"mode": ..., "project_root": ...}` and rules.
-            `project_root` is required and must be an absolute path: path
-            rules resolve against it. Mode `default` (read tools run, write
-            and exec tools ask) when absent.
+        permissions: The mode, `project_root` and rules; see
+            `Permissions`. `project_root` is required and must be an
+            absolute path: path rules resolve against it. Mode `default`
+            (read tools run, write and exec tools ask) when absent.
         mcp_servers: MCP servers connected in order when the agent opens.
         skills: Whether the agent has skills: the built-in `verify` and
             those in `config_dir/skills`, called through the `Skill` tool.
@@ -286,7 +419,7 @@ class AgentConfig(TypedDict, total=False):
     stores: Mapping[str, Any]
     workspace: str
     bash: bool
-    permissions: Mapping[str, Any]
+    permissions: Permissions
     mcp_servers: Sequence[Mapping[str, Any]]
     skills: bool
     subagents: bool

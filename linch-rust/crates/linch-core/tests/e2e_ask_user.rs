@@ -574,3 +574,36 @@ async fn a_crash_at_any_write_before_the_suspend_asks_once() {
         }
     }
 }
+
+/// An answer is the call's result, so the spec's tool-result redaction
+/// scrubs it before its durable `tool_call_end` and the session.
+#[tokio::test]
+async fn an_answer_is_redacted_like_a_tool_result() {
+    use linch_core::redaction::{RedactionRule, RedactionSpec};
+    let mut spec = spec();
+    spec.redaction = Some(RedactionSpec {
+        rules: vec![RedactionRule::new(r"sk-[A-Za-z0-9]{8,}")],
+        response: false,
+        tool_results: true,
+        prompt: false,
+    });
+    let stores = Arc::new(Stores::default());
+    let provider = Arc::new(Replay::new(vec![ask_turn(0, 0, ""), text_turn("done")]));
+    let runs = Runs::default();
+    let permissions = policy(PermissionMode::Default);
+    let agent = agent_with(spec, provider, tools(&runs), permissions, stores.clone());
+    let (run_id, _) = start(&agent).await;
+    let note = AskUserAnswer::declined("my key is sk-live0123456789");
+    let declined = HashMap::from([("ask_0".to_owned(), note)]);
+    let envelopes = finish(agent.answer(run_id.clone(), declined, RunOptions::new("s1"))).await;
+    let results = result_texts(&messages(&*stores, "s1").await[2]);
+    assert!(
+        results[0].ends_with("User note: my key is [REDACTED]"),
+        "{results:?}"
+    );
+    let stored = stores.runs.events(NS, &run_id, 0).await.unwrap();
+    for events in [&envelopes, &stored] {
+        let text = serde_json::to_string(events).unwrap();
+        assert!(!text.contains("sk-live0123456789"), "{text}");
+    }
+}

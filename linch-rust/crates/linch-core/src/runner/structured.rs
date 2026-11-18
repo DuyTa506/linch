@@ -14,6 +14,14 @@
 //! A `stop` hook's rewrite of the answer is checked again; one that breaks
 //! the schema fails the run without going back to the model, since the
 //! model did not write it.
+//!
+//! An answer that satisfies the schema then meets the agent's verifiers
+//! (see [`crate::verification`]), through the same steps and events, but
+//! with their own budget: `verification.max_retries`, shared with the
+//! `stop` hooks' retries and counted from the durable `verification`
+//! events of every verifier but `output_schema`. A `retry` verifier past
+//! that budget accepts the answer with an `exhausted` event, as Python's
+//! `FinalAnswerVerifierHook` does, where the schema gate fails the run.
 
 use serde_json::json;
 
@@ -27,6 +35,7 @@ use crate::message::Message;
 use crate::run::{RunStatus, StopReason};
 use crate::skills::system_reminder;
 use crate::structured::{VERIFIER, feedback};
+use crate::verification::OnFail;
 
 /// What the schema gate made of an answer.
 pub(super) enum Checked {
@@ -40,19 +49,26 @@ pub(super) enum Checked {
 }
 
 impl Runner {
-    /// Check the text-only answer `text` against the run's schema.
+    /// Check the text-only answer `text` against the run's schema, then
+    /// the agent's verifiers.
     pub(super) async fn check_answer(&mut self, text: &str) -> Result<Checked, RunError> {
-        let Some(output) = self.output.clone() else {
-            return Ok(Checked::Valid(None));
+        let value = match self.output.clone() {
+            None => None,
+            Some(output) => match output.check(text) {
+                Ok(value) => Some(value),
+                Err(error) => return self.schema_retry(text, error).await,
+            },
         };
-        let error = match output.check(text) {
-            Ok(value) => return Ok(Checked::Valid(Some(value))),
-            Err(error) => error,
-        };
+        self.verify(text, value).await
+    }
+
+    /// Send a schema `error` back to the model, or end the run once the
+    /// retries are spent.
+    async fn schema_retry(&mut self, text: &str, error: String) -> Result<Checked, RunError> {
         let allowed = self.agent.spec.structured_output_retries;
         if self.schema_retries < allowed {
             self.schema_retries += 1;
-            self.stage_verification(VerificationAction::Retry, &error);
+            self.stage_verification(VERIFIER, VerificationAction::Retry, &error);
             let message = Message::user_text(system_reminder(&feedback(&error)));
             return Ok(Checked::Retry(self.feedback(message).await?));
         }
@@ -116,7 +132,7 @@ impl Runner {
         why: String,
         error: String,
     ) -> Result<(), RunError> {
-        self.stage_verification(VerificationAction::Stop, &error);
+        self.stage_verification(VERIFIER, VerificationAction::Stop, &error);
         let message = format!("{why}: {error}");
         let event =
             json!({"name": "StructuredOutputError", "message": message, "retryable": false});
@@ -134,12 +150,66 @@ impl Runner {
             .await
     }
 
-    fn stage_verification(&mut self, action: VerificationAction, error: &str) {
+    /// Run the agent's verifiers on `text`, which passed the schema as
+    /// `value`. A `retry` failure goes back to the model while the
+    /// verification retries last, then is accepted with an `exhausted`
+    /// event; a `stop` failure ends the run failed.
+    async fn verify(&mut self, text: &str, value: Option<JsonObject>) -> Result<Checked, RunError> {
+        let Some(verifiers) = self.agent.verifiers.clone() else {
+            return Ok(Checked::Valid(value));
+        };
+        let Some(failure) = verifiers.check(text) else {
+            return Ok(Checked::Valid(value));
+        };
+        let (name, feedback) = (&failure.verifier, &failure.feedback);
+        match failure.on_fail {
+            OnFail::Stop => {
+                self.stage_verification(name, VerificationAction::Stop, feedback);
+                let message = format!("the final answer failed verifier {name:?}: {feedback}");
+                let event =
+                    json!({"name": "VerificationError", "message": message, "retryable": false});
+                let error = event.as_object().cloned().unwrap_or_default();
+                self.journal.stage(Event::Error(ErrorEvent { error }));
+                let answer = Answer {
+                    text: (!text.is_empty()).then(|| text.to_owned()),
+                    structured_output: value,
+                    structured_error: None,
+                };
+                let (status, subtype) = (RunStatus::Failed, ResultSubtype::Error);
+                self.end_with(status, subtype, StopReason::Error, answer)
+                    .await?;
+                Ok(Checked::Ended)
+            }
+            OnFail::Retry if self.verify_retries < verifiers.max_retries => {
+                self.verify_retries += 1;
+                self.stage_verification(name, VerificationAction::Retry, feedback);
+                let message = Message::user_text(system_reminder(feedback));
+                Ok(Checked::Retry(self.feedback(message).await?))
+            }
+            OnFail::Retry => {
+                self.stage_verification(name, VerificationAction::Exhausted, feedback);
+                Ok(Checked::Valid(value))
+            }
+        }
+    }
+
+    /// Stage a `verification` event for `verifier`, with the retries its
+    /// budget has spent.
+    pub(super) fn stage_verification(
+        &mut self,
+        verifier: &str,
+        action: VerificationAction,
+        feedback: &str,
+    ) {
+        let attempt = match verifier {
+            VERIFIER => self.schema_retries,
+            _ => self.verify_retries,
+        };
         self.journal.stage(Event::Verification(VerificationEvent {
-            verifier: VERIFIER.to_owned(),
+            verifier: verifier.to_owned(),
             action,
-            feedback: error.to_owned(),
-            attempt: u64::from(self.schema_retries),
+            feedback: feedback.to_owned(),
+            attempt: u64::from(attempt),
         }));
     }
 }

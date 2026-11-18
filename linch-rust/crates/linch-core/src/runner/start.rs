@@ -77,7 +77,7 @@ pub(super) async fn new_run(
     // notice of a catalog change since the session's last run.
     let peers = inbox::drain(&agent, &session_id).await?;
     let mut prompt = prompt;
-    prompt.content.extend(inbox::blocks(&peers));
+    prompt.content.extend(inbox::blocks(&agent, &peers));
     let seen = Catalog::of_entries(&entries).map(|known| {
         let version = catalog::version(&agent);
         let change = known.change(&catalog::live(&agent, Some(&known), &Loads::default()));
@@ -332,7 +332,10 @@ pub(super) async fn continue_run(
                 let Some(answer) = answers.get(&block.id) else {
                     continue;
                 };
-                let result = answer.render(&block.id);
+                let mut result = answer.render(&block.id);
+                if let Some(redactor) = agent.result_redactor() {
+                    redactor.result_block(&mut result);
+                }
                 answered.push(Event::ToolCallStart(ToolCallStartEvent {
                     tool_use_id: block.id.clone(),
                     tool_name: block.name.clone(),
@@ -426,6 +429,7 @@ pub(super) async fn continue_run(
     runner.family = family;
     runner.budget = budget;
     runner.schema_retries = structured::retries_spent(&events);
+    runner.verify_retries = crate::verification::retries_spent(&events);
     if let Some(schema) = schema_of(&events) {
         runner.output = Some(compile(&runner.run.run_id, schema)?);
     }

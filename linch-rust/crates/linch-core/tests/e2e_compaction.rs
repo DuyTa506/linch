@@ -531,3 +531,33 @@ async fn recover(agent: &Agent, stores: &Stores, run_id: RunId) -> RunId {
         }
     }
 }
+
+/// A summary is model output the model reads back, so the spec's response
+/// redaction scrubs it before it is logged.
+#[tokio::test]
+async fn a_summary_is_redacted_before_it_is_logged() {
+    use linch_core::redaction::{RedactionRule, RedactionSpec};
+    let mut spec = spec();
+    spec.compaction = Some(CompactionSpec {
+        keep_recent_turns: 1,
+        ..CompactionSpec::new(1)
+    });
+    spec.redaction = Some(RedactionSpec {
+        rules: vec![RedactionRule {
+            pattern: r"summary of \d+ messages".into(),
+            replacement: "[SUMMARY]".into(),
+        }],
+        response: true,
+        tool_results: false,
+        prompt: false,
+    });
+    let stores = Arc::new(Stores::default());
+    let runs = Runs::default();
+    let tools = registry(vec![Echo::new("Read", ToolScope::Read, &runs)]);
+    let permissions = policy(PermissionMode::SkipDangerous);
+    let agent = agent_with(spec, Keyed::new(), tools, permissions, stores.clone());
+    finish(agent.run("go", RunOptions::new("s1"))).await;
+    let compacted = view(entries(&stores).await);
+    let summary = Message::user_text("<summary of earlier conversation>\n\n[SUMMARY]");
+    assert_eq!(compacted[1], summary);
+}

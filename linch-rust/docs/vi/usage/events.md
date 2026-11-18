@@ -428,7 +428,7 @@ nhưng hiện chưa có run nào phát chúng:
 | Class (`type`) | Trường |
 |---|---|
 | `PromptCacheAdvisoryEvent` (`prompt_cache_advisory`) | `reason` (`tool_set_changed` hoặc `model_changed`), `detail` |
-| `VerificationEvent` (`verification`) | `verifier`, `action` (`retry`, `stop` hoặc `exhausted`), `feedback`, `attempt`. Việc kiểm tra [output schema](./structured-output.md#what-the-run-checks) phát nó với `verifier` là `output_schema` |
+| `VerificationEvent` (`verification`) | `verifier`, `action` (`retry`, `stop` hoặc `exhausted`), `feedback`, `attempt`. Việc kiểm tra [output schema](./structured-output.md#what-the-run-checks) phát nó với `verifier` là `output_schema`; một [verifier](./security.md#verifiers) với `name` của nó; một lần retry của callback `stop` dưới `spec.verification` với `policy_id` của nó |
 | `WorkflowEvent` (`workflow`) | `kind`, `title`, `call_key`, `occurrence`, `subagent_type`, `result_text`, `structured_output`, `structured_error` |
 
 ### `UnknownEvent`

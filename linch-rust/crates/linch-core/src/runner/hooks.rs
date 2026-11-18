@@ -14,7 +14,7 @@ use super::Outbox;
 use super::turn::{Runner, Step};
 use crate::agent::{AgentInner, RunError};
 use crate::events::kinds::{
-    ContextBuildEvent, HookEvent, HookOutcome, UserEvent, UserEventSubtype,
+    ContextBuildEvent, HookEvent, HookOutcome, UserEvent, UserEventSubtype, VerificationAction,
 };
 use crate::events::model_call::CallDisposition;
 use crate::events::{Envelope, Event, WIRE_VERSION, now_ms};
@@ -37,7 +37,8 @@ use crate::usage::Usage;
 /// [`StopResponse::Retry`](crate::hooks::StopResponse::Retry); a later
 /// retry counts as an allow. Python's `_MAX_FINAL_ANSWER_REENTRIES`, which
 /// bounds `before_final_answer` retries the same way and is not
-/// checkpointed either: a resume starts afresh.
+/// checkpointed either: a resume starts afresh. An agent with a
+/// `verification` spec bounds them with its `max_retries` instead.
 const MAX_FINAL_ANSWER_RETRIES: u32 = 1;
 
 /// What a `before_provider_call` hook decided for the request about to be
@@ -133,6 +134,11 @@ pub(super) async fn submit(
     run_id: &RunId,
     prompt: String,
 ) -> Result<Message, RunError> {
+    let redactor = agent.prompt_redactor();
+    let prompt = match redactor {
+        Some(redactor) => redactor.text(&prompt).into_owned(),
+        None => prompt,
+    };
     let chain = &agent.hooks.user_prompt_submit;
     if chain.is_empty() {
         return Ok(Message::user_text(prompt));
@@ -145,7 +151,13 @@ pub(super) async fn submit(
     let result = chain.run(request).await;
     push_records(outbox, run_id, 0, result.records, None);
     match result.outcome {
-        UserPromptOutcome::Submit { content } => Ok(Message::new(Role::User, content)),
+        UserPromptOutcome::Submit { content } => {
+            let mut prompt = Message::new(Role::User, content);
+            if let Some(redactor) = redactor {
+                redactor.message(&mut prompt);
+            }
+            Ok(prompt)
+        }
         UserPromptOutcome::Blocked { reason } => Err(RunError::PromptBlocked {
             run_id: run_id.clone(),
             reason,
@@ -333,21 +345,47 @@ impl Runner {
             structured_output: structured_output.cloned(),
         };
         let mut records = Vec::new();
-        let retry = self.final_answer_retries < MAX_FINAL_ANSWER_RETRIES;
+        // With verifiers, a hook's retry draws on their durable budget and
+        // is reported as a `verification` event under its policy id.
+        let verifiers = self.agent.verifiers.clone();
+        let retry = match &verifiers {
+            Some(verifiers) => self.verify_retries < verifiers.max_retries,
+            None => self.final_answer_retries < MAX_FINAL_ANSWER_RETRIES,
+        };
         let output = self.output.clone();
         let check = move |text: &str| output.as_ref()?.check(text).ok();
         let run = chain.run_into(request, retry, &check, &mut records);
         let outcome = self.cancel.run_until_cancelled(run).await;
+        let retried = (records.iter())
+            .find(|record| matches!(record.status, HookStatus::Answered { verdict: "retry" }))
+            .map(|record| record.policy_id.to_string());
         self.push_records(records, None);
         let Some(outcome) = outcome else {
             self.abort().await?;
             return Ok(Stopping::Ended);
         };
+        if let (Some(_), false, Some(hook)) = (&verifiers, retry, &retried) {
+            // The hook's retry counted as an allow.
+            self.stage_verification(hook, VerificationAction::Exhausted, "");
+        }
         let feedback = match outcome {
-            StopOutcome::Stop { text } => return Ok(Stopping::Stop { text }),
+            // The model's text is redacted already; a rewrite may not be.
+            StopOutcome::Stop { text } => {
+                let text = match self.agent.response_redactor() {
+                    Some(redactor) => redactor.text(&text).into_owned(),
+                    None => text,
+                };
+                return Ok(Stopping::Stop { text });
+            }
             StopOutcome::Continue { feedback } => feedback,
             StopOutcome::Retry { feedback } => {
-                self.final_answer_retries += 1;
+                match (&verifiers, &retried) {
+                    (Some(_), Some(hook)) => {
+                        self.verify_retries += 1;
+                        self.stage_verification(hook, VerificationAction::Retry, &feedback);
+                    }
+                    _ => self.final_answer_retries += 1,
+                }
                 feedback
             }
             StopOutcome::Failed { reason } => {
@@ -523,15 +561,24 @@ impl Runner {
     /// assembled for `turn`. Whatever this returns is what `accept` stages
     /// as the `Assistant` event and appends to the session, so a rewrite is
     /// what the audit trail and a resumed run both see.
+    ///
+    /// With response redaction on, the chain sees the response already
+    /// redacted, and a rewrite it makes is redacted again, so neither a
+    /// hook nor the log ever holds the raw text.
     pub(super) async fn after_provider_call(
         &self,
-        assembly: AssistantAssembly,
+        mut assembly: AssistantAssembly,
         turn: u32,
     ) -> AfterCall {
+        let redactor = self.agent.response_redactor();
+        if let Some(redactor) = redactor {
+            redactor.message(&mut assembly.message);
+        }
         let chain = &self.agent.hooks.after_provider_call;
         if chain.is_empty() {
             return AfterCall::Send(Box::new(assembly));
         }
+        let redacted = redactor.map(|_| assembly.message.clone());
         let request = AfterProviderCallRequest {
             session_id: self.run.session_id.clone(),
             run_id: self.run.run_id.clone(),
@@ -542,11 +589,19 @@ impl Runner {
         let run = chain.run_into(request, &mut records);
         let outcome = self.cancel.run_until_cancelled(run).await;
         self.push_records(records, None);
+        let again = |mut assembly: Box<AssistantAssembly>| {
+            if let (Some(redactor), Some(redacted)) = (redactor, &redacted)
+                && assembly.message != *redacted
+            {
+                redactor.message(&mut assembly.message);
+            }
+            assembly
+        };
         match outcome {
             None => AfterCall::Ended,
-            Some(AfterProviderCallOutcome::Send { assembly }) => AfterCall::Send(assembly),
+            Some(AfterProviderCallOutcome::Send { assembly }) => AfterCall::Send(again(assembly)),
             Some(AfterProviderCallOutcome::Retry { assembly, feedback }) => {
-                AfterCall::Retry(assembly, feedback)
+                AfterCall::Retry(again(assembly), feedback)
             }
             Some(AfterProviderCallOutcome::Blocked { reason }) => AfterCall::Blocked(reason),
         }

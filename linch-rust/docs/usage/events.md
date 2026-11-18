@@ -426,7 +426,7 @@ but no run emits them today:
 | Class (`type`) | Fields |
 |---|---|
 | `PromptCacheAdvisoryEvent` (`prompt_cache_advisory`) | `reason` (`tool_set_changed` or `model_changed`), `detail` |
-| `VerificationEvent` (`verification`) | `verifier`, `action` (`retry`, `stop` or `exhausted`), `feedback`, `attempt`. The [output schema](./structured-output.md#what-the-run-checks) check emits it with `verifier` `output_schema` |
+| `VerificationEvent` (`verification`) | `verifier`, `action` (`retry`, `stop` or `exhausted`), `feedback`, `attempt`. The [output schema](./structured-output.md#what-the-run-checks) check emits it with `verifier` `output_schema`; a [verifier](./security.md#verifiers) with its `name`; a `stop` callback's retry under `spec.verification` with its `policy_id` |
 | `WorkflowEvent` (`workflow`) | `kind`, `title`, `call_key`, `occurrence`, `subagent_type`, `result_text`, `structured_output`, `structured_error` |
 
 ### `UnknownEvent`

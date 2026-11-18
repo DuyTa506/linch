@@ -265,6 +265,7 @@ cấu hình, từ chối các trường không biết và giới hạn bằng 0;
 | Một DSN Postgres chỉ cho một đích được phép | `postgres` | `admit.rs:79-89` |
 | `stores.max_connections` tối đa bằng `max_pool_connections` của tenant (mặc định: kích thước pool mặc định của server); khi không có, nó được đặt thành mặc định hoặc mức trần, tùy giá trị nào nhỏ hơn | `pool_connections`, với `data.max` là mức trần | `admit.rs:90-105` |
 | Một MCP stdio server chỉ với `command` và `args` của một mục, chỉ đặt các tên `env` mà mục đó liệt kê; một MCP URL chỉ ở một origin được phép | `mcp_command`, `mcp_env`, `mcp_url` | `admit.rs:107-134` |
+| Tối đa `MAX_GUARDRAILS` (32) redaction rule và verifier, và keyword cho mỗi verifier, mỗi pattern tối đa `MAX_PATTERN_BYTES` (1024) byte: server biên dịch và chạy chúng trên mọi response | `redaction`, `verification` | `admit_guardrails` trong `admit.rs` |
 
 `principal` của một method run, khi được đưa ra, phải nêu tên tenant
 (`admit_principal`, `admit.rs:138-152`); server không tự điền nó.

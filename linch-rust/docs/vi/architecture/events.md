@@ -62,7 +62,7 @@ bỏ tag bằng tay (`events/kinds/mod.rs:1-9`). `Event::type_name`
 | `subagent` | `SubagentEvent`, `event/mod.rs:118` | như event được bọc | như event được bọc | Xem [bọc subagent](#bọc-subagent) |
 | `child_run_status` | `ChildRunStatusEvent`, `kinds/suspend.rs:66` | yes | yes | |
 | `workflow` | `WorkflowEvent`, `kinds/skills.rs:76` | yes | yes | Không bao giờ nằm trong log của run: các workflow của `linch-ext` chuyển nó cho event sink của chúng ([extensions](./ext.md)) |
-| `verification` | `VerificationEvent`, `kinds/control.rs:191` | yes | yes | Việc kiểm tra output schema (`runner/structured.rs`), `verifier` là `output_schema`: `retry` với phản hồi được stage bên cạnh, hoặc `stop` trong lần ghi terminal. Một lần resume đếm các lần retry đã dùng từ những event này |
+| `verification` | `VerificationEvent`, `kinds/control.rs:191` | yes | yes | Các cổng kiểm tra câu trả lời (`runner/structured.rs`): việc kiểm tra output schema, `verifier` là `output_schema`; một verifier tích hợp sẵn, `name` của nó; một lần retry của hook `stop` dưới `spec.verification`, `policy_id` của nó (`runner/hooks.rs`). `retry` được stage với phản hồi bên cạnh, `stop` trong lần ghi terminal, `exhausted` với câu trả lời được chấp nhận. Một lần resume đếm các lần retry đã dùng từ những event này, của schema tách riêng khỏi phần còn lại |
 | `hook` | `HookEvent`, `kinds/hook.rs:14` | no | yes | |
 | `error` | `ErrorEvent`, `kinds/lifecycle.rs:90` | yes | yes | |
 | `result` | `ResultEvent`, `kinds/lifecycle.rs:115` | yes | yes | Kết quả terminal |
