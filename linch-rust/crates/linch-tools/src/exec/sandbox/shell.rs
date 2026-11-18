@@ -27,7 +27,7 @@ use tokio::process::{Child, Command};
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 
-use super::{SYSTEM_READ_PATHS, SandboxPolicy, seccomp};
+use super::{ETC_READ_PATHS, SYSTEM_READ_PATHS, SandboxPolicy, seccomp};
 use crate::bash::process::{self, Spawned};
 use crate::exec::{ExecutionError, Launch, Shell};
 
@@ -115,10 +115,18 @@ impl SandboxShell {
         root: &Path,
         policy: SandboxPolicy,
     ) -> Result<Self, ExecutionError> {
+        Self::open_in(root, policy, Path::new("/etc"))
+    }
+
+    /// [`Self::open`] with the system configuration at `etc`, so a test
+    /// can stand in for `/etc`.
+    fn open_in(root: &Path, policy: SandboxPolicy, etc: &Path) -> Result<Self, ExecutionError> {
         if !seccomp::SUPPORTED {
             return Err(ExecutionError::Unsupported("sandbox"));
         }
         policy.validate()?;
+        let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+        unprivileged(&status).map_err(ExecutionError::Privileged)?;
         let prlimit = (PRLIMIT.iter().map(PathBuf::from))
             .find(|path| path.is_file())
             .ok_or_else(|| ExecutionError::Missing {
@@ -130,11 +138,8 @@ impl SandboxShell {
             source,
         };
         let mut read: Vec<PathBuf> = SYSTEM_READ_PATHS.iter().map(PathBuf::from).collect();
+        read.extend(etc_read_paths(etc));
         read.extend(policy.read_paths.iter().cloned());
-        if policy.network {
-            // `/etc/resolv.conf` is often a link into `/run`.
-            read.extend(std::fs::canonicalize("/etc/resolv.conf").ok());
-        }
         let rules = Arc::new(Rules {
             network: policy.network,
             root: root.to_path_buf(),
@@ -172,6 +177,32 @@ impl SandboxShell {
         });
         home.clone()
     }
+}
+
+/// [`ETC_READ_PATHS`] under `etc`, each `*` entry expanded to the entries
+/// of its directory that start with the rest of its name.
+fn etc_read_paths(etc: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for entry in ETC_READ_PATHS {
+        let Some(prefix) = entry.strip_suffix('*') else {
+            paths.push(etc.join(entry));
+            continue;
+        };
+        let path = etc.join(prefix);
+        let (Some(dir), Some(start)) = (path.parent(), path.file_name()) else {
+            continue;
+        };
+        let start = start.as_encoded_bytes();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if entry.file_name().as_encoded_bytes().starts_with(start) {
+                paths.push(entry.path());
+            }
+        }
+    }
+    paths
 }
 
 /// `prlimit`'s arguments for `policy`, `nproc` counted from the `tasks`
@@ -312,6 +343,44 @@ fn user_tasks() -> u64 {
     tasks
 }
 
+/// Refuse a server whose commands could hold privileges, from its
+/// `/proc/self/status`: any uid 0 (a real or saved root uid can be taken
+/// back), or a capability in the effective or ambient set (ambient ones
+/// pass to every command). Landlock and seccomp bound an unprivileged
+/// process; root keeps `RLIMIT_NPROC` off and many ways out. What cannot
+/// be read is refused too.
+fn unprivileged(status: &str) -> Result<(), String> {
+    let field = |name: &str| {
+        let line = status.lines().find(|line| line.starts_with(name))?;
+        Some(line[name.len()..].split_whitespace().collect::<Vec<_>>())
+    };
+    let uids: Option<Vec<u32>> = field("Uid:")
+        .filter(|uids| uids.len() == 4)
+        .and_then(|uids| uids.iter().map(|uid| uid.parse().ok()).collect());
+    let Some(uids) = uids else {
+        return Err("cannot read the server's user ids".into());
+    };
+    if uids.contains(&0) {
+        return Err("the server runs as root; run it as an unprivileged user".into());
+    }
+    for set in ["CapEff:", "CapAmb:"] {
+        let caps = field(set)
+            .and_then(|value| value.first().copied())
+            .and_then(|hex| u64::from_str_radix(hex, 16).ok());
+        match caps {
+            Some(0) => {}
+            Some(_) => {
+                return Err(format!(
+                    "the server holds capabilities ({set} not empty); \
+                     run it without any"
+                ));
+            }
+            None => return Err(format!("cannot read the server's {set}")),
+        }
+    }
+    Ok(())
+}
+
 /// Kill the group a started command leads.
 fn kill(child: &Child) {
     let pid = (child.id())
@@ -364,6 +433,56 @@ mod tests {
         assert_eq!(status.signal(), Some(9));
     }
 
+    /// Run `command` in `shell` and return what it printed.
+    async fn output(shell: &SandboxShell, root: &Path, command: &str) -> String {
+        let env = BTreeMap::from([("PATH".to_owned(), "/usr/bin:/bin".to_owned())]);
+        let session = SessionId::from("s1");
+        let launch = Launch {
+            command,
+            cwd: root,
+            env: &env,
+            session: &session,
+            lifeline: false,
+        };
+        let child = shell.spawn(launch).await.unwrap().child;
+        let out = child.wait_with_output().await.unwrap();
+        let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+        text.push_str(&String::from_utf8_lossy(&out.stderr));
+        text
+    }
+
+    /// Only the listed system configuration is readable: a file of the
+    /// configuration directory that is not listed (where host secrets
+    /// live) is closed, though its permissions would let the user read it.
+    #[tokio::test]
+    async fn only_listed_system_configuration_is_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("ws");
+        let etc = dir.path().join("etc");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(etc.join("ssl/certs")).unwrap();
+        std::fs::create_dir_all(etc.join("python3.99")).unwrap();
+        std::fs::write(etc.join("passwd"), "user\n").unwrap();
+        std::fs::write(etc.join("ssl/certs/ca.pem"), "cert\n").unwrap();
+        std::fs::write(etc.join("python3.99/site.py"), "site\n").unwrap();
+        std::fs::write(etc.join("linch-test-secret"), "hidden\n").unwrap();
+        std::fs::create_dir_all(etc.join("ssl/private")).unwrap();
+        std::fs::write(etc.join("ssl/private/key.pem"), "key\n").unwrap();
+        let root = root.canonicalize().unwrap();
+        let etc = etc.canonicalize().unwrap();
+        let shell = match SandboxShell::open_in(&root, SandboxPolicy::default(), &etc) {
+            Ok(shell) => shell,
+            Err(error) => return eprintln!("skipped: {error}"),
+        };
+        let e = etc.display();
+        let listed = format!("cat {e}/passwd {e}/ssl/certs/ca.pem {e}/python3.99/site.py");
+        assert_eq!(output(&shell, &root, &listed).await, "user\ncert\nsite\n");
+        for secret in ["linch-test-secret", "ssl/private/key.pem"] {
+            let read = output(&shell, &root, &format!("cat {e}/{secret}")).await;
+            assert!(read.contains("Permission denied"), "{secret}: {read}");
+        }
+    }
+
     #[test]
     fn prlimit_gets_every_limit_then_the_shell() {
         let policy = SandboxPolicy::default();
@@ -378,6 +497,57 @@ mod tests {
                 "/bin/sh"
             ]
         );
+    }
+
+    fn status(uid: &str, eff: &str, amb: &str) -> String {
+        format!(
+            "Name:\tlinch-server\nUid:\t{uid}\nGid:\t1000\t1000\t1000\t1000\n\
+             CapInh:\t0000000000000000\nCapPrm:\t{eff}\nCapEff:\t{eff}\n\
+             CapBnd:\t000001ffffffffff\nCapAmb:\t{amb}\n"
+        )
+    }
+
+    const NONE: &str = "0000000000000000";
+
+    #[test]
+    fn an_unprivileged_server_may_open_a_sandbox() {
+        let plain = status("1000\t1000\t1000\t1000", NONE, NONE);
+        assert_eq!(unprivileged(&plain), Ok(()));
+        // This test process is not root (the sandbox tests need that).
+        if rustix::process::geteuid().is_root() {
+            return;
+        }
+        let own = std::fs::read_to_string("/proc/self/status").unwrap();
+        assert_eq!(unprivileged(&own), Ok(()));
+    }
+
+    /// Root, a root uid it could return to, or any capability would pass
+    /// to the command (capabilities through the ambient set): refused.
+    #[test]
+    fn a_privileged_server_is_refused() {
+        let refused = [
+            status("0\t0\t0\t0", NONE, NONE),
+            status("1000\t0\t1000\t1000", NONE, NONE),
+            status("0\t1000\t1000\t1000", NONE, NONE),
+            status("1000\t1000\t0\t1000", NONE, NONE),
+            status("1000\t1000\t1000\t1000", "0000000000200000", NONE),
+            status("1000\t1000\t1000\t1000", NONE, "0000000000002000"),
+        ];
+        for text in refused {
+            assert!(unprivileged(&text).is_err(), "{text}");
+        }
+    }
+
+    /// What cannot be read is not assumed safe.
+    #[test]
+    fn an_unreadable_status_is_refused() {
+        let missing_caps = "Uid:\t1000\t1000\t1000\t1000\n";
+        let missing_uid = format!("CapEff:\t{NONE}\nCapAmb:\t{NONE}\n");
+        let garbled = status("1000\t1000\t1000\t1000", "zz", NONE);
+        let short_uid = status("1000", NONE, NONE);
+        for text in ["", missing_caps, &missing_uid, &garbled, &short_uid] {
+            assert!(unprivileged(text).is_err(), "{text:?}");
+        }
     }
 
     /// The count covers at least this process's own threads.

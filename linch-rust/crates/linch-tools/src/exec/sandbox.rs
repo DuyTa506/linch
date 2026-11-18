@@ -81,11 +81,63 @@ impl Default for SandboxPolicy {
     }
 }
 
-/// Directories a command may read and execute: the system's programs,
-/// libraries and configuration, and `/proc` and `/sys` (Landlock's ptrace
-/// rule keeps another process's `environ`, `mem` and `fd` closed).
-pub const SYSTEM_READ_PATHS: [&str; 11] = [
-    "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/etc", "/opt", "/proc", "/sys",
+/// Directories a command may read and execute: the system's programs and
+/// libraries, and `/proc` and `/sys` (Landlock's ptrace rule keeps another
+/// process's `environ`, `mem` and `fd` closed). `/etc` is read only
+/// through [`ETC_READ_PATHS`]; `/opt` only when `read_paths` names it.
+pub(super) const SYSTEM_READ_PATHS: [&str; 9] = [
+    "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/proc", "/sys",
+];
+
+/// What a command may read under `/etc`: what the loader, the name
+/// service, TLS, time zones, the terminal, a shell, coreutils, `git`,
+/// `python3` and `curl` read, and nothing else, so a host secret kept in
+/// `/etc` stays closed. A name ending in `*` stands for every entry that
+/// starts with the rest. Entries a host lacks are skipped; a symbolic link
+/// (`resolv.conf` into `/run`) opens its target.
+pub(super) const ETC_READ_PATHS: [&str; 42] = [
+    "alternatives",
+    "ca-certificates*",
+    "crypto-policies/back-ends",
+    "debian_version",
+    "fonts",
+    "gai.conf",
+    "gitattributes",
+    "gitconfig",
+    "gnutls/config",
+    "group",
+    "host.conf",
+    "hosts",
+    "ld.so.cache",
+    "ld.so.conf",
+    "ld.so.conf.d",
+    "ld.so.preload",
+    "locale.alias",
+    "localtime",
+    "lsb-release",
+    "magic",
+    "magic.mime",
+    "mime.types",
+    "netconfig",
+    "networks",
+    "nsswitch.conf",
+    "os-release",
+    "passwd",
+    "pki/ca-trust/extracted",
+    "pki/tls/cert.pem",
+    "pki/tls/certs",
+    "pki/tls/openssl.cnf",
+    "protocols",
+    "python3*",
+    "resolv.conf",
+    "selinux/config",
+    "services",
+    "ssl/cert.pem",
+    "ssl/certs",
+    "ssl/openssl.cnf",
+    "terminfo",
+    "timezone",
+    "userdb",
 ];
 
 impl SandboxPolicy {
@@ -96,6 +148,7 @@ impl SandboxPolicy {
             false => "have no network",
         };
         let mut read = SYSTEM_READ_PATHS.join(", ");
+        read.push_str(", the system configuration programs need under /etc");
         for path in &self.read_paths {
             read.push_str(", ");
             read.push_str(&path.display().to_string());
