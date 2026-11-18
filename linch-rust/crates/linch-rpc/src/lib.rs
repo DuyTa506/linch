@@ -224,7 +224,10 @@
 //!
 //! **`run.resume`** `{agent, run_id, principal?}`
 //! ([`ResumeParams`](protocol::ResumeParams)) continues a run after a crash
-//! or a dropped stream; a run awaiting approval suspends again.
+//! or a dropped stream; a run awaiting approval suspends again. A
+//! `run.resume`, `run.approve` or `run.answer` without `principal` acts for
+//! the principal the run was started with; one with a `principal` is
+//! checked as `run.start`'s is and acts for it instead.
 //!
 //! **`run.approve`** `{agent, run_id, decisions, principal?}`
 //! ([`ApproveParams`](protocol::ApproveParams)) answers a suspended run's
@@ -298,8 +301,10 @@
 //! `session_id` every fire is a new run in that session (a heartbeat), and
 //! a fire is skipped while an earlier fire's job is unfinished or the
 //! session has a live run; without one each fire starts the session
-//! `schedule:<id>:<fire time>`. Missed fires are caught up in order after
-//! downtime. A tenant needs `max_schedules` (`-32004`, `kind: schedules`;
+//! `schedule:<id>:<fire time>`, and a fire is skipped while an earlier
+//! fire's job is unfinished or the tenant holds its `max_queued_jobs`.
+//! Fires missed while every worker was down coalesce into one; the rest
+//! count in `skips`. A tenant needs `max_schedules` (`-32004`, `kind: schedules`;
 //! `-32005` at the cap, counted over its namespaces) and fires at least
 //! `min_schedule_interval_ms` apart (`-32004`, `kind: schedule_interval`).
 //! A taken `id` is `-32042`.

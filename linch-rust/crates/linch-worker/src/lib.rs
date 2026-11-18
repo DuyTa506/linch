@@ -27,8 +27,10 @@
 //!   and is never given up on.
 //! - **Schedules.** A due schedule enqueues one start job and moves its next
 //!   fire forward in one transaction, so a fire happens once however many
-//!   workers poll. Missed fires are caught up; a schedule with a fixed
-//!   session (a heartbeat) skips a fire while that session is busy.
+//!   workers poll. Missed fires coalesce into one, the rest counted as
+//!   skips. A fire is skipped while the schedule's last fire's job is
+//!   unfinished, while its fixed session (a heartbeat) is busy, or at its
+//!   root's cap on unfinished jobs.
 //! - **Definitions.** A job or schedule may carry a stored agent definition,
 //!   which an [`AgentFactory`] opens for every attempt
 //!   ([`Worker::definitions`]), so the worker needs no agent built ahead;
@@ -144,6 +146,11 @@ fn migrator() -> Migrator {
             6,
             "background principal",
             include_str!("../migrations/0006_background_principal.sql"),
+        ),
+        simple(
+            7,
+            "history agent",
+            include_str!("../migrations/0007_history_agent.sql"),
         ),
     ];
     Migrator {

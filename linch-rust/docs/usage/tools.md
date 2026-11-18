@@ -671,7 +671,8 @@ Postgres it is.
 `ListSchedules` (`read`) and `CancelSchedule` (`write`), Python's
 `register_schedule_tools`. A schedule it creates runs this same agent, in
 the calling run's session, for the calling run's principal, under the
-tenant's schedule caps; it lists and cancels only this agent's schedules.
+tenant's schedule caps; it lists and cancels only this agent's schedules
+in the calling run's session.
 It needs Postgres stores, no host tools or callbacks, and a tenant whose
 allowlists give it `max_schedules`, and it is off by default: with it off
 the tool list and the run contract are as before. Everything else is in

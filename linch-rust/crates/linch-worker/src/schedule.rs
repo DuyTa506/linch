@@ -9,13 +9,21 @@
 //! no longer due. Each job also carries the dedupe key
 //! `schedule:{id}:{fire time}`, a second guard against a double fire.
 //!
-//! Missed fires are caught up, as Python Linch does: the next fire is the
-//! first tick after the fire just made, not after now, so a schedule that
-//! was overdue by several ticks (every worker was down) fires each of them
-//! in order, one per call. A schedule with a fixed session skips a fire
-//! while an earlier fire's job is unfinished or the session has a live run,
-//! so its catch-up collapses into one run. Resuming a paused schedule
-//! starts from now: the fires it missed while paused are not made.
+//! Missed fires coalesce: a schedule overdue by several ticks (every
+//! worker was down) fires once, at its stored next fire, counts the other
+//! ticks up to now as skips, and moves its next fire to the first tick
+//! after now. Python Linch fires each missed tick in order instead; here a
+//! day of downtime under a one-minute schedule would queue some 1,440 runs,
+//! each paid for, so this differs on purpose. A schedule with a fixed
+//! session also skips a fire while an earlier fire's job is unfinished or
+//! the session has a live run. Resuming a paused schedule starts from now:
+//! the fires it missed while paused are not made.
+//!
+//! A fire is skipped (counted in `skips`, its next fire moved on as for a
+//! fire made) while an earlier fire's job of the schedule is unfinished,
+//! for every schedule, and while its root holds the [`Cap`] on unfinished
+//! jobs the caller gives (a tenant's `max_queued_jobs`): a backlog never
+//! stacks a job per fire, and fires never fail at the cap.
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use linch_core::{Principal, SessionId};
@@ -25,10 +33,16 @@ use sqlx::{Postgres, Transaction};
 use crate::definition::{self, Cap, Counted};
 use crate::error::{WorkerError, chain, non_blank};
 use crate::job::{Inserted, NewJob, insert, principal_json};
-use crate::timing::Timing;
+use crate::timing::{Parsed, Timing};
 
 /// Most due schedules one [`fire_due_schedules`] call fires.
 const FIRE_BATCH: i64 = 64;
+
+/// Most missed ticks of a cron schedule one coalesced fire counts in
+/// `skips`, so a catch-up of a seconds-field pattern after a long downtime
+/// does not walk every tick inside the fire's transaction. An interval's
+/// missed ticks are counted by division, without a bound.
+const MISSED_COUNTED: u64 = 10_000;
 
 /// A schedule that enqueues a run of `prompt` at every fire.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,7 +95,8 @@ pub struct ScheduleInfo {
     pub last_fire: Option<DateTime<Utc>>,
     /// Fires that enqueued a job.
     pub fires: u64,
-    /// Fires skipped because the session was busy.
+    /// Fires not made: skipped while busy, or missed ticks coalesced into
+    /// one fire.
     pub skips: u64,
     /// When it was created.
     pub created_at: DateTime<Utc>,
@@ -380,9 +395,9 @@ macro_rules! digest_of {
     };
 }
 
-/// The schedules of `namespace` that run the stored agent definition
-/// `config` (the text of a [`Schedule::agent`]), by id: one agent's
-/// schedules, as its schedule tools see them.
+/// The schedules of `namespace` in `session` that run the stored agent
+/// definition `config` (the text of a [`Schedule::agent`]), by id: one
+/// agent's schedules in one session, as its schedule tools see them.
 ///
 /// Raises:
 ///     WorkerError: If the query fails.
@@ -390,26 +405,29 @@ pub async fn list_agent_schedules(
     pool: &PgPool,
     namespace: &str,
     config: &str,
+    session: &SessionId,
 ) -> Result<Vec<ScheduleInfo>, WorkerError> {
     let rows: Vec<Row> = sqlx::query_as(concat!(
         "SELECT ",
         columns!(),
         " FROM linch_worker_schedules WHERE namespace = $1 AND agent = ",
         digest_of!("$2"),
-        " ORDER BY id"
+        " AND session_id = $3 ORDER BY id"
     ))
     .bind(namespace)
     .bind(config)
+    .bind(session.as_str())
     .fetch_all(pool)
     .await?;
     Ok(rows.into_iter().map(info).collect())
 }
 
 /// [`delete_schedule`], only when the schedule runs the stored agent
-/// definition `config`, checked in the same statement.
+/// definition `config` in `session`, checked in the same statement.
 ///
 /// Returns:
-///     Whether `namespace` had a schedule `id` of that definition.
+///     Whether `namespace` had a schedule `id` of that definition in that
+///     session.
 ///
 /// Raises:
 ///     WorkerError: If the delete fails.
@@ -418,36 +436,43 @@ pub async fn delete_agent_schedule(
     namespace: &str,
     id: &str,
     config: &str,
+    session: &SessionId,
 ) -> Result<bool, WorkerError> {
     let done = sqlx::query(concat!(
         "DELETE FROM linch_worker_schedules WHERE namespace = $1 AND id = $2 AND agent = ",
-        digest_of!("$3")
+        digest_of!("$3"),
+        " AND session_id = $4"
     ))
     .bind(namespace)
     .bind(id)
     .bind(config)
+    .bind(session.as_str())
     .execute(pool)
     .await?;
     Ok(done.rows_affected() == 1)
 }
 
 /// Fire every due schedule once: enqueue its start job (or skip the fire
-/// while its fixed session is busy) and move its next fire to the first
-/// tick after this fire. Workers call this once per poll interval; a host
-/// may call it too.
+/// while it is busy or at its cap) and move its next fire to the first
+/// tick after this fire, or after now when that tick is past too (the
+/// missed ticks coalesce into this fire and count as skips). Workers call
+/// this once per poll interval; a host may call it too.
 ///
 /// A stored timing that no longer parses pauses its schedule (logged)
 /// instead of blocking the others.
 ///
 /// Args:
 ///     pool: Pool for the queue's database.
+///     caps: The most unfinished jobs each root may hold, as `enqueue`
+///         counts them; a fire of a root at its cap is skipped. A root
+///         without one has no cap.
 ///
 /// Returns:
 ///     How many jobs this call enqueued.
 ///
 /// Raises:
 ///     WorkerError: If a query fails; nothing of the call is kept then.
-pub async fn fire_due_schedules(pool: &PgPool) -> Result<u64, WorkerError> {
+pub async fn fire_due_schedules(pool: &PgPool, caps: &[Cap]) -> Result<u64, WorkerError> {
     let mut tx = crate::begin(pool).await?;
     let due: Vec<Row> = sqlx::query_as(concat!(
         "SELECT ",
@@ -458,10 +483,25 @@ pub async fn fire_due_schedules(pool: &PgPool) -> Result<u64, WorkerError> {
     .bind(FIRE_BATCH)
     .fetch_all(&mut *tx)
     .await?;
+    let now = now(&mut tx).await?;
+    let due: Vec<ScheduleInfo> = due.into_iter().map(info).collect();
+    let cap_of = |schedule: &ScheduleInfo| {
+        let root = root(&schedule.namespace);
+        caps.iter().find(|cap| cap.root == root)
+    };
+    // The batch's capped roots, locked in one order, so two firers never
+    // wait on each other's roots.
+    let mut capped: Vec<&str> = (due.iter().filter_map(cap_of))
+        .map(|cap| cap.root.as_str())
+        .collect();
+    capped.sort_unstable();
+    capped.dedup();
+    for root in capped {
+        definition::lock(&mut tx, Counted::Jobs, root).await?;
+    }
     let mut fired = 0;
-    for row in due {
-        let schedule = info(row);
-        if fire(&mut tx, &schedule).await? {
+    for schedule in &due {
+        if fire(&mut tx, schedule, now, cap_of(schedule)).await? {
             fired += 1;
         }
     }
@@ -469,14 +509,61 @@ pub async fn fire_due_schedules(pool: &PgPool) -> Result<u64, WorkerError> {
     Ok(fired)
 }
 
-/// Make `schedule`'s due fire inside `tx`; whether it enqueued a job.
+/// The fire after `fire_at` that is still to come at `now`, and how many
+/// ticks after `fire_at` were missed by then (they coalesce into the fire
+/// at `fire_at`). An interval stays on its grid: its next fire is
+/// `fire_at` plus a whole number of intervals.
+fn after_missed(
+    timing: &Timing,
+    fire_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Result<(DateTime<Utc>, u64), WorkerError> {
+    let parsed = timing.parse()?;
+    let next = parsed.next_after(timing, fire_at)?;
+    if next > now {
+        return Ok((next, 0));
+    }
+    let out_of_range = || WorkerError::Invalid("the next fire is out of range".into());
+    if let Parsed::Every(every) = &parsed {
+        let every = every.num_microseconds().ok_or_else(out_of_range)?;
+        let elapsed = (now - fire_at)
+            .num_microseconds()
+            .ok_or_else(out_of_range)?;
+        let missed = elapsed / every;
+        let ahead = (missed + 1).checked_mul(every).ok_or_else(out_of_range)?;
+        let next = fire_at
+            .checked_add_signed(chrono::Duration::microseconds(ahead))
+            .ok_or_else(out_of_range)?;
+        return Ok((next, u64::try_from(missed).unwrap_or(0)));
+    }
+    let (mut tick, mut missed) = (next, 0);
+    while tick <= now && missed < MISSED_COUNTED {
+        missed += 1;
+        tick = parsed.next_after(timing, tick)?;
+    }
+    if tick <= now {
+        tick = parsed.next_after(timing, now)?;
+    }
+    Ok((tick, missed))
+}
+
+/// A namespace's root: its first `/`-separated segment, as a [`Cap`]
+/// counts it.
+fn root(namespace: &str) -> &str {
+    namespace.split('/').next().unwrap_or(namespace)
+}
+
+/// Make `schedule`'s due fire inside `tx`, at the database time `now`,
+/// under `cap` (its root's lock already held); whether it enqueued a job.
 async fn fire(
     tx: &mut Transaction<'static, Postgres>,
     schedule: &ScheduleInfo,
+    now: DateTime<Utc>,
+    cap: Option<&Cap>,
 ) -> Result<bool, WorkerError> {
     let (namespace, id) = (&schedule.namespace, &schedule.id);
     let fire_at = schedule.next_fire;
-    let next = match schedule.timing.next_after(fire_at) {
+    let (next, missed) = match after_missed(&schedule.timing, fire_at, now) {
         Ok(next) => next,
         Err(error) => {
             tracing::warn!(%namespace, %id, error = chain(&error), "pausing a schedule");
@@ -493,12 +580,18 @@ async fn fire(
     };
     let stamp = fire_at.to_rfc3339_opts(SecondsFormat::Micros, true);
     let key = format!("schedule:{id}:{stamp}");
-    let busy = match &schedule.session_id {
-        Some(session) => session_busy(tx, schedule, session).await?,
-        None => false,
+    let skip = if busy(tx, schedule).await? {
+        Some("its last fire's job is unfinished, or its session is busy")
+    } else {
+        match cap {
+            Some(cap) if definition::full(tx, cap, Counted::Jobs).await? => {
+                Some("its root holds its cap of unfinished jobs")
+            }
+            _ => None,
+        }
     };
-    let enqueued = if busy {
-        tracing::info!(%namespace, %id, %stamp, "skipping a fire: its session is busy");
+    let enqueued = if let Some(why) = skip {
+        tracing::info!(%namespace, %id, %stamp, why, "skipping a fire");
         false
     } else {
         let session = match &schedule.session_id {
@@ -536,31 +629,33 @@ async fn fire(
     .bind(next)
     .bind(fire_at)
     .bind(i64::from(enqueued))
-    .bind(i64::from(busy))
+    .bind(i64::try_from(missed).unwrap_or(i64::MAX) + i64::from(skip.is_some()))
     .execute(&mut **tx)
     .await?;
+    if missed > 0 {
+        tracing::info!(%namespace, %id, missed, "coalesced missed fires into one");
+    }
     Ok(enqueued)
 }
 
-/// Whether a fire of `schedule` into its fixed `session` must be skipped:
-/// an earlier fire's job is unfinished, or the session has a run that is
-/// not terminal (one in progress, or one suspended for an approval or an
-/// answer, which only a person ends).
-async fn session_busy(
+/// Whether a fire of `schedule` must be skipped: an earlier fire's job is
+/// unfinished, or its fixed session has a run that is not terminal (one in
+/// progress, or one suspended for an approval or an answer, which only a
+/// person ends).
+async fn busy(
     tx: &mut Transaction<'static, Postgres>,
     schedule: &ScheduleInfo,
-    session: &SessionId,
 ) -> Result<bool, WorkerError> {
     let busy: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM linch_worker_jobs \
                         WHERE namespace = $1 AND schedule_id = $2 AND failed_at IS NULL) \
              OR EXISTS (SELECT 1 FROM linch_runs \
-                        WHERE namespace = $1 AND session_id = $3 \
+                        WHERE $3::text IS NOT NULL AND namespace = $1 AND session_id = $3 \
                           AND status NOT IN ('completed', 'failed', 'aborted'))",
     )
     .bind(&schedule.namespace)
     .bind(&schedule.id)
-    .bind(session.as_str())
+    .bind(schedule.session_id.as_ref().map(SessionId::as_str))
     .fetch_one(&mut **tx)
     .await?;
     Ok(busy)

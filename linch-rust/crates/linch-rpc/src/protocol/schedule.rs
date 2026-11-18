@@ -98,7 +98,8 @@ pub struct ScheduleInfo {
     pub last_fire: Option<String>,
     /// Fires that queued a run.
     pub fires: u64,
-    /// Fires skipped because the session was busy.
+    /// Fires not made: skipped while busy or at the tenant's job cap, or
+    /// missed while every worker was down.
     pub skips: u64,
     /// When it was created.
     pub created_at: String,

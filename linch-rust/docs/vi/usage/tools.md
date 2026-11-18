@@ -677,7 +677,8 @@ Postgres it is.
 `schedule_tools: True` cho model `CreateSchedule` (scope `exec`), `ListSchedules` (`read`)
 và `CancelSchedule` (`write`), tức `register_schedule_tools` của Python. Một lịch do nó tạo
 chạy chính agent này, trong session của run đang gọi, cho principal của run đang gọi, dưới
-các mức trần lập lịch của tenant; nó chỉ liệt kê và hủy các lịch của chính agent này. Nó
+các mức trần lập lịch của tenant; nó chỉ liệt kê và hủy các lịch của chính agent này
+trong session của run đang gọi. Nó
 cần các store Postgres, không có host tool hay callback, và một tenant có allowlist cấp cho
 nó `max_schedules`, và mặc định nó tắt: khi tắt, danh sách tool và hợp đồng của run vẫn như
 trước. Mọi thứ còn lại nằm ở [Scheduler](./scheduler.md#để-model-lập-lịch).

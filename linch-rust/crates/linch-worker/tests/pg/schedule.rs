@@ -1,5 +1,6 @@
-//! A due schedule fires once across many pollers and catches up the fires
-//! it missed; its fire becomes a run; pause, resume, delete and the cap.
+//! A due schedule fires once across many pollers and coalesces the fires
+//! it missed into one; its fire becomes a run; pause, resume, delete and
+//! the cap.
 
 use std::time::Duration;
 
@@ -46,7 +47,7 @@ async fn next_fire(db: &TestDb, id: &str) -> DateTime<Utc> {
 pub async fn fire_all(db: &TestDb) -> u64 {
     let mut total = 0;
     loop {
-        let fired = fire_due_schedules(&db.pool).await.unwrap();
+        let fired = fire_due_schedules(&db.pool, &[]).await.unwrap();
         let due: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM linch_worker_schedules \
              WHERE enabled AND next_fire <= now())",
@@ -79,7 +80,7 @@ async fn a_due_schedule_fires_once_across_pollers() {
     let created = create_schedule(&db.pool, &every, None).await.unwrap();
     assert!(created.next_fire > now(&db).await);
     assert_eq!(
-        fire_due_schedules(&db.pool).await.unwrap(),
+        fire_due_schedules(&db.pool, &[]).await.unwrap(),
         0,
         "not due yet"
     );
@@ -87,17 +88,18 @@ async fn a_due_schedule_fires_once_across_pollers() {
     // Three ticks overdue, as if every worker had been down.
     db.sql("UPDATE linch_worker_schedules SET next_fire = now() - interval '150 minutes'")
         .await;
-    let fired = join_all((0..8).map(|_| fire_due_schedules(&db.pool))).await;
+    let fired = join_all((0..8).map(|_| fire_due_schedules(&db.pool, &[]))).await;
     let fired: u64 = fired.into_iter().map(Result::unwrap).sum();
-    assert!((1..=3).contains(&fired), "{fired}");
-    // Missed fires are caught up, each once, in order.
-    assert_eq!(fired + fire_all(&db).await, 3);
+    // The missed fires coalesce into one, at the first missed tick.
+    assert_eq!(fired, 1);
+    assert_eq!(fire_all(&db).await, 0);
     let times = fire_times(&db).await;
-    assert_eq!(times.len(), 3);
+    assert_eq!(times.len(), 1);
     let hour = chrono::Duration::hours(1);
-    assert_eq!((times[1] - times[0], times[2] - times[1]), (hour, hour));
     let (next, now) = (next_fire(&db, "h").await, now(&db).await);
     assert!(next > now && next <= now + hour, "{next}");
+    // The next fire stays on the schedule's grid.
+    assert_eq!(next - times[0], hour * 3);
     let keys: Vec<String> = sqlx::query_scalar("SELECT dedupe_key FROM linch_worker_jobs")
         .fetch_all(&db.pool)
         .await
@@ -113,8 +115,45 @@ async fn a_due_schedule_fires_once_across_pollers() {
         .unwrap();
     assert_eq!(sessions, keys);
     let info = get_schedule(&db.pool, NS, "h").await.unwrap().unwrap();
-    assert_eq!((info.fires, info.skips), (3, 0));
-    assert_eq!(info.last_fire, Some(times[2]));
+    assert_eq!((info.fires, info.skips), (1, 2));
+    assert_eq!(info.last_fire, Some(times[0]));
+    db.finish().await;
+}
+
+/// A schedule 100 ticks overdue (every worker was down) fires once, counts
+/// the other 100 as skips, and its next fire is the first tick after now:
+/// a heartbeat after a day of downtime is one run, not a storm.
+#[tokio::test]
+async fn missed_fires_coalesce_into_one() {
+    let Some(db) = TestDb::new("coalesce").await else {
+        return;
+    };
+    let mut cron = hourly("cron");
+    cron.session_id = None;
+    cron.timing = Timing::cron_utc("* * * * *");
+    let mut every = hourly("every");
+    every.session_id = None;
+    every.timing = Timing::Every(Duration::from_secs(60));
+    for schedule in [&cron, &every] {
+        create_schedule(&db.pool, schedule, None).await.unwrap();
+    }
+    // On a minute tick, 100 minutes ago: 100 more ticks are due by now.
+    db.sql(
+        "UPDATE linch_worker_schedules \
+         SET next_fire = date_trunc('minute', now()) - interval '100 minutes'",
+    )
+    .await;
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 2);
+    assert_eq!(fire_all(&db).await, 0, "nothing else is due");
+    let now = now(&db).await;
+    for id in ["cron", "every"] {
+        let info = get_schedule(&db.pool, NS, id).await.unwrap().unwrap();
+        assert_eq!((info.fires, info.skips), (1, 100), "{id}");
+        assert!(info.next_fire > now, "{id}: {}", info.next_fire);
+        let minute = chrono::Duration::minutes(1);
+        assert!(info.next_fire <= now + minute, "{id}: {}", info.next_fire);
+    }
+    assert_eq!(db.jobs().await, 2);
     db.finish().await;
 }
 
@@ -166,14 +205,14 @@ async fn pause_resume_and_delete() {
     );
     db.sql("UPDATE linch_worker_schedules SET next_fire = now() - interval '3 hours'")
         .await;
-    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 0);
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 0);
     assert_eq!(db.jobs().await, 0);
 
     // Resuming starts from now: the fires missed while paused are not made.
     let resumed = resume_schedule(&db.pool, NS, "h").await.unwrap().unwrap();
     assert!(!resumed.paused);
     assert!(resumed.next_fire > now(&db).await);
-    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 0);
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 0);
 
     let listed = list_schedules(&db.pool, NS).await.unwrap();
     assert_eq!(listed.len(), 1);
@@ -184,10 +223,11 @@ async fn pause_resume_and_delete() {
     db.finish().await;
 }
 
-/// The schedule tools see only the schedules of their own agent: the
-/// namespace's schedules whose stored definition is theirs.
+/// The schedule tools see only the schedules of their own agent in their
+/// own session: the namespace's schedules whose stored definition is
+/// theirs and whose session is the calling run's.
 #[tokio::test]
-async fn agent_scoped_list_and_delete_see_only_that_definition() {
+async fn agent_scoped_list_and_delete_see_only_that_definition_and_session() {
     let Some(db) = TestDb::new("agent_scope").await else {
         return;
     };
@@ -197,10 +237,16 @@ async fn agent_scoped_list_and_delete_see_only_that_definition() {
         schedule.agent = agent.map(str::to_owned);
         schedule
     };
+    let mut other_session = with("mine-other-session", Some(mine));
+    other_session.session_id = Some(SessionId::new("other"));
+    let mut no_session = with("mine-no-session", Some(mine));
+    no_session.session_id = None;
     for schedule in [
         with("mine", Some(mine)),
         with("theirs", Some(theirs)),
         with("bare", None),
+        other_session,
+        no_session,
     ] {
         create_schedule(&db.pool, &schedule, None).await.unwrap();
     }
@@ -208,25 +254,27 @@ async fn agent_scoped_list_and_delete_see_only_that_definition() {
     elsewhere.namespace = "other".into();
     create_schedule(&db.pool, &elsewhere, None).await.unwrap();
 
-    let listed = list_agent_schedules(&db.pool, NS, mine).await.unwrap();
+    let session = SessionId::new("sched");
+    let listed = list_agent_schedules(&db.pool, NS, mine, &session)
+        .await
+        .unwrap();
     let ids: Vec<&str> = listed.iter().map(|s| s.id.as_str()).collect();
     assert_eq!(ids, ["mine"]);
-    for id in ["theirs", "bare", "mine-elsewhere"] {
-        let deleted = delete_agent_schedule(&db.pool, NS, id, mine).await;
+    for id in [
+        "theirs",
+        "bare",
+        "mine-elsewhere",
+        "mine-other-session",
+        "mine-no-session",
+    ] {
+        let deleted = delete_agent_schedule(&db.pool, NS, id, mine, &session).await;
         assert!(!deleted.unwrap(), "{id}");
     }
-    assert_eq!(list_schedules(&db.pool, NS).await.unwrap().len(), 3);
-    assert!(
-        delete_agent_schedule(&db.pool, NS, "mine", mine)
-            .await
-            .unwrap()
-    );
-    assert!(
-        !delete_agent_schedule(&db.pool, NS, "mine", mine)
-            .await
-            .unwrap()
-    );
-    assert_eq!(list_schedules(&db.pool, NS).await.unwrap().len(), 2);
+    assert_eq!(list_schedules(&db.pool, NS).await.unwrap().len(), 5);
+    let delete = || delete_agent_schedule(&db.pool, NS, "mine", mine, &session);
+    assert!(delete().await.unwrap());
+    assert!(!delete().await.unwrap());
+    assert_eq!(list_schedules(&db.pool, NS).await.unwrap().len(), 4);
     db.finish().await;
 }
 
@@ -245,7 +293,7 @@ async fn a_broken_stored_timing_pauses_only_its_schedule() {
         .await;
     db.sql("UPDATE linch_worker_schedules SET next_fire = now() - interval '1 second'")
         .await;
-    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 1);
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 1);
     let paused: Vec<(String, bool)> = list_schedules(&db.pool, NS)
         .await
         .unwrap()

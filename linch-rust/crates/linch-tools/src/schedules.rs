@@ -5,7 +5,8 @@
 //! The model chooses only the prompt and the timing. The host chooses
 //! everything else: the agent definition a fire runs, the namespace, the
 //! queue, the schedule id, and the caps. Every fire continues the calling
-//! run's session and acts for the calling run's principal.
+//! run's session and acts for the calling run's principal; listing and
+//! cancelling see only the calling run's session, as Python's tools do.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -75,11 +76,12 @@ pub trait ScheduleBackend: Send + Sync {
     /// Store `schedule` for the bound agent, under the host's caps.
     async fn create(&self, schedule: NewSchedule) -> Result<ScheduleEntry, ToolOutputError>;
 
-    /// The bound agent's schedules.
-    async fn list(&self) -> Result<Vec<ScheduleEntry>, ToolOutputError>;
+    /// The bound agent's schedules in `session`.
+    async fn list(&self, session: &SessionId) -> Result<Vec<ScheduleEntry>, ToolOutputError>;
 
-    /// Delete the bound agent's schedule `id`; `false` when it has none.
-    async fn cancel(&self, id: &str) -> Result<bool, ToolOutputError>;
+    /// Delete the bound agent's schedule `id` in `session`; `false` when it
+    /// has none there.
+    async fn cancel(&self, session: &SessionId, id: &str) -> Result<bool, ToolOutputError>;
 }
 
 /// `CreateSchedule`, `ListSchedules` and `CancelSchedule` over `backend`.
@@ -227,7 +229,7 @@ impl Tool for CreateSchedule {
     }
 }
 
-/// List this agent's schedules. Scope `read`.
+/// List this agent's schedules in the calling session. Scope `read`.
 pub struct ListSchedules {
     backend: Arc<dyn ScheduleBackend>,
     schema: JsonObject,
@@ -248,7 +250,7 @@ impl Tool for ListSchedules {
     }
 
     fn description(&self) -> &str {
-        "List this agent's schedule definitions."
+        "List this session's schedule definitions."
     }
 
     fn input_schema(&self) -> &JsonObject {
@@ -263,8 +265,8 @@ impl Tool for ListSchedules {
         "List schedules".to_owned()
     }
 
-    async fn execute(&self, _input: JsonObject, _ctx: ToolContext) -> ToolResult {
-        let schedules = self.backend.list().await?;
+    async fn execute(&self, _input: JsonObject, ctx: ToolContext) -> ToolResult {
+        let schedules = self.backend.list(&ctx.session_id).await?;
         if schedules.is_empty() {
             return text("No schedules registered.".to_owned());
         }
@@ -279,8 +281,8 @@ impl Tool for ListSchedules {
     }
 }
 
-/// Cancel one of this agent's schedules; runs it already queued finish.
-/// Scope `write`.
+/// Cancel one of this agent's schedules in the calling session; runs it
+/// already queued finish. Scope `write`.
 pub struct CancelSchedule {
     backend: Arc<dyn ScheduleBackend>,
     schema: JsonObject,
@@ -306,7 +308,7 @@ impl Tool for CancelSchedule {
     }
 
     fn description(&self) -> &str {
-        "Cancel a schedule belonging to this agent."
+        "Cancel a schedule belonging to this session."
     }
 
     fn input_schema(&self) -> &JsonObject {
@@ -327,9 +329,9 @@ impl Tool for CancelSchedule {
         format!("Cancel schedule {id}")
     }
 
-    async fn execute(&self, input: JsonObject, _ctx: ToolContext) -> ToolResult {
+    async fn execute(&self, input: JsonObject, ctx: ToolContext) -> ToolResult {
         let id = string(&input, "id")?;
-        if self.backend.cancel(id).await? {
+        if self.backend.cancel(&ctx.session_id, id).await? {
             text(format!("Cancelled {id}"))
         } else {
             Err(coded(format!("No schedule {id}"), "not_found"))

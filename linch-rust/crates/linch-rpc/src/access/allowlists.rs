@@ -312,8 +312,9 @@ impl Allowlists {
     /// How many jobs (one-off background runs and schedule fires) the
     /// tenant may have queued, running or waiting to retry at once in each
     /// database, counted when `job.enqueue` adds one; `None` (the
-    /// default) lets it enqueue none (`kind: background_runs`). Fires of
-    /// its schedules are not refused, only counted.
+    /// default) lets it enqueue none (`kind: background_runs`). A fire of
+    /// its schedules at the cap is skipped, never failed; with `None`,
+    /// fires have no cap.
     pub fn max_queued_jobs(mut self, max: Option<u64>) -> Self {
         self.max_queued_jobs = max;
         self

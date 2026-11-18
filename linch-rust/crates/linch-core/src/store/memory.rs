@@ -135,6 +135,7 @@ impl RunStore for MemoryRunStore {
             run_id: run.run_id,
             session_id: run.session_id,
             parent_run_id: run.parent_run_id,
+            principal: run.principal,
             contract: run.contract,
             status: RunStatus::Pending,
             epoch: 0,

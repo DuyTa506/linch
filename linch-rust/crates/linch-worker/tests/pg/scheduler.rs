@@ -8,13 +8,14 @@ use std::time::Duration;
 
 use futures::FutureExt;
 use futures::future::BoxFuture;
+use linch_core::hooks::ApprovalResponse;
 use linch_core::permissions::{Rule, RuleDecision, ToolRule};
 use linch_core::{PermissionLayer, Principal, RunOptions, RunStatus, SessionId, ToolScope};
 use linch_postgres::PgPool;
 use linch_worker::{
     AgentFactory, Cap, FactoryError, JobAgent, JobId, JobState, RunRequest, Timing, Worker,
-    WorkerError, create_schedule, delete_schedule, enqueue, enqueue_run, fire_due_schedules,
-    get_schedule, job, jobs, prune_definitions,
+    WorkerError, create_schedule, delete_schedule, enqueue, enqueue_approve, enqueue_run,
+    fire_due_schedules, get_schedule, job, jobs, prune_definitions, prune_history,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -40,10 +41,10 @@ async fn a_heartbeat_skips_a_fire_while_its_last_one_is_unfinished() {
     beat.timing = Timing::Every(Duration::from_secs(3600));
     create_schedule(&db.pool, &beat, None).await.unwrap();
     make_due(&db, "1 second").await;
-    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 1);
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 1);
     // Its job is still queued: the next fire is skipped, not stacked.
     make_due(&db, "1 second").await;
-    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 0);
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 0);
     assert_eq!(db.jobs().await, 1);
     let info = get_schedule(&db.pool, NS, "beat").await.unwrap().unwrap();
     assert_eq!((info.fires, info.skips), (1, 1));
@@ -91,13 +92,13 @@ async fn a_heartbeat_skips_a_fire_while_its_session_has_a_live_run() {
         .await
         .unwrap();
     make_due(&db, "1 second").await;
-    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 0);
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 0);
     assert_eq!(db.jobs().await, 0);
     let info = get_schedule(&db.pool, NS, "beat").await.unwrap().unwrap();
     assert_eq!((info.fires, info.skips), (0, 1));
     // Still suspended at the next tick: still skipped.
     make_due(&db, "1 second").await;
-    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 0);
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 0);
 
     // Cancelled through the store, the run is terminal: the next fire runs.
     let probe = Probe::new("Write", ToolScope::Write, Hold::None);
@@ -106,7 +107,7 @@ async fn a_heartbeat_skips_a_fire_while_its_session_has_a_live_run() {
     assert!(canceller.cancel(run_id.clone(), options).await.unwrap());
     assert_eq!(db.status(&run_id).await, RunStatus::Aborted);
     make_due(&db, "1 second").await;
-    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 1);
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 1);
     let worker = Running::spawn(&db.pool, config("w2"), agent(&db.pool, probe));
     let runs = || async {
         let runs: i64 =
@@ -247,14 +248,14 @@ async fn scheduled_jobs_are_listed_by_schedule() {
     every.session_id = None;
     every.timing = Timing::Every(Duration::from_secs(3600));
     create_schedule(&db.pool, &every, None).await.unwrap();
-    make_due(&db, "90 minutes").await;
-    assert_eq!(fire_all(&db).await, 2);
+    make_due(&db, "1 second").await;
+    assert_eq!(fire_all(&db).await, 1);
     enqueue_run(&db.pool, "default", NS, &SessionId::new("s"), "go")
         .await
         .unwrap();
     let all = jobs(&db.pool, NS, None, 10).await.unwrap();
     let by_schedule = jobs(&db.pool, NS, Some("h"), 10).await.unwrap();
-    assert_eq!((all.len(), by_schedule.len()), (3, 2));
+    assert_eq!((all.len(), by_schedule.len()), (2, 1));
     assert!(by_schedule.iter().all(|job| job.fire_at.is_some()));
     assert_eq!(jobs(&db.pool, NS, None, 1).await.unwrap().len(), 1);
     db.finish().await;
@@ -289,6 +290,116 @@ async fn the_job_cap_counts_unfinished_jobs() {
     db.finish().await;
 }
 
+/// Pruning the history also deletes failed jobs that failed longer ago than
+/// the retention: a dead letter is readable for as long as an ended job.
+#[tokio::test]
+async fn failed_jobs_are_pruned_with_the_history() {
+    let Some(db) = TestDb::new("prune_failed").await else {
+        return;
+    };
+    for session in ["old", "new", "live"] {
+        enqueue_run(&db.pool, "default", NS, &SessionId::new(session), "go")
+            .await
+            .unwrap();
+    }
+    db.sql(
+        "UPDATE linch_worker_jobs SET failed_at = now() - interval '8 days', error = 'boom' \
+         WHERE session_id = 'old'",
+    )
+    .await;
+    db.sql(
+        "UPDATE linch_worker_jobs SET failed_at = now() - interval '1 day', error = 'boom' \
+         WHERE session_id = 'new'",
+    )
+    .await;
+    let week = Duration::from_secs(7 * 24 * 3600);
+    assert_eq!(prune_history(&db.pool, week).await.unwrap(), 1);
+    let left: Vec<String> =
+        sqlx::query_scalar("SELECT session_id FROM linch_worker_jobs ORDER BY session_id")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(left, ["live", "new"]);
+    db.finish().await;
+}
+
+/// Any schedule, with a fixed session or not, skips a fire while its last
+/// fire's job is unfinished: a sessionless schedule no longer stacks a job
+/// per fire behind a backlog.
+#[tokio::test]
+async fn a_sessionless_schedule_skips_a_fire_while_its_last_job_is_unfinished() {
+    let Some(db) = TestDb::new("fire_unfinished").await else {
+        return;
+    };
+    let mut every = hourly("every");
+    every.session_id = None;
+    every.timing = Timing::Every(Duration::from_secs(3600));
+    create_schedule(&db.pool, &every, None).await.unwrap();
+    make_due(&db, "1 second").await;
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 1);
+    make_due(&db, "1 second").await;
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 0);
+    assert_eq!(db.jobs().await, 1);
+    let info = get_schedule(&db.pool, NS, "every").await.unwrap().unwrap();
+    assert_eq!((info.fires, info.skips), (1, 1));
+    // Once that job failed for good, the next fire is made.
+    db.sql("UPDATE linch_worker_jobs SET failed_at = now()")
+        .await;
+    make_due(&db, "1 second").await;
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 1);
+    db.finish().await;
+}
+
+/// A fire meets the tenant's `max_queued_jobs` as `enqueue` does, but is
+/// skipped (counted in `skips`, its next fire moved on), not failed.
+#[tokio::test]
+async fn a_fire_at_the_job_cap_is_skipped() {
+    let Some(db) = TestDb::new("fire_cap").await else {
+        return;
+    };
+    let cap = Cap {
+        root: NS.into(),
+        max: 2,
+    };
+    // One unfinished job already: room for one fire of the two.
+    enqueue(&db.pool, &request("s1", "d"), Some(&cap))
+        .await
+        .unwrap();
+    for id in ["a", "b"] {
+        let mut every = hourly(id);
+        every.session_id = None;
+        every.timing = Timing::Every(Duration::from_secs(3600));
+        create_schedule(&db.pool, &every, None).await.unwrap();
+    }
+    make_due(&db, "1 second").await;
+    let before = crate::schedule::now(&db).await;
+    assert_eq!(
+        fire_due_schedules(&db.pool, std::slice::from_ref(&cap))
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(db.jobs().await, 2);
+    let mut counts = Vec::new();
+    for id in ["a", "b"] {
+        let info = get_schedule(&db.pool, NS, id).await.unwrap().unwrap();
+        assert!(info.next_fire > before, "{id} moved on");
+        counts.push((info.fires, info.skips));
+    }
+    counts.sort_unstable();
+    assert_eq!(counts, [(0, 1), (1, 0)]);
+    // A cap of another root does not hold here.
+    let other = Cap {
+        root: "elsewhere".into(),
+        max: 0,
+    };
+    make_due(&db, "1 second").await;
+    db.sql("UPDATE linch_worker_jobs SET failed_at = now() WHERE schedule_id IS NOT NULL")
+        .await;
+    assert_eq!(fire_due_schedules(&db.pool, &[other]).await.unwrap(), 2);
+    db.finish().await;
+}
+
 /// The test schema's trigger on job inserts, which runs `body`.
 async fn job_insert_trigger(db: &TestDb, body: &str) {
     let sql = format!(
@@ -320,13 +431,13 @@ async fn a_fire_that_fails_before_its_commit_leaves_nothing() {
         .unwrap()
         .next_fire;
     job_insert_trigger(&db, "RAISE EXCEPTION 'crash';").await;
-    assert!(fire_due_schedules(&db.pool).await.is_err());
+    assert!(fire_due_schedules(&db.pool, &[]).await.is_err());
     assert_eq!(db.jobs().await, 0);
     let info = get_schedule(&db.pool, NS, "h").await.unwrap().unwrap();
     assert_eq!((info.next_fire, info.fires), (due, 0), "nothing moved");
     drop_trigger(&db).await;
-    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 1);
-    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 0);
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 1);
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 0);
     assert_eq!(db.jobs().await, 1);
 
     // The dedupe key guards the same fire time a second time.
@@ -337,7 +448,7 @@ async fn a_fire_that_fails_before_its_commit_leaves_nothing() {
         .unwrap();
     db.sql("UPDATE linch_worker_jobs SET schedule_id = NULL")
         .await;
-    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 0);
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 0);
     assert_eq!(db.jobs().await, 1);
     db.finish().await;
 }
@@ -354,7 +465,7 @@ async fn a_firer_killed_mid_transaction_leaves_nothing() {
     // after the schedule row was locked and before the commit.
     let firing = tokio::spawn({
         let pool = db.pool.clone();
-        async move { fire_due_schedules(&pool).await }
+        async move { fire_due_schedules(&pool, &[]).await }
     });
     wait_until("the firer sleeps in its insert", || async {
         let pid: Option<i32> = sqlx::query_scalar(
@@ -379,7 +490,7 @@ async fn a_firer_killed_mid_transaction_leaves_nothing() {
     assert_eq!(db.jobs().await, 0);
     let info = get_schedule(&db.pool, NS, "h").await.unwrap().unwrap();
     assert_eq!(info.fires, 0);
-    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 1);
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 1);
     assert_eq!(db.jobs().await, 1);
     db.finish().await;
 }
@@ -401,7 +512,7 @@ async fn concurrent_firers_make_each_fire_once() {
         tokio::spawn(async move {
             let mut total = 0;
             for _ in 0..10 {
-                total += fire_due_schedules(&pool).await.unwrap();
+                total += fire_due_schedules(&pool, &[]).await.unwrap();
             }
             total
         })
@@ -411,15 +522,16 @@ async fn concurrent_firers_make_each_fire_once() {
         fired += firer.await.unwrap();
     }
     fired += fire_all(&db).await;
-    // Three fires each (150 s, 90 s and 30 s ago), none twice.
-    assert_eq!(fired, 60);
-    assert_eq!(db.jobs().await, 60);
+    // One fire each (the ticks 90 s and 30 s ago coalesce into it), none
+    // twice.
+    assert_eq!(fired, 20);
+    assert_eq!(db.jobs().await, 20);
     let distinct: i64 =
         sqlx::query_scalar("SELECT count(DISTINCT (schedule_id, fire_at)) FROM linch_worker_jobs")
             .fetch_one(&db.pool)
             .await
             .unwrap();
-    assert_eq!(distinct, 60);
+    assert_eq!(distinct, 20);
     db.finish().await;
 }
 
@@ -457,7 +569,7 @@ async fn a_definition_no_one_names_is_pruned() {
         .execute(&db.pool)
         .await
         .unwrap();
-    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 1);
+    assert_eq!(fire_due_schedules(&db.pool, &[]).await.unwrap(), 1);
     assert!(delete_schedule(&db.pool, NS, "beat").await.unwrap());
 
     // Its fire's job is unfinished: the definition stays.
@@ -525,8 +637,8 @@ async fn a_background_run_acts_for_its_principal() {
     beat.timing = Timing::Every(Duration::from_secs(3600));
     beat.principal = Some(intern);
     create_schedule(&db.pool, &beat, None).await.unwrap();
+    // The running worker fires it.
     make_due(&db, "1 second").await;
-    assert_eq!(fire_due_schedules(&db.pool).await.unwrap(), 1);
     for session in ["queued", "fired"] {
         let run_id = db.run_of(session).await;
         wait_until("the run ends", || async {
@@ -537,5 +649,87 @@ async fn a_background_run_acts_for_its_principal() {
     }
     assert_eq!(probe.started(), 0, "the rule denied the intern's write");
     worker.stop().await;
+    db.finish().await;
+}
+
+/// Opens, for every definition, the probe agent under a rule that denies
+/// `Write` to all but `admin`: an admin's write asks, anyone else's is
+/// denied.
+struct AdminsOnly {
+    pool: PgPool,
+    probe: Probe,
+}
+
+impl AgentFactory for AdminsOnly {
+    fn open<'a>(
+        &'a self,
+        _namespace: &'a str,
+        _definition: &'a str,
+    ) -> BoxFuture<'a, Result<JobAgent, FactoryError>> {
+        let mut deny = ToolRule::new("Write", RuleDecision::Deny);
+        deny.unless_role = Some("admin".into());
+        let layer = PermissionLayer::new("roles", [Rule::Tool(deny)]);
+        let agent = ruled_agent(&self.pool, self.probe.clone(), layer);
+        async move { Ok(JobAgent::new(agent)) }.boxed()
+    }
+}
+
+/// A scheduled run that suspends for approval is continued through the
+/// queue: `enqueue_approve` gives the job the run's stored definition, so a
+/// worker with only a factory takes it, and the run goes on for the
+/// principal it was started with.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_approve_job_continues_a_scheduled_run_with_its_agent_and_principal() {
+    let Some(db) = TestDb::new("approve_fire").await else {
+        return;
+    };
+    let probe = Probe::new("Write", ToolScope::Write, Hold::None);
+    let factory = AdminsOnly {
+        pool: db.pool.clone(),
+        probe: probe.clone(),
+    };
+    let shutdown = CancellationToken::new();
+    let worker =
+        Worker::new(db.pool.clone(), config("w1")).definitions([NS.to_owned()], Arc::new(factory));
+    let handle = tokio::spawn(worker.run(shutdown.clone()));
+    let mut fired = hourly("fired");
+    fired.session_id = None;
+    fired.timing = Timing::Every(Duration::from_secs(3600));
+    fired.agent = Some("def".into());
+    fired.principal = Some(Principal::new("acme", "ada", ["admin"]).unwrap());
+    create_schedule(&db.pool, &fired, None).await.unwrap();
+    // The worker fires it.
+    make_due(&db, "1 second").await;
+    wait_until("the fire suspends and its job ends", || async {
+        let listed = jobs(&db.pool, NS, Some("fired"), 10).await.unwrap();
+        listed
+            .first()
+            .is_some_and(|job| job.state == JobState::Done)
+    })
+    .await;
+    let listed = jobs(&db.pool, NS, Some("fired"), 10).await.unwrap();
+    let run_id = listed[0].run_id.clone().expect("the fire names its run");
+    assert_eq!(db.status(&run_id).await, RunStatus::AwaitingApproval);
+    // The suspended run keeps its definition after its schedule is gone.
+    assert!(delete_schedule(&db.pool, NS, "fired").await.unwrap());
+    assert_eq!(prune_definitions(&db.pool).await.unwrap(), 0);
+
+    let approvals = [("call_0".to_owned(), ApprovalResponse::Allow)];
+    enqueue_approve(&db.pool, "default", NS, &run_id, approvals)
+        .await
+        .unwrap();
+    wait_until("the approved run completes", || async {
+        db.status(&run_id).await == RunStatus::Completed
+    })
+    .await;
+    assert_eq!(probe.started(), 1, "the write ran for the admin");
+    shutdown.cancel();
+    handle.await.unwrap().unwrap();
+    // Once the run ended, nothing keeps the definition.
+    wait_until("the approve job is acked", || async {
+        db.jobs().await == 0
+    })
+    .await;
+    assert_eq!(prune_definitions(&db.pool).await.unwrap(), 1);
     db.finish().await;
 }

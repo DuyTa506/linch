@@ -44,7 +44,8 @@ class Schedule(TypedDict):
         next_fire: Its next fire (while paused, the one it had).
         last_fire: Its latest fire, made or skipped.
         fires: Fires that queued a run.
-        skips: Fires skipped because the session was busy.
+        skips: Fires not made: skipped while busy or at a cap, or missed
+            while every worker was down.
         created_at: When it was created.
     """
 

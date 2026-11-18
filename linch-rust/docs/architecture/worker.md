@@ -29,6 +29,7 @@ time is the database clock (`now()`), never a worker's.
 | `0004_queue_limits.sql` | `linch_worker_queues` (`name`, `max_held`) |
 | `0005_scheduler.sql` | `linch_worker_agents` (stored agent definitions by digest); interval, time-zone and fixed-session columns on schedules, with `fires`, `skips` and `last_fire`; `agent`, `schedule_id`, `fire_at` and `created_at` on jobs; `linch_worker_history` |
 | `0006_background_principal.sql` | `principal` (a `Principal` as JSON) on schedules and jobs; partial indexes on their `agent` column |
+| `0007_history_agent.sql` | `agent` on `linch_worker_history`, with partial indexes on `(namespace, run_id)` and `(namespace, agent)` |
 
 A job starts a run (`session_id` and `prompt`), continues one (`run_id`), or
 approves one (`run_id` and `approvals`); check constraints keep those shapes
@@ -42,8 +43,8 @@ heartbeat's live run), so run `linch_postgres::migrate` on the same schema.
 | Call | Job | Notes |
 |---|---|---|
 | `enqueue_run(pool, queue, namespace, session_id, prompt)` | start | The worker records the run id on the job before the run's first write, so a retry after a crash continues that run (`crates/linch-worker/src/job.rs:129-163`) |
-| `enqueue_resume(pool, queue, namespace, run_id)` | continue | When the run already has an active job, that job's id comes back instead of a new one (`job.rs:164-196`) |
-| `enqueue_approve(pool, queue, namespace, run_id, approvals)` | approve | Approvals are stored in the core's `ApprovalResponse` wire form. `WorkerError::RunBusy` when the run has an active job, which may end without reading them; enqueue again once it has ended (`job.rs:197-239`) |
+| `enqueue_resume(pool, queue, namespace, run_id)` | continue | When the run already has an active job, that job's id comes back instead of a new one. The job names the stored definition the run's latest job with one ran with (from `linch_worker_jobs` or `linch_worker_history`), so the worker that served the run serves it again; `WorkerError::Invalid` when that definition was pruned. It names no principal: core continues the run for its start principal (`job.rs`, `enqueue_continuation`) |
+| `enqueue_approve(pool, queue, namespace, run_id, approvals)` | approve | Approvals are stored in the core's `ApprovalResponse` wire form. The same definition and principal as `enqueue_resume`. `WorkerError::RunBusy` when the run has an active job, which may end without reading them; enqueue again once it has ended (`job.rs`) |
 | `enqueue(pool, &RunRequest, cap)` | start | `enqueue_run` with an optional stored agent definition and an optional [cap](#caps) on the root's unfinished jobs (`crates/linch-worker/src/job.rs`) |
 
 Each insert and its `pg_notify` on channel `linch_worker` (`lib.rs:76`) run in
@@ -88,8 +89,8 @@ one `LISTEN` connection plus the job queries.
    queue is empty, and runs each job in its own task (`worker.rs:173-212`);
 4. waits for a notification, a finished job, the poll interval or `shutdown`.
 
-It also prunes the history of ended jobs older than `history_retention` (7
-days by default) at most once every 10 minutes.
+It also prunes the history of ended jobs, and the failed jobs, older than
+`history_retention` (7 days by default) at most once every 10 minutes.
 
 `Worker::definitions(roots, factory)` serves jobs that carry a stored agent
 definition: a job with one is taken only by a worker whose `roots` hold the
@@ -189,7 +190,8 @@ busy session never counts, so a start job is never given up on for that.
 
 A failed job is the dead letter: `failed_at` and `error` are set, it is never
 dequeued again, and it no longer counts against the one-job-per-run index or
-a queue limit (`lease.rs:288-302`). `error` holds the whole error chain
+a queue limit (`lease.rs:288-302`). It stays in `linch_worker_jobs` until
+`prune_history` deletes it, `history_retention` after it failed. `error` holds the whole error chain
 (`crates/linch-worker/src/error.rs:40-49`). When a run is failed with its job,
 the run goes first: a crash in between leaves a terminal run, which the job's
 next attempt acks (`settle.rs:46-56`).
@@ -209,7 +211,8 @@ schedule_id, limit)` (`crates/linch-worker/src/status.rs`) read both, scoped
 by the exact namespace (job ids are global), and name a `JobState`: `queued`,
 `running` (owned and still hidden), `retrying` (released with an error),
 `failed`, `done` or `superseded`. `prune_history(pool, older_than)` deletes
-history rows; failed jobs are never pruned.
+history rows that ended, and failed jobs that failed, more than
+`older_than` ago.
 
 ## Schedules
 
@@ -228,10 +231,10 @@ id. `list_schedules`, `get_schedule`, `pause_schedule`, `resume_schedule`
 (next fire from now: fires missed while paused are not made) and
 `delete_schedule` (queued and running jobs are left alone) complete the set.
 
-`fire_due_schedules(pool)` locks up to 64 due rows with
+`fire_due_schedules(pool, caps)` locks up to 64 due rows with
 `FOR UPDATE SKIP LOCKED` and, for each, enqueues one start job and moves
-`next_fire` to the first tick after **this fire** (not after now), all in one
-transaction:
+`next_fire` to the first tick after this fire, or after now when that tick
+has passed too, all in one transaction:
 
 - **Exactly once.** A worker that crashes before the commit leaves neither
   the job nor the move, so the next poll makes the fire; pollers at once skip
@@ -239,15 +242,26 @@ transaction:
   second guard. `tests/pg/scheduler.rs` aborts a fire inside its insert,
   kills the firing backend with `pg_terminate_backend` mid-transaction, and
   races eight firers over twenty schedules.
-- **Catch-up.** Since the next fire follows the fire just made, a schedule
-  that missed several ticks fires each, in order, one per call, as Python
-  Linch's schedules do.
+- **Coalesced catch-up.** A schedule that missed several ticks (every
+  worker was down) fires once, at its stored next fire, adds the ticks
+  missed after it up to now to `skips`, and moves `next_fire` to the first
+  tick after now (`after_missed` in `schedule.rs`; an interval stays on its
+  grid). An interval's missed ticks are counted by division; a cron
+  pattern's are walked, at most 10,000 (`MISSED_COUNTED`). Python Linch
+  fires each missed tick, in order; coalescing keeps a long downtime from
+  queueing a run per missed tick.
+- **Skips.** A fire is skipped (`skips` + 1, `next_fire` moved on as for a
+  fire made) while a job of the schedule is not failed and not ended, for
+  every schedule; with a `session_id`, also while the session has a run
+  that is not terminal in `linch_runs` (one suspended for approval or input
+  included); and while its root is at the `Cap` on unfinished jobs the
+  caller passes (`fire_due_schedules(pool, caps)`, the worker's
+  `Worker::job_caps`, which `linch-server` fills with each tenant's
+  `max_queued_jobs`). The batch's capped roots are locked in sorted order
+  first, so two firers never wait on each other. Fires never pile up behind
+  a backlog or a run that waits for a person, and never fail at the cap.
 - **Sessions.** Without a `session_id`, each fire starts the session
-  `schedule:{id}:{fire time}`. With one, the fire is skipped (`skips` + 1)
-  while a job of the schedule is not failed and not ended, or the session
-  has a run that is not terminal in `linch_runs` (one suspended for approval
-  or input included). A heartbeat's catch-up therefore collapses into one
-  run, and fires never pile up behind a run that waits for a person.
+  `schedule:{id}:{fire time}`; with one, every fire is a new run in it.
 - A stored timing that no longer parses pauses its schedule (logged)
   instead of blocking the others.
 
@@ -256,9 +270,10 @@ transaction:
 `Cap { root, max }` (`crates/linch-worker/src/definition.rs`) bounds what
 the namespaces under one root (a namespace's first `/`-separated segment, a
 tenant's name) may hold: schedules for `create_schedule`, unfinished jobs
-for `enqueue`. The count runs in the insert's transaction after a
-transaction-scoped advisory lock on the root, so writers on any server count
-each other's rows; past it, `LimitReached`.
+for `enqueue` and for a schedule's fire. The count runs in the insert's
+transaction after a transaction-scoped advisory lock on the root, so writers
+on any server count each other's rows; past it, `LimitReached`, or for a
+fire a skip.
 
 ## Agent definitions
 
@@ -275,8 +290,12 @@ agent config, re-admitted against its tenant at every attempt
 
 A definition holds the config's secrets in plain text, so
 `prune_definitions(pool)` (`crates/linch-worker/src/definition.rs`) deletes
-the ones no schedule and no unfinished job names, after setting `agent` to
-NULL on failed jobs (never run again). A worker runs it with the history
+the ones no schedule, no unfinished job and no history row of a run that
+is not terminal names, after setting `agent` to NULL on failed jobs (never
+run again). A run suspended for an approval or an answer so keeps its
+definition for the job that continues it, until its history row is pruned
+(`history_retention`); after that, `enqueue_resume` and `enqueue_approve`
+refuse it. A worker runs it with the history
 pruning, from its first poll and every 10 minutes after, whether or not it
 keeps history. A writer storing a definition locks its row
 (`ON CONFLICT ... DO UPDATE`) until it commits, and the prune locks its
@@ -290,8 +309,10 @@ references fails the delete's foreign key, and that prune deletes nothing
 A schedule and a job may carry a principal (`Schedule::principal`,
 `RunRequest::principal`), stored as JSON; a fire copies its schedule's to
 its job. The worker decodes it at every attempt and sets it on the
-`RunOptions` of the start, resume or approve (`execute.rs`), since core keeps
-no principal with the run (a resume takes it from its options). A row whose
+`RunOptions` of the start, resume or approve (`execute.rs`). Core stores
+the start principal with the run (`RunRecord::principal`), and a resume or
+approve whose options name none acts for it, so a continuation job
+(`enqueue_resume`, `enqueue_approve`) carries none of its own. A row whose
 principal does not decode fails its job. Python's worker restores
 `RunRequest.principal` the same way (`linch/worker/runtime.py`).
 

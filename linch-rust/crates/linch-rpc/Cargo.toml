@@ -32,6 +32,9 @@ subtle = "2.6.1"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["fs", "io-util", "macros", "rt", "sync", "time"] }
 tokio-util = { version = "0.7.20", features = ["codec", "rt"] }
+# Logs a schedule tool's store failure, whose chain the model does not see
+# (the version linch-worker uses).
+tracing = "0.1.44"
 url = "2.5.8"
 # A fresh schedule id (the version linch-core uses for run ids).
 uuid = { version = "1.28.0", features = ["v4"] }

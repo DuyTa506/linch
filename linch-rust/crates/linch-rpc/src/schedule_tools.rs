@@ -11,9 +11,13 @@
 //!   ([`admit_create`]): the tenant's `max_schedules` cap and
 //!   `min_schedule_interval_ms` floor;
 //! - list and cancel see only the namespace's schedules of that same
-//!   definition;
+//!   definition in the calling run's session;
 //! - a subagent's call is refused: a child with fewer tools would schedule
-//!   the whole agent.
+//!   the whole agent;
+//! - a store or internal failure reaches the model as a short generic
+//!   message (code `store`); its chain, which can name the database host
+//!   and port, goes to the log (`tracing`). Refusals the model can act on
+//!   (a bad timing, the interval floor, the cap) keep their words.
 //!
 //! The tools go into the registry before the agent is built, so the
 //! contract covers them; the binding is filled once the open made the
@@ -24,7 +28,7 @@ use std::sync::{Arc, OnceLock};
 use async_trait::async_trait;
 use linch::postgres::{PgPool, PgRunStore};
 use linch::tools::{NewSchedule, ScheduleBackend, ScheduleEntry, ScheduleTiming, schedule_tools};
-use linch::{RunStore, ToolOutputError, ToolRegistry};
+use linch::{RunStore, SessionId, ToolOutputError, ToolRegistry};
 use linch_worker::{Schedule, ScheduleInfo};
 use tokio::sync::OnceCell;
 
@@ -84,7 +88,7 @@ impl Bound {
             .get_or_try_init(|| async { linch_worker::migrate(&self.pool).await });
         (migrated.await)
             .map(|_| ())
-            .map_err(|error| tool_error(&chain(&error), "store"))
+            .map_err(|error| store_failure(&chain(&error)))
     }
 
     /// Refuse a call from a child run: a subagent may hold fewer tools
@@ -98,14 +102,19 @@ impl Bound {
             )),
             Ok(_) => Ok(()),
             // Fail closed: a call's run is durable before the call starts.
-            Err(error) => Err(tool_error(&error.to_string(), "store")),
+            Err(error) => Err(store_failure(&chain(&error))),
         }
     }
 
-    /// The schedule `id` of this agent, if it exists.
-    async fn own(&self, id: &str) -> Result<Option<ScheduleInfo>, ToolOutputError> {
+    /// The schedule `id` of this agent in `session`, if it exists.
+    async fn own(
+        &self,
+        session: &SessionId,
+        id: &str,
+    ) -> Result<Option<ScheduleInfo>, ToolOutputError> {
+        let (pool, namespace) = (&self.pool, &self.namespace);
         let listed =
-            linch_worker::list_agent_schedules(&self.pool, &self.namespace, &self.definition).await;
+            linch_worker::list_agent_schedules(pool, namespace, &self.definition, session).await;
         let listed = listed.map_err(|error| refusal(&worker_error(&error)))?;
         Ok(listed.into_iter().find(|schedule| schedule.id == id))
     }
@@ -136,7 +145,7 @@ impl ScheduleBackend for Binding {
         bound.migrated().await?;
         // The call's key as the id: a retry of the same call finds its
         // schedule instead of making a second one.
-        if let Some(made) = bound.own(&new.call_key).await? {
+        if let Some(made) = bound.own(&new.session_id, &new.call_key).await? {
             return Ok(entry(made));
         }
         let schedule = Schedule {
@@ -153,17 +162,17 @@ impl ScheduleBackend for Binding {
         Ok(entry(created.map_err(|error| refusal(&error))?))
     }
 
-    async fn list(&self) -> Result<Vec<ScheduleEntry>, ToolOutputError> {
+    async fn list(&self, session: &SessionId) -> Result<Vec<ScheduleEntry>, ToolOutputError> {
         let bound = self.bound()?;
         bound.migrated().await?;
+        let (pool, namespace) = (&bound.pool, &bound.namespace);
         let listed =
-            linch_worker::list_agent_schedules(&bound.pool, &bound.namespace, &bound.definition)
-                .await;
+            linch_worker::list_agent_schedules(pool, namespace, &bound.definition, session).await;
         let listed = listed.map_err(|error| refusal(&worker_error(&error)))?;
         Ok(listed.into_iter().map(entry).collect())
     }
 
-    async fn cancel(&self, id: &str) -> Result<bool, ToolOutputError> {
+    async fn cancel(&self, session: &SessionId, id: &str) -> Result<bool, ToolOutputError> {
         let bound = self.bound()?;
         bound.migrated().await?;
         let deleted = linch_worker::delete_agent_schedule(
@@ -171,6 +180,7 @@ impl ScheduleBackend for Binding {
             &bound.namespace,
             id,
             &bound.definition,
+            session,
         )
         .await;
         deleted.map_err(|error| refusal(&worker_error(&error)))
@@ -194,18 +204,68 @@ fn tool_error(message: &str, code: &str) -> ToolOutputError {
     }
 }
 
-/// A refused or failed scheduler call as the model sees it: the message,
-/// a code named after the wire error, and its data.
+/// What the model sees of a store or internal failure. The message is
+/// generic: the chain (logged here) can carry the database host and port.
+const STORE_FAILURE: &str = "the schedule store failed; try again later";
+
+/// A store or internal failure as the model sees it, `chain` logged.
+fn store_failure(chain: &str) -> ToolOutputError {
+    tracing::warn!(error = chain, "a schedule tool call failed in the store");
+    tool_error(STORE_FAILURE, "store")
+}
+
+/// A refused or failed scheduler call as the model sees it: a refusal it
+/// can act on with its message, a code named after the wire error, and
+/// its data; any other failure as [`store_failure`].
 fn refusal(error: &ErrorObject) -> ToolOutputError {
     let name = match error.code {
         code::NOT_ALLOWED => "not_allowed",
         code::LIMIT_REACHED => "limit_reached",
         code::INVALID_SCHEDULE => "invalid_schedule",
-        _ => "store",
+        _ => return store_failure(&error.message),
     };
     ToolOutputError {
         message: error.message.clone(),
         code: Some(name.to_owned()),
         details: error.data.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    const DSN_ERROR: &str = "error communicating with database: \
+                             connection to 127.0.0.1:55432 refused";
+
+    /// A store failure reaches the model as a short generic message: the
+    /// chain, with the database's host and port, stays in the log.
+    #[test]
+    fn a_store_error_does_not_reach_the_model() {
+        for error in [
+            ErrorObject::new(code::STORE, DSN_ERROR),
+            ErrorObject::new(code::INTERNAL_ERROR, DSN_ERROR).with_data(json!({"dsn": DSN_ERROR})),
+        ] {
+            let seen = refusal(&error);
+            assert_eq!(seen.code.as_deref(), Some("store"));
+            assert!(!seen.message.contains("55432"), "{}", seen.message);
+            assert!(seen.details.is_none());
+        }
+    }
+
+    /// A refusal the model can act on keeps its words and data.
+    #[test]
+    fn a_validation_refusal_stays_specific() {
+        let refused = ErrorObject::new(
+            code::LIMIT_REACHED,
+            "the tenant already holds its 2 schedules",
+        )
+        .with_data(json!({"kind": "schedules", "max": 2}));
+        let seen = refusal(&refused);
+        assert_eq!(seen.code.as_deref(), Some("limit_reached"));
+        assert_eq!(seen.message, refused.message);
+        assert_eq!(seen.details, refused.data);
     }
 }

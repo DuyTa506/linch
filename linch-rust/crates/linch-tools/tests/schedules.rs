@@ -22,7 +22,8 @@ use tokio_util::sync::CancellationToken;
 #[derive(Default)]
 struct Fake {
     created: Mutex<Vec<NewSchedule>>,
-    cancelled: Mutex<Vec<String>>,
+    listed: Mutex<Vec<SessionId>>,
+    cancelled: Mutex<Vec<(SessionId, String)>>,
 }
 
 fn entry(id: &str, prompt: &str, paused: bool) -> ScheduleEntry {
@@ -42,12 +43,14 @@ impl ScheduleBackend for Fake {
         Ok(made)
     }
 
-    async fn list(&self) -> Result<Vec<ScheduleEntry>, ToolOutputError> {
+    async fn list(&self, session: &SessionId) -> Result<Vec<ScheduleEntry>, ToolOutputError> {
+        self.listed.lock().unwrap().push(session.clone());
         Ok(vec![entry("a", "digest", false), entry("b", "beat", true)])
     }
 
-    async fn cancel(&self, id: &str) -> Result<bool, ToolOutputError> {
-        self.cancelled.lock().unwrap().push(id.into());
+    async fn cancel(&self, session: &SessionId, id: &str) -> Result<bool, ToolOutputError> {
+        let call = (session.clone(), id.to_owned());
+        self.cancelled.lock().unwrap().push(call);
         Ok(id == "a")
     }
 }
@@ -175,7 +178,7 @@ async fn create_refuses_a_bad_timing_before_the_backend() {
 }
 
 #[tokio::test]
-async fn list_and_cancel_say_what_python_says() {
+async fn list_and_cancel_say_what_python_says_for_the_calling_session() {
     let (fake, tools) = tools();
     let listed = text(call(find(&tools, "ListSchedules"), json!({}), None).await);
     assert_eq!(
@@ -190,7 +193,10 @@ async fn list_and_cancel_say_what_python_says() {
     );
     let error = call(cancel, json!({"id": "zz"}), None).await.unwrap_err();
     assert_eq!(error.message, "No schedule zz");
-    assert_eq!(*fake.cancelled.lock().unwrap(), ["a", "zz"]);
+    // Both see only the calling run's session, as Python's tools do.
+    assert_eq!(*fake.listed.lock().unwrap(), [SessionId::from("chat")]);
+    let chat = |id: &str| (SessionId::from("chat"), id.to_owned());
+    assert_eq!(*fake.cancelled.lock().unwrap(), [chat("a"), chat("zz")]);
 }
 
 #[tokio::test]
@@ -201,10 +207,10 @@ async fn an_empty_list_says_so() {
         async fn create(&self, _: NewSchedule) -> Result<ScheduleEntry, ToolOutputError> {
             unreachable!()
         }
-        async fn list(&self) -> Result<Vec<ScheduleEntry>, ToolOutputError> {
+        async fn list(&self, _: &SessionId) -> Result<Vec<ScheduleEntry>, ToolOutputError> {
             Ok(Vec::new())
         }
-        async fn cancel(&self, _: &str) -> Result<bool, ToolOutputError> {
+        async fn cancel(&self, _: &SessionId, _: &str) -> Result<bool, ToolOutputError> {
             unreachable!()
         }
     }

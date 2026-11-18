@@ -508,11 +508,11 @@ process khác hoặc một ngày sau.
 `principal` cho biết một run hành động thay cho ai: `{"tenant", "user", "roles"?}`
 (typed dict `Principal`). Các permission rule có `role` hoặc `unless_role` so khớp
 với các role của nó ([Tool](./tools.md#permission-rule)), và request của một
-callback `permission_request` mang theo nó. Hãy truyền nó cho `run`, và truyền lại
-cho từng `resume` và `approve`: mỗi lời gọi hành động thay cho principal mà nó
-được đưa, và lời gọi không có thì không hành động thay cho ai. Trên một server từ
-xa, `tenant` phải là tenant của kết nối
-([Server](./server.md#tenants-and-namespaces)).
+callback `permission_request` mang theo nó. Hãy truyền nó cho `run`: run giữ lại
+nó, và mỗi `resume`, `approve` và `answer` không nêu principal nào sẽ hành động
+thay cho nó, kể cả sau một sự cố hoặc từ một process khác. Lời gọi nêu một
+principal thì hành động thay cho principal đó. Trên một server từ xa, `tenant`
+phải là tenant của kết nối ([Server](./server.md#tenants-and-namespaces)).
 
 ```python
 import asyncio

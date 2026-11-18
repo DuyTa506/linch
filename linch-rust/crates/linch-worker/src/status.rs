@@ -24,7 +24,7 @@ pub enum JobState {
     /// session); it is tried again later. `error` says why.
     Retrying,
     /// It can never succeed; it is kept with its `error` and never tried
-    /// again.
+    /// again, until [`prune_history`] deletes it with the history.
     Failed,
     /// Its run ended, or suspended for an approval or an answer.
     Done,
@@ -192,22 +192,31 @@ pub async fn jobs(
     Ok(rows.into_iter().map(info).collect())
 }
 
-/// Delete the history of jobs that ended more than `older_than` ago.
-/// Failed jobs are not history: they stay until removed by hand.
+/// Delete the history of jobs that ended more than `older_than` ago, and
+/// the failed jobs (dead letters, never run again) that failed more than
+/// `older_than` ago: each is readable with [`job`] and [`jobs`] for as long
+/// as the other.
 ///
 /// Returns:
-///     How many history rows were deleted.
+///     How many history rows and failed jobs were deleted.
 ///
 /// Raises:
-///     WorkerError: If the delete fails.
+///     WorkerError: If a delete fails.
 pub async fn prune_history(pool: &PgPool, older_than: Duration) -> Result<u64, WorkerError> {
     let millis = i64::try_from(older_than.as_millis()).unwrap_or(i64::MAX);
-    let done = sqlx::query(
+    let history = sqlx::query(
         "DELETE FROM linch_worker_history \
          WHERE finished_at < now() - $1 * interval '1 millisecond'",
     )
     .bind(millis)
     .execute(pool)
     .await?;
-    Ok(done.rows_affected())
+    let failed = sqlx::query(
+        "DELETE FROM linch_worker_jobs \
+         WHERE failed_at < now() - $1 * interval '1 millisecond'",
+    )
+    .bind(millis)
+    .execute(pool)
+    .await?;
+    Ok(history.rows_affected() + failed.rows_affected())
 }

@@ -81,7 +81,7 @@ async fn open(store: Arc<dyn RunStore>) -> Journal {
     };
     let mut journal = Journal::new(store, lease, 0);
     let contract = "0".repeat(64).parse().unwrap();
-    let ready = journal.create(SessionId::new("s"), None, contract, started());
+    let ready = journal.create(SessionId::new("s"), None, None, contract, started());
     assert!(ready.await.unwrap().is_empty());
     journal
 }
@@ -103,7 +103,7 @@ async fn create_writes_the_staged_events_and_claims_the_run() {
     journal.stage(durable(1));
     journal.stage(receipt("a", CallDisposition::Accepted));
     let contract = "0".repeat(64).parse().unwrap();
-    let ready = journal.create(SessionId::new("s"), None, contract, started());
+    let ready = journal.create(SessionId::new("s"), None, None, contract, started());
     assert_eq!(
         seqs(&ready.await.unwrap()),
         [1],

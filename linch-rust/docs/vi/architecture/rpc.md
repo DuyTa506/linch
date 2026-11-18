@@ -282,7 +282,9 @@ cấu hình, từ chối các trường không biết và giới hạn bằng 0;
 | Tối đa `MAX_GUARDRAILS` (32) redaction rule và verifier, và keyword cho mỗi verifier, mỗi pattern tối đa `MAX_PATTERN_BYTES` (1024) byte: server biên dịch và chạy chúng trên mọi response | `redaction`, `verification` | `admit_guardrails` trong `admit.rs` |
 
 `principal` của một method run, khi được đưa ra, phải nêu tên tenant
-(`admit_principal`, `admit.rs:138-152`); server không tự điền nó.
+(`admit_principal`, `admit.rs:138-152`). Một resume, approve hoặc answer không có
+principal sẽ hành động thay cho principal được lưu cùng run khi nó bắt đầu
+(`continue_run` của lõi, từ `RunRecord::principal`).
 
 **Postgres.** `PgTarget::parse` (`crates/linch-rpc/src/access/allowlists.rs:137-174`)
 đọc một DSN theo cách store kết nối với nó, qua `PgConnectOptions` của sqlx,

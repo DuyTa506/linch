@@ -53,7 +53,7 @@ worker (không có `socket` hay `http`); khi đó các tenant của nó không c
 | `poll_interval_ms` | 1000 | Thời gian chờ dài nhất giữa các lần poll; các lịch đến hạn được kiểm tra mỗi interval một lần |
 | `visibility_timeout_ms` | 30000 | Một job đã được nhận vẫn bị ẩn bao lâu khi không có heartbeat. Hãy giữ `stores.lease_ttl_ms` của các agent không dài hơn mức này |
 | `retry_delay_ms` | 5000 | Thời gian chờ trước lần thử kế tiếp của một job thất bại; nhân đôi mỗi lần, tối đa 5 phút |
-| `history_retention_ms` | 7 ngày | Các job đã kết thúc còn đọc được bao lâu bằng `job` và `jobs` |
+| `history_retention_ms` | 7 ngày | Các job đã kết thúc và job thất bại còn đọc được bao lâu bằng `job` và `jobs` |
 | `local_namespaces` | không có | Các namespace root nằm ngoài mọi tenant mà nó cũng chạy job của, không kiểm tra (các lịch do một client stdio tạo); `dev` bao gồm `dev` và `dev/...` |
 
 Bạn có thể chạy bao nhiêu server như vậy trên một cơ sở dữ liệu tùy ý: mỗi lần kích hoạt
@@ -79,7 +79,7 @@ tenant trong lúc chạy; khi không còn chỗ, job chờ.
 |---|---|---|
 | `max_schedules` | không có lịch | Số lịch mà tenant được giữ trong mỗi cơ sở dữ liệu, trên các namespace của nó. Không có: `create_schedule` ném `NotAllowed` (`kind == "schedules"`); chạm mức trần thì `LimitReached` (`kind == "schedules"`) |
 | `min_schedule_interval_ms` | 60000 | Khoảng thời gian ngắn nhất giữa hai lần kích hoạt: một interval, hoặc các lần kích hoạt gần nhau nhất của một mẫu cron (trong 512 lần kích hoạt kế tiếp). Nhanh hơn: `NotAllowed` (`kind == "schedule_interval"`) |
-| `max_queued_jobs` | không có run nền | Số job chưa xong (đang chờ, đang chạy hoặc đang retry) mà tenant được có khi gọi `enqueue`. Không có: `NotAllowed` (`kind == "background_runs"`); chạm mức trần thì `LimitReached` (`kind == "jobs"`). Các lần kích hoạt không bị từ chối, chỉ được đếm |
+| `max_queued_jobs` | không có run nền | Số job chưa xong (đang chờ, đang chạy hoặc đang retry) mà tenant được có khi gọi `enqueue`. Không có: `NotAllowed` (`kind == "background_runs"`); chạm mức trần thì `LimitReached` (`kind == "jobs"`). Một lần kích hoạt của lịch chạm mức trần bị bỏ qua (được đếm trong `skips`), không bao giờ thất bại; job của nó tính vào mức trần. Không có: các lần kích hoạt không có mức trần |
 
 Một client stdio không có tenant và không có giới hạn.
 
@@ -145,7 +145,7 @@ async with Server.connect("unix:/run/linch/linch.sock", token=token) as server:
 Một `Schedule` là một dict: `id`, `namespace`, `queue`, `prompt`,
 `session_id` (chỉ với session cố định), `cron` và `timezone` hoặc
 `interval_ms`, `paused`, `next_fire`, `last_fire`, `fires` (các lần kích hoạt đã đưa một run
-vào hàng đợi), `skips` (các lần kích hoạt bị bỏ qua) và `created_at`.
+vào hàng đợi), `skips` (các lần kích hoạt không được thực hiện: bị bỏ qua khi đang bận hoặc chạm mức trần, hoặc bị lỡ khi mọi worker ngừng hoạt động) và `created_at`.
 
 ### Múi giờ
 
@@ -157,8 +157,11 @@ vào lần đầu. Một interval bỏ qua múi giờ.
 ### Session
 
 Không có `session_id`, mỗi lần kích hoạt bắt đầu session riêng của nó,
-`schedule:<id>:<fire time>`, nên các lần kích hoạt không bao giờ chia sẻ một cuộc hội thoại
-và có thể chạy cùng lúc.
+`schedule:<id>:<fire time>`, nên các lần kích hoạt không bao giờ chia sẻ một cuộc hội thoại.
+Một lần kích hoạt vẫn bị bỏ qua (được đếm trong `skips`) khi job của lần kích hoạt trước
+của lịch chưa xong (đang chờ, đang chạy hoặc đang retry), nên một hàng đợi tồn đọng không
+bao giờ chồng một job cho mỗi lần kích hoạt; một lần kích hoạt có run suspend để chờ một
+người thì không còn chặn lần kế tiếp.
 
 Có `session_id`, mỗi lần kích hoạt là một run mới trong session đó: một heartbeat.
 
@@ -238,8 +241,8 @@ theo dõi tiếp ("kiểm tra deploy mỗi giờ"):
 | Tool | Scope | Input | Làm gì |
 |---|---|---|---|
 | `CreateSchedule` | `exec` | `payload`, và `cron` (kèm `timezone` tùy chọn) hoặc `interval_s` | Một heartbeat của agent này trong session của run đang gọi; trả lời `Scheduled <id> at <next fire>` |
-| `ListSchedules` | `read` | không có | Các lịch của agent này, mỗi lịch một dòng: `<id>: <payload> enabled=<bool> next_fire=<time>` |
-| `CancelSchedule` | `write` | `id` | Xóa một lịch của agent này; các run đã nằm trong hàng đợi vẫn chạy xong |
+| `ListSchedules` | `read` | không có | Các lịch của agent này trong session của run đang gọi, mỗi lịch một dòng: `<id>: <payload> enabled=<bool> next_fire=<time>` |
+| `CancelSchedule` | `write` | `id` | Xóa một lịch của agent này trong session của run đang gọi; các run đã nằm trong hàng đợi vẫn chạy xong |
 
 ```python
 config = {
@@ -263,25 +266,36 @@ cho model nhiều hơn run đã tạo ra nó:
   đang gọi (một [heartbeat](#heartbeat-một-session-được-kiểm-tra-liên-tục), nên các lần
   kích hoạt bị bỏ qua khi session đang bận) và hành động thay cho principal của run đang
   gọi: permission rule theo `role` có hiệu lực với các lần kích hoạt như với run.
-  Một lời gọi đã hỏi sẽ chạy sau `approve` cho principal mà approve nêu tên, như mọi lời
-  gọi của phần tiếp tục đó: hãy approve với cùng principal bạn đã bắt đầu run.
+  Một lời gọi đã hỏi sẽ chạy sau `approve` cho principal của run: một approve không nêu
+  principal nào hành động thay cho principal đã bắt đầu run, và một approve nêu principal
+  khác thì hành động thay cho principal đó.
 - **Một lần cho mỗi lời gọi.** Id của lịch là `<run_id>:<tool_use_id>` của lời gọi, nên một
   lần retry cùng lời gọi tìm thấy lịch của nó thay vì tạo thêm một lịch khác.
 - **Cùng các mức trần.** Một lời gọi được chấp nhận như `create_schedule`: `max_schedules`
   của tenant (tính cả các lịch do client tạo) và `min_schedule_interval_ms`. Một lần từ chối
   là lỗi của tool, với mã `not_allowed`, `limit_reached` hoặc `invalid_schedule`; run vẫn
-  tiếp tục.
-- **Chỉ lịch của chính nó.** `ListSchedules` và `CancelSchedule` thấy các lịch của
-  namespace của agent chạy cùng cấu hình này, bất kể ai tạo: không phải của agent khác, cũng
-  không phải của namespace khác.
-- **Không từ subagent.** Một subagent có thể có ít tool hơn agent mà lịch chạy, nên
-  `CreateSchedule` của nó nhận một lỗi.
+  tiếp tục. Một lỗi của store là lỗi `the schedule store failed; try again later` (mã
+  `store`): nguyên nhân của nó, có thể nêu tên host cơ sở dữ liệu, đi vào log `tracing` của
+  server, không bao giờ đến model.
+- **Chỉ lịch trong session của chính nó.** `ListSchedules` và `CancelSchedule` thấy các lịch
+  của namespace của agent chạy cùng cấu hình này trong session của run đang gọi, như tool
+  của Python thấy các lịch của một session: không phải của session khác, không phải một lịch
+  không có session (lịch client tạo bằng `create_schedule` mà không có `session_id`), không
+  phải của agent khác, cũng không phải của namespace khác.
+- **Không từ subagent.** Một subagent, ở foreground hay background, có thể có ít tool hơn
+  agent mà lịch chạy, nên `CreateSchedule` của nó nhận một lỗi với mã `not_allowed`.
 - **Được hỏi như mọi exec tool.** `CreateSchedule` hỏi ở mode `default` và `accept_edits`.
   Một lần kích hoạt gọi nó mà không có ai để approve sẽ suspend; hãy cho các run nền một
   mode hoặc rule cho phép những gì chúng phải làm.
 
 Các lần kích hoạt xếp hàng trên queue `default`. Run của một lần kích hoạt cũng có các tool
 này, nên nó có thể lập lịch tiếp, trong cùng các mức trần.
+
+**Lỗ hổng đã biết: đổi cấu hình làm các lịch của nó mồ côi.** Các tool tìm lịch theo digest
+của cấu hình đã lưu. Mở lại agent với bất kỳ thay đổi nào trong cấu hình, thì `ListSchedules`
+và `CancelSchedule` không còn thấy các lịch mà run của cấu hình cũ đã tạo. Các lịch đó vẫn
+kích hoạt, chạy cấu hình cũ, và vẫn tính vào `max_schedules`. Hãy liệt kê chúng bằng
+`agent.schedules()` và xóa bằng `agent.delete_schedule(id)` (`schedule.delete`).
 
 `open_agent` từ chối `schedule_tools`:
 
@@ -306,10 +320,12 @@ một worker đang chạy. Worker cũng kiểm tra lại ở mỗi lần kích h
   visibility timeout, được heartbeat của worker nó gia hạn. Job của một worker đã sập hiện
   lại và một worker khác nhận nó; lease và epoch của run chặn chủ cũ ra ngoài, và run
   resume từ trạng thái bền vững cuối cùng của nó ([Run](./runs.md)).
-- **Các lần kích hoạt bị lỡ được bù.** Sau khi mọi worker ngừng hoạt động, một lịch kích
-  hoạt từng tick mà nó đã lỡ, theo thứ tự, mỗi lần poll một lần, như Python Linch. Một
-  heartbeat bỏ qua chúng trong lúc lần kích hoạt bù đầu tiên của nó chạy, nên nó chỉ chạy
-  một lần. Các lần kích hoạt bị lỡ khi đang tạm dừng không được thực hiện.
+- **Các lần kích hoạt bị lỡ gộp thành một.** Sau khi mọi worker ngừng hoạt động, một lịch
+  kích hoạt một lần, ở tick đầu tiên nó đã lỡ, đếm các tick bị lỡ còn lại vào `skips`, và
+  lần kích hoạt kế tiếp của nó là tick đầu tiên sau bây giờ. Python Linch kích hoạt mọi tick
+  bị lỡ; ở đây một ngày ngừng hoạt động với lịch mỗi phút sẽ đưa khoảng 1.440 run vào hàng
+  đợi, mỗi run đều tốn tiền, nên điểm này khác có chủ ý. Các lần kích hoạt bị lỡ khi đang
+  tạm dừng không được thực hiện.
 - **Xóa một lịch chỉ dừng các lần kích hoạt trong tương lai.** Các job đang chờ và đang
   chạy của nó vẫn hoàn tất.
 
@@ -338,7 +354,7 @@ Tất cả đều là `SchedulerError` trừ hai cái cuối.
 | Host truyền một `agent_factory` cho `Worker` của nó | Cấu hình của agent được lưu cùng lịch; worker của server mở nó |
 | `RunRequest.principal` được worker khôi phục | `principal=` trên `create_schedule` và `enqueue`, được đưa cho run của mọi lần kích hoạt |
 | `register_schedule_tools` cho phép model lập lịch; host gắn một session | `schedule_tools: True`: server gắn agent, session của nó là session của run đang gọi ([bên dưới](#để-model-lập-lịch)) |
-| Các lần kích hoạt bị lỡ được bù theo thứ tự | Giống nhau |
+| Các lần kích hoạt bị lỡ được bù theo thứ tự, mỗi tick một run | Các lần kích hoạt bị lỡ gộp thành một run; phần còn lại được đếm trong `skips` (không chi phí tăng vọt sau thời gian ngừng hoạt động) |
 
 ## Các trang liên quan
 

@@ -327,3 +327,78 @@ async fn an_approve_after_its_answers_were_committed_is_refused_and_resume_conti
     assert_eq!(fixture.runs.lock().unwrap()["call_0_0"], 1);
     assert_eq!(fixture.status(&run_id).await, RunStatus::Completed);
 }
+
+/// A Write rule that denies every principal without `admin`, in mode
+/// `default`: an admin's call asks, anyone else's is denied.
+fn admins_only() -> PermissionEngine {
+    let mut strict = PermissionPolicy::new(PermissionMode::Default, "/");
+    let mut rule = ToolRule::new("Write", RuleDecision::Deny);
+    rule.unless_role = Some("admin".into());
+    strict.layers = vec![PermissionLayer::new("runtime", [Rule::Tool(rule)])];
+    PermissionEngine::new(strict).unwrap()
+}
+
+fn admin() -> Principal {
+    Principal::new("acme", "ada", ["admin"]).unwrap()
+}
+
+/// Start the run for an admin; its call asks, so it suspends.
+async fn suspend_for_admin(fixture: &Fixture) -> RunId {
+    let mut options = RunOptions::new("s1");
+    options.principal = Some(admin());
+    let stream = fixture.agent(admins_only()).run("go", options);
+    let run_id = stream.run_id().clone();
+    assert_eq!(pending(&finish(stream).await), ["call_0_0"]);
+    run_id
+}
+
+/// The run keeps the principal it was started for, and an approve that
+/// names none acts for it: leaving the principal out cannot escape a role
+/// rule.
+#[tokio::test]
+async fn an_approve_without_a_principal_acts_for_the_start_principal() {
+    let fixture = Fixture::new(1);
+    let run_id = suspend_for_admin(&fixture).await;
+    let record = fixture.stores.runs.load(NS, &run_id).await.unwrap();
+    assert_eq!(record.principal, Some(admin()));
+    let allow = answers(&[("call_0_0", ApprovalResponse::Allow)]);
+    let agent = fixture.agent(admins_only());
+    let envelopes = finish(agent.approve(run_id, allow, RunOptions::new("s1"))).await;
+    assert_eq!(subtype(&envelopes), ResultSubtype::Success);
+    assert_eq!(fixture.results().await, ["v0.0"]);
+}
+
+/// An approve that names a principal acts for that one instead.
+#[tokio::test]
+async fn an_approve_that_names_a_principal_acts_for_it() {
+    let fixture = Fixture::new(1);
+    let run_id = suspend_for_admin(&fixture).await;
+    let allow = answers(&[("call_0_0", ApprovalResponse::Allow)]);
+    let mut options = RunOptions::new("s1");
+    options.principal = Some(Principal::new("acme", "eve", ["intern"]).unwrap());
+    finish(fixture.agent(admins_only()).approve(run_id, allow, options)).await;
+    let results = fixture.results().await;
+    assert!(results[0].starts_with("Tool call denied"), "{results:?}");
+}
+
+/// A resume after a crash, naming no principal, still acts for the start
+/// principal.
+#[tokio::test]
+async fn a_resume_after_a_crash_keeps_the_start_principal() {
+    let fixture = Fixture::new(1);
+    let run_id = suspend_for_admin(&fixture).await;
+    let allow = answers(&[("call_0_0", ApprovalResponse::Allow)]);
+    // Fail before the call starts: the answers are durable, the call not.
+    let faulty = Arc::new(Faulty::new(fixture.stores.clone(), 3, FaultTiming::Before));
+    let tools = registry(vec![Echo::new("Write", ToolScope::Write, &fixture.runs)]);
+    let crashing = agent(fixture.provider.clone(), tools, admins_only(), faulty);
+    let mut options = RunOptions::new("s1");
+    options.principal = Some(admin());
+    let (_, error) = drain(crashing.approve(run_id.clone(), allow, options)).await;
+    assert!(error.is_some(), "the approve must fail");
+    assert!(fixture.runs.lock().unwrap().is_empty());
+    let agent = fixture.agent(admins_only());
+    let envelopes = finish(agent.resume(run_id, RunOptions::new("s1"))).await;
+    assert_eq!(subtype(&envelopes), ResultSubtype::Success);
+    assert_eq!(fixture.results().await, ["v0.0"]);
+}

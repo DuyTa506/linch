@@ -55,7 +55,7 @@ no token.
 | `poll_interval_ms` | 1000 | Longest wait between polls; due schedules are checked once per interval |
 | `visibility_timeout_ms` | 30000 | How long a taken job stays hidden without a heartbeat. Keep the agents' `stores.lease_ttl_ms` no longer |
 | `retry_delay_ms` | 5000 | Wait before a failed job's next attempt; doubles each time, at most 5 minutes |
-| `history_retention_ms` | 7 days | How long ended jobs stay readable with `job` and `jobs` |
+| `history_retention_ms` | 7 days | How long ended and failed jobs stay readable with `job` and `jobs` |
 | `local_namespaces` | none | Namespace roots outside every tenant whose jobs it also runs, without checks (schedules a stdio client made); `dev` covers `dev` and `dev/...` |
 
 Run as many such servers on one database as you like: each fire is queued
@@ -83,7 +83,7 @@ job fails with the reason. Each background run takes one of the tenant's
 |---|---|---|
 | `max_schedules` | no schedules | Schedules the tenant may keep in each database, across its namespaces. Absent: `create_schedule` raises `NotAllowed` (`kind == "schedules"`); at the cap, `LimitReached` (`kind == "schedules"`) |
 | `min_schedule_interval_ms` | 60000 | The shortest time between two fires: an interval, or the closest fires of a cron pattern (over its next 512 fires). Faster: `NotAllowed` (`kind == "schedule_interval"`) |
-| `max_queued_jobs` | no background runs | Unfinished jobs (queued, running or retrying) the tenant may have when it calls `enqueue`. Absent: `NotAllowed` (`kind == "background_runs"`); at the cap, `LimitReached` (`kind == "jobs"`). Fires are not refused, only counted |
+| `max_queued_jobs` | no background runs | Unfinished jobs (queued, running or retrying) the tenant may have when it calls `enqueue`. Absent: `NotAllowed` (`kind == "background_runs"`); at the cap, `LimitReached` (`kind == "jobs"`). A schedule's fire at the cap is skipped (counted in `skips`), never failed; its jobs count toward the cap. Absent, fires have no cap |
 
 A stdio client has no tenant and no caps.
 
@@ -153,7 +153,8 @@ async with Server.connect("unix:/run/linch/linch.sock", token=token) as server:
 A `Schedule` is a dict: `id`, `namespace`, `queue`, `prompt`,
 `session_id` (fixed sessions only), `cron` and `timezone` or
 `interval_ms`, `paused`, `next_fire`, `last_fire`, `fires` (fires that
-queued a run), `skips` (fires skipped) and `created_at`.
+queued a run), `skips` (fires not made: skipped while busy or at a cap, or
+missed while every worker was down) and `created_at`.
 
 ### Time zones
 
@@ -165,8 +166,11 @@ they go back) fires once, the first time. An interval ignores time zones.
 ### Sessions
 
 Without `session_id`, each fire starts its own session,
-`schedule:<id>:<fire time>`, so fires never share a conversation and may
-run at the same time.
+`schedule:<id>:<fire time>`, so fires never share a conversation. A fire
+is still skipped (counted in `skips`) while the schedule's previous fire's
+job is unfinished (queued, running or retrying), so a backlog never stacks
+a job per fire; a fire whose run suspended for a person no longer blocks
+the next.
 
 With `session_id`, every fire is a new run in that session: a heartbeat.
 
@@ -247,8 +251,8 @@ it can schedule its own follow-ups ("check the deploy every hour"):
 | Tool | Scope | Input | Does |
 |---|---|---|---|
 | `CreateSchedule` | `exec` | `payload`, and `cron` (with an optional `timezone`) or `interval_s` | A heartbeat of this agent in the calling run's session; answers `Scheduled <id> at <next fire>` |
-| `ListSchedules` | `read` | none | This agent's schedules, one line each: `<id>: <payload> enabled=<bool> next_fire=<time>` |
-| `CancelSchedule` | `write` | `id` | Deletes one of this agent's schedules; runs it already queued finish |
+| `ListSchedules` | `read` | none | This agent's schedules in the calling run's session, one line each: `<id>: <payload> enabled=<bool> next_fire=<time>` |
+| `CancelSchedule` | `write` | `id` | Deletes one of this agent's schedules in the calling run's session; runs it already queued finish |
 
 ```python
 config = {
@@ -273,26 +277,41 @@ had:
   calling run's session (a [heartbeat](#heartbeat-one-session-checked-in-on),
   so fires skip while the session is busy) and acts for the calling run's
   principal: permission rules on `role` hold for the fires as for the run.
-  A call that asked runs after `approve` for the principal the approve
-  names, as every call of that continuation does: approve with the same
-  principal you started the run with.
+  A call that asked runs after `approve` for the run's principal: an
+  approve that names none acts for the principal the run was started
+  with, and one that names another acts for that one.
 - **Once per call.** The schedule id is the call's `<run_id>:<tool_use_id>`,
   so a retry of the same call finds its schedule instead of making another.
 - **The same caps.** A call is admitted as `create_schedule` is: the
   tenant's `max_schedules` (counting the schedules the client made) and
   `min_schedule_interval_ms`. A refusal is the tool's error, with code
   `not_allowed`, `limit_reached` or `invalid_schedule`; the run goes on.
-- **Its own schedules only.** `ListSchedules` and `CancelSchedule` see the
-  schedules of the agent's namespace that run this same config, whoever
-  made them: not another agent's, nor another namespace's.
-- **Not from a subagent.** A subagent may hold fewer tools than the agent a
-  schedule runs, so its `CreateSchedule` gets an error.
+  A failure of the store is the error `the schedule store failed; try
+  again later` (code `store`): its cause, which can name the database
+  host, goes to the server's `tracing` log, never to the model.
+- **Its own session's schedules only.** `ListSchedules` and
+  `CancelSchedule` see the schedules of the agent's namespace that run this
+  same config in the calling run's session, as Python's tools see one
+  session's: not another session's, not a schedule without a session (one
+  the client made with `create_schedule` and no `session_id`), not another
+  agent's, nor another namespace's.
+- **Not from a subagent.** A subagent, in the foreground or the
+  background, may hold fewer tools than the agent a schedule runs, so its
+  `CreateSchedule` gets an error with code `not_allowed`.
 - **Asked like any exec tool.** `CreateSchedule` asks in modes `default` and
   `accept_edits`. A fire that calls it with nobody to approve suspends;
   give the background runs a mode or rules that allow what they must do.
 
 The fires queue on the `default` queue. A fire's run has the tools too,
 so it can schedule again, within the same caps.
+
+**Known gap: a changed config orphans its schedules.** The tools find
+schedules by the digest of the stored config. Open the agent again with
+any change to its config, and `ListSchedules` and `CancelSchedule` no
+longer see the schedules the old config's runs made. Those schedules
+still fire, running the old config, and count toward `max_schedules`.
+List them with `agent.schedules()` and remove them with
+`agent.delete_schedule(id)` (`schedule.delete`).
 
 `open_agent` refuses `schedule_tools`:
 
@@ -318,10 +337,12 @@ fire: a tenant whose `max_schedules` was removed fails the fire's job.
   worker's job becomes visible again and another worker takes it; the run's
   lease and epoch fence the old holder out, and the run resumes from its
   last durable state ([Runs](./runs.md)).
-- **Missed fires are caught up.** After every worker was down, a schedule
-  fires each tick it missed, in order, one per poll, as Python Linch does. A
-  heartbeat skips them while its first catch-up fire runs, so it runs once.
-  Fires missed while paused are not made.
+- **Missed fires coalesce into one.** After every worker was down, a
+  schedule fires once, at the first tick it missed, counts the other missed
+  ticks in `skips`, and its next fire is the first tick after now. Python
+  Linch fires every missed tick instead; here a day of downtime under a
+  one-minute schedule would queue some 1,440 runs, each paid for, so this
+  differs on purpose. Fires missed while paused are not made.
 - **Deleting a schedule stops only future fires.** Its queued and running
   jobs finish.
 
@@ -350,7 +371,7 @@ All are `SchedulerError`s except the last two.
 | The host passes an `agent_factory` to its `Worker` | The agent's config is stored with the schedule; the server's worker opens it |
 | `RunRequest.principal` is restored by the worker | `principal=` on `create_schedule` and `enqueue`, given to every fire's run |
 | `register_schedule_tools` lets the model schedule; the host binds a session | `schedule_tools: True`: the server binds the agent, its session is the calling run's ([below](#let-the-model-schedule)) |
-| Missed fires catch up in order | The same |
+| Missed fires catch up in order, one run each | Missed fires coalesce into one run; the rest count in `skips` (no runaway cost after downtime) |
 
 ## Related pages
 

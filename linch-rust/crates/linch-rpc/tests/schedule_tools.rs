@@ -130,6 +130,26 @@ async fn schedule_tools_need_a_tenant_with_schedules_and_a_background_agent() {
     assert_eq!(not_background(refused), "host_tools");
 }
 
+/// A worker built from the tenants skips a fire at the tenant's
+/// `max_queued_jobs`: the factory hands it the caps. A tenant without one
+/// has none.
+#[test]
+fn background_agents_cap_fires_at_max_queued_jobs() {
+    let dir = tempfile::tempdir().unwrap();
+    let capped = allow(dir.path()).max_queued_jobs(Some(3));
+    let acme = Arc::new(Tenant::new("acme", capped).unwrap());
+    let beta = Arc::new(Tenant::new("beta", allow(dir.path())).unwrap());
+    let factory = BackgroundAgents::new("postgres://localhost/x")
+        .tenant(acme)
+        .tenant(beta)
+        .local("dev");
+    let acme = linch_worker::Cap {
+        root: "acme".into(),
+        max: 3,
+    };
+    assert_eq!(factory.job_caps(), [acme]);
+}
+
 /// A run on `agent` in `session` for `principal`, to its end.
 async fn run(rpc: &mut Rpc, agent: &str, session: &str, principal: Value) -> Vec<Envelope> {
     let params = json!({"agent": agent, "session_id": session, "prompt": "Go.",
@@ -406,9 +426,9 @@ async fn the_tenant_caps_hold_through_the_tool() {
         said[4].0 && said[4].1.contains("already holds its 2 schedules"),
         "{said:?}"
     );
-    // The client's schedule is the same agent's, so the model sees it.
+    // The client's schedule has no session, so the model does not see it.
     let listing = &said[5].1;
-    assert!(listing.contains("client: p enabled=true"), "{listing}");
+    assert!(!listing.contains("client"), "{listing}");
     assert!(listing.contains(": hourly enabled=true"), "{listing}");
     // And the client meets the cap the model filled.
     let refused = rpc
@@ -425,10 +445,12 @@ async fn the_tenant_caps_hold_through_the_tool() {
     db.drop().await;
 }
 
-/// The model lists and cancels only its own agent's schedules: not those
-/// of another config in its namespace, nor of another namespace.
+/// The model lists and cancels only its own agent's schedules in its own
+/// session, as Python's tools do: not those of another session or none
+/// (the client's), of another config in its namespace, nor of another
+/// namespace.
 #[tokio::test]
-async fn the_model_reaches_only_its_own_agents_schedules() {
+async fn the_model_reaches_only_its_own_agents_schedules_in_its_session() {
     let Some(db) = TestDb::empty("stools_scope").await else {
         return;
     };
@@ -439,7 +461,9 @@ async fn the_model_reaches_only_its_own_agents_schedules() {
         tool_turn("l1", "ListSchedules", json!({})),
         tool_turn("x1", "CancelSchedule", json!({"id": "theirs"})),
         tool_turn("x2", "CancelSchedule", json!({"id": "support"})),
-        tool_turn("x3", "CancelSchedule", json!({"id": "mine"})),
+        tool_turn("x3", "CancelSchedule", json!({"id": "client"})),
+        tool_turn("x4", "CancelSchedule", json!({"id": "elsewhere"})),
+        tool_turn("x5", "CancelSchedule", json!({"id": "mine"})),
         text_turn("done"),
     ];
     let on = on_postgres(config(turns, "acme", dir.path()), &db);
@@ -450,25 +474,48 @@ async fn the_model_reaches_only_its_own_agents_schedules() {
     let mut support = on;
     support["namespace"] = json!("acme/support");
     let support = rpc.open(support).await;
-    let hourly = |agent: &str, id: &str| json!({"agent": agent, "id": id, "prompt": id, "cron": "0 * * * *"});
-    for (handle, id) in [(&agent, "mine"), (&other, "theirs"), (&support, "support")] {
-        rpc.call(method::SCHEDULE_CREATE, hourly(handle, id))
+    let hourly = |agent: &str, id: &str, session: Option<&str>| {
+        json!({"agent": agent, "id": id, "prompt": id, "cron": "0 * * * *",
+               "session_id": session})
+    };
+    for (handle, id, session) in [
+        (&agent, "mine", Some("s")),
+        (&agent, "client", None),
+        (&agent, "elsewhere", Some("other")),
+        (&other, "theirs", Some("s")),
+        (&support, "support", Some("s")),
+    ] {
+        rpc.call(method::SCHEDULE_CREATE, hourly(handle, id, session))
             .await
             .unwrap();
     }
     let ada = json!({"tenant": "acme", "user": "ada", "roles": []});
     let said = results(&run(&mut rpc, &agent, "s", ada).await);
     assert!(said[0].1.starts_with("mine: mine enabled=true"), "{said:?}");
-    assert!(!said[0].1.contains("theirs") && !said[0].1.contains("support"));
-    assert_eq!(said[1], (true, "No schedule theirs".to_owned()));
-    assert_eq!(said[2], (true, "No schedule support".to_owned()));
-    assert_eq!(said[3], (false, "Cancelled mine".to_owned()));
-    for (handle, id) in [(&other, "theirs"), (&support, "support")] {
+    assert_eq!(said[0].1.lines().count(), 1, "{said:?}");
+    for (at, id) in [
+        (1, "theirs"),
+        (2, "support"),
+        (3, "client"),
+        (4, "elsewhere"),
+    ] {
+        assert_eq!(said[at], (true, format!("No schedule {id}")));
+    }
+    assert_eq!(said[5], (false, "Cancelled mine".to_owned()));
+    // `schedule.list` shows each namespace's schedules: only `mine` is gone.
+    let ids = |listed: Value| -> Vec<String> {
+        let listed: Schedules = serde_json::from_value(listed).unwrap();
+        listed.schedules.into_iter().map(|s| s.id).collect()
+    };
+    for (handle, left) in [
+        (&agent, vec!["client", "elsewhere", "theirs"]),
+        (&support, vec!["support"]),
+    ] {
         let listed = rpc
             .call(method::SCHEDULE_LIST, json!({"agent": handle}))
             .await
             .unwrap();
-        assert_eq!(listed["schedules"][0]["id"], json!(id));
+        assert_eq!(ids(listed), left);
     }
     db.drop().await;
 }
@@ -505,11 +552,89 @@ async fn a_subagent_cannot_create_schedules() {
     let envelopes = run(&mut rpc, &agent, "s", ada).await;
     let log = serde_json::to_string(&envelopes).unwrap();
     assert!(log.contains("a subagent cannot create schedules"), "{log}");
+    assert_eq!(child_codes(&rpc, &agent, &db).await, ["not_allowed"]);
     let listed = rpc
         .call(method::SCHEDULE_LIST, json!({"agent": agent}))
         .await
         .unwrap();
     assert_eq!(listed, json!({"schedules": []}));
+    db.drop().await;
+}
+
+/// The error code of each tool result of every child run in the database.
+async fn child_codes(rpc: &Rpc, agent: &str, db: &TestDb) -> Vec<String> {
+    let pool = pool(db).await;
+    let children: Vec<String> =
+        sqlx::query_scalar("SELECT run_id FROM linch_runs WHERE parent_run_id IS NOT NULL")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert!(!children.is_empty(), "a child ran");
+    let mut found = Vec::new();
+    for child in children {
+        let params = json!({"agent": agent, "run_id": child});
+        let events = rpc.call(method::RUN_EVENTS, params).await.unwrap();
+        let events: Events = serde_json::from_value(events).unwrap();
+        found.extend(codes(&events.events).into_iter().flatten());
+    }
+    found
+}
+
+/// A background subagent's call is refused too, with `not_allowed`: its
+/// durable child run is a child run however it was started. The parent's
+/// own call, racing it for the scripted turns, makes the only schedule.
+#[tokio::test]
+async fn a_background_subagent_cannot_create_schedules() {
+    let Some(db) = TestDb::empty("stools_bg_child").await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let allowed = allow_pg(dir.path(), &db).max_schedules(Some(4));
+    let mut rpc = Rpc::remote(tenant("acme", allowed));
+    let spawn = json!({"description": "schedule", "prompt": "Schedule it.",
+                       "run_in_background": true});
+    let create = || {
+        tool_turn(
+            "c1",
+            "CreateSchedule",
+            json!({"payload": "p", "interval_s": 3600}),
+        )
+    };
+    // The parent and the child take the next turns in either order: both
+    // create, then both answer, then the parent hears of the child.
+    let turns = vec![
+        tool_turn("sub", "Subagent", spawn),
+        create(),
+        create(),
+        text_turn("done"),
+        text_turn("done"),
+        text_turn("done"),
+    ];
+    let mut on = on_postgres(config(turns, "acme", dir.path()), &db);
+    on["subagents"] = json!(true);
+    on["workers"] = json!({"background": true});
+    on["config_dir"] = json!(dir.path());
+    let agent = rpc.open(on).await;
+    let ada = json!({"tenant": "acme", "user": "ada", "roles": []});
+    let params = json!({"agent": agent, "session_id": "s", "prompt": "Go.", "principal": ada});
+    let run_id = rpc.accepted(method::RUN_START, params).await;
+    let ended = rpc.until_end(&run_id).await;
+    assert!(ended.error.is_none(), "{:?}", ended.error);
+    // The child may take one or both of the create turns: each is refused.
+    let refused = child_codes(&rpc, &agent, &db).await;
+    assert!(
+        !refused.is_empty() && refused.iter().all(|c| c == "not_allowed"),
+        "{refused:?}"
+    );
+    let listed = rpc
+        .call(method::SCHEDULE_LIST, json!({"agent": agent}))
+        .await
+        .unwrap();
+    let listed: Schedules = serde_json::from_value(listed).unwrap();
+    assert!(
+        (listed.schedules.iter()).all(|s| s.id.starts_with(run_id.as_str())),
+        "only the parent's: {listed:?}"
+    );
     db.drop().await;
 }
 
@@ -601,6 +726,95 @@ async fn an_approved_call_stores_the_principal_it_runs_for() {
     assert_eq!(
         serde_json::from_str::<Value>(&principal.unwrap()).unwrap(),
         ada
+    );
+    db.drop().await;
+}
+
+/// A run started for a guest suspends on its `CreateSchedule`; an approve
+/// that names no principal acts for the guest, so the schedule stores the
+/// guest and a rule on `role: guest` still holds at every fire.
+#[tokio::test]
+async fn an_approve_without_a_principal_keeps_the_guests_rules_at_fire_time() {
+    let Some(db) = TestDb::empty("stools_guest").await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let allowed = allow_pg(dir.path(), &db)
+        .max_schedules(Some(1))
+        .max_queued_jobs(Some(4))
+        .min_schedule_interval(Duration::from_millis(100));
+    let acme = Arc::new(Tenant::new("acme", allowed).unwrap());
+    let mut rpc = Rpc::remote(Access::Tenant(Arc::clone(&acme).connect().unwrap()));
+    let turns = vec![
+        tool_turn("l1", "ListSchedules", json!({})),
+        tool_turn(
+            "c1",
+            "CreateSchedule",
+            json!({"payload": "Check in.", "interval_s": 0.2}),
+        ),
+        text_turn("done"),
+    ];
+    let mut on = on_postgres(config(turns, "acme", dir.path()), &db);
+    on["permissions"]["mode"] = json!("default");
+    let deny = json!({"type": "tool", "tool": "ListSchedules", "decision": "deny",
+                      "role": "guest"});
+    on["permissions"]["layers"] = json!([{"name": "tenant", "rules": [deny]}]);
+    let agent = rpc.open(on).await;
+    let guest = json!({"tenant": "acme", "user": "gus", "roles": ["guest"]});
+    let params = json!({"agent": agent, "session_id": "chat", "prompt": "Go.",
+                        "principal": guest});
+    let run_id = rpc.accepted(method::RUN_START, params).await;
+    let ended = rpc.until_end(&run_id).await;
+    assert!(
+        matches!(ended.last(), Event::Suspended(_)),
+        "{:?}",
+        ended.last()
+    );
+    assert!(results(&ended.envelopes)[0].0, "the guest's list is denied");
+    // No principal on the approve.
+    let approve = json!({"agent": agent, "run_id": run_id,
+                         "decisions": {"c1": {"decision": "allow"}}});
+    rpc.accepted(method::RUN_APPROVE, approve).await;
+    let ended = rpc.until_end(&run_id).await;
+    assert_eq!(codes(&ended.envelopes), [None]);
+    let pool = pool(&db).await;
+    let principal: Option<String> =
+        sqlx::query_scalar("SELECT principal FROM linch_worker_schedules")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let stored = principal.expect("the schedule acts for the guest");
+    assert_eq!(serde_json::from_str::<Value>(&stored).unwrap(), guest);
+
+    let factory = BackgroundAgents::new(db.dsn.clone()).tenant(Arc::clone(&acme));
+    let shutdown = CancellationToken::new();
+    let worker = Worker::new(pool.clone(), worker_config("w1"))
+        .definitions(factory.roots(), Arc::new(factory));
+    let running = tokio::spawn(worker.run(shutdown.clone()));
+    let listed = rpc
+        .call(method::SCHEDULE_LIST, json!({"agent": agent}))
+        .await
+        .unwrap();
+    let listed: Schedules = serde_json::from_value(listed).unwrap();
+    let id = listed.schedules[0].id.clone();
+    let fire = first_fire(&rpc, &agent, &id).await;
+    rpc.call(method::SCHEDULE_DELETE, json!({"agent": agent, "id": id}))
+        .await
+        .unwrap();
+    shutdown.cancel();
+    running.await.unwrap().unwrap();
+    let events = rpc
+        .call(
+            method::RUN_EVENTS,
+            json!({"agent": agent, "run_id": fire.run_id.unwrap()}),
+        )
+        .await
+        .unwrap();
+    let events: Events = serde_json::from_value(events).unwrap();
+    let said = results(&events.events);
+    assert!(
+        said[0].0,
+        "the fire's list is denied to the guest: {said:?}"
     );
     db.drop().await;
 }

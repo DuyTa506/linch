@@ -283,7 +283,9 @@ config, refusing unknown fields and a cap of 0; `tokens`
 | At most `MAX_GUARDRAILS` (32) redaction rules and verifiers, and keywords per verifier, each pattern at most `MAX_PATTERN_BYTES` (1024) bytes: the server compiles and runs them on every response | `redaction`, `verification` | `admit_guardrails` in `admit.rs` |
 
 A run method's `principal`, when given, must name the tenant
-(`admit_principal`, `admit.rs:138-152`); the server does not fill one in.
+(`admit_principal`, `admit.rs:138-152`). A resume, approve or answer
+without one acts for the principal stored with the run when it started
+(core's `continue_run`, from `RunRecord::principal`).
 
 **Postgres.** `PgTarget::parse` (`crates/linch-rpc/src/access/allowlists.rs:137-174`)
 reads a DSN the way the store connects with it, through sqlx's
