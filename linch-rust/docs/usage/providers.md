@@ -533,6 +533,8 @@ What a run does after a retryable failure:
    call answers from the start, so drop what you showed of it.
 2. Then, with a fallback left, it sends a `ModelFallbackEvent` (`from_model`,
    `to_model`, `error`) and calls the fallback at once, with its own retries.
+   The failed call's text is void here too: the event comes after its deltas
+   and before the fallback's.
    The run keeps that model for the rest of the run, compaction included. A
    turn that failed over calls the fallback even if a skill set its model.
 3. Otherwise the run ends with the last failure's `error`.

@@ -117,6 +117,32 @@ async fn after_its_retries_a_model_fails_over_to_the_next() {
     );
 }
 
+/// A stream that broke after its deltas and has no retry left is voided by
+/// the `model_fallback` event, as a retry is by `provider_retry`: it comes
+/// after the failed model's deltas and before the fallback's.
+#[tokio::test]
+async fn a_fallback_event_separates_the_void_deltas_from_the_next_model() {
+    let mut broken = TurnBuilder::new(MODEL).text("parti").build();
+    broken.events.pop();
+    broken.error = Some(ScriptedError::Transport {
+        message: "connection reset".into(),
+    });
+    let provider = Arc::new(Flaky::new(vec![text_turn("whole")]).fail(0, MODEL, broken));
+    let agent = priced(failing_over(1), provider, Arc::new(Stores::default()));
+    let envelopes = finish(agent.run("go", RunOptions::new("s1"))).await;
+    let stream: Vec<String> = (envelopes.iter())
+        .filter_map(|e| match &e.event {
+            Event::PartialAssistant(partial) => Some(format!("text:{}", partial.delta["text"])),
+            Event::ModelFallback(_) => Some("model_fallback".into()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        stream,
+        [r#"text:"parti""#, "model_fallback", r#"text:"whole""#]
+    );
+}
+
 /// The run keeps the model it failed over to: later turns call it first.
 /// Without a retry policy, a failure fails over at once.
 #[tokio::test]

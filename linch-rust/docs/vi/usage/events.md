@@ -379,7 +379,8 @@ lại từ đầu.
 Run đã bỏ một model và gọi model kế tiếp trong
 [`spec.fallback_models`](./providers.md#lỗi-và-thử-lại) cho đến hết run:
 `from_model`, `to_model` và `error` (lỗi đã kết thúc các lời gọi của `from_model`).
-Event của Python Linch có chuỗi `reason` thay cho `error`.
+Event của Python Linch có chuỗi `reason` thay cho `error`. Như với `provider_retry`,
+hãy bỏ phần văn bản dở dang của lời gọi lỗi: model fallback trả lời lại từ đầu.
 
 ### `VerificationEvent` (`verification`)
 

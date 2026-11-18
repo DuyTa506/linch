@@ -526,6 +526,8 @@ Một run làm gì sau một lỗi có thể thử lại:
    phần bạn đã hiển thị của nó.
 2. Sau đó, nếu còn fallback, nó gửi một `ModelFallbackEvent` (`from_model`,
    `to_model`, `error`) và gọi ngay model fallback, với số lần thử lại riêng của nó.
+   Văn bản của lời gọi lỗi cũng vô hiệu ở đây: event đến sau các delta của nó và
+   trước các delta của fallback.
    Run giữ model đó cho đến hết run, kể cả compaction. Một turn đã chuyển sang
    fallback sẽ gọi fallback ngay cả khi một skill đặt model.
 3. Nếu không thì run kết thúc với `error` của lỗi cuối cùng.

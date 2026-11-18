@@ -383,7 +383,8 @@ The run gave up on a model and calls the next of
 [`spec.fallback_models`](./providers.md#failures-and-retries) for the rest of
 the run: `from_model`, `to_model` and `error` (the failure that ended
 `from_model`'s calls). Python Linch's event has a `reason` string in place of
-`error`.
+`error`. As for `provider_retry`, discard the partial text of the failed call:
+the fallback answers from the start.
 
 ### `VerificationEvent` (`verification`)
 
