@@ -709,6 +709,7 @@ mod tests {
                 id: (*id).into(),
                 name: (*name).into(),
                 input: input.as_object().cloned().unwrap_or_else(JsonObject::new),
+                raw_input: None,
             })
         });
         Event::Assistant(AssistantEvent {

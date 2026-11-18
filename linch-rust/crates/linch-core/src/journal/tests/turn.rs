@@ -8,6 +8,7 @@ fn tool_call(i: usize) -> ToolUseBlock {
         id: format!("c{i}"),
         name: "Read".into(),
         input: JsonObject::new(),
+        raw_input: None,
     }
 }
 

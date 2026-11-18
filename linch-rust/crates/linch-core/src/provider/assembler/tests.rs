@@ -162,6 +162,7 @@ fn events_and_expected(model: &str, seeds: &[Seed]) -> (Vec<ProviderEvent>, Vec<
                     id,
                     name: name.clone(),
                     input: input.clone(),
+                    raw_input: None,
                 }));
             }
         }

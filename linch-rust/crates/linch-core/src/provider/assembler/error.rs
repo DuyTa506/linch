@@ -58,21 +58,6 @@ pub enum StreamError {
         /// this error.
         stop_reason: StopReason,
     },
-    /// A tool call's concatenated input deltas did not parse as JSON.
-    #[error("tool {id:?} input is invalid JSON: {source}")]
-    InvalidToolInput {
-        /// The tool call's id.
-        id: String,
-        /// The underlying JSON parse error.
-        #[source]
-        source: serde_json::Error,
-    },
-    /// A tool call's input parsed but was not a JSON object.
-    #[error("tool {id:?} input must decode to a JSON object")]
-    NonObjectToolInput {
-        /// The tool call's id.
-        id: String,
-    },
     /// The stream ended without ever pushing a `message_start`.
     #[error("stream ended before message_start")]
     EndedBeforeStart,

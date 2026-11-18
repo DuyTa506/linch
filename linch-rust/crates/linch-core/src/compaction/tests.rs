@@ -10,6 +10,7 @@ fn tool_turn(i: usize) -> [Message; 2] {
         id: format!("c{i}"),
         name: "Read".into(),
         input: json!({"path": "a"}).as_object().unwrap().clone(),
+        raw_input: None,
     };
     let result = ToolResultBlock::text(format!("c{i}"), "text", false);
     [

@@ -67,6 +67,7 @@ fn call(id: &str, name: &str) -> ToolUseBlock {
         id: id.into(),
         name: name.into(),
         input: JsonObject::new(),
+        raw_input: None,
     }
 }
 

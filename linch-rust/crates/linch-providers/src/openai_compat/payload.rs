@@ -183,6 +183,7 @@ mod tests {
             id: id.into(),
             name: "get_weather".into(),
             input: json!({"city": "Paris"}).as_object().unwrap().clone(),
+            raw_input: None,
         })
     }
 

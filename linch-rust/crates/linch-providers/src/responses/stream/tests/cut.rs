@@ -2,7 +2,7 @@
 //! `max_output_tokens` stop passes through as MaxTokens, so the assembler
 //! drops the cut call and keeps the calls that finished.
 
-use linch_core::{StopReason, StreamError, assemble};
+use linch_core::{StopReason, assemble};
 use serde_json::{Value, json};
 
 use super::{frames, run_ok, terminal};
@@ -76,18 +76,19 @@ async fn a_cut_keeps_the_calls_that_finished() {
 }
 
 #[tokio::test]
-async fn a_cut_off_call_without_an_output_limit_stop_is_still_invalid() {
+async fn a_cut_off_call_without_an_output_limit_stop_is_kept_marked() {
     let events = [
         added(1),
         delta(1, PARTIAL),
         done(1, "completed", PARTIAL),
         terminal("response.completed", json!({"status": "completed"})),
     ];
-    let err = assemble(run_ok(&frames(&events)).await).unwrap_err();
-    assert!(
-        matches!(&err, StreamError::InvalidToolInput { id, .. } if id == "c1"),
-        "{err:?}"
-    );
+    let turn = assemble(run_ok(&frames(&events)).await).unwrap();
+    assert_eq!(turn.stop_reason, StopReason::ToolUse);
+    let call = turn.message.tool_uses().next().unwrap();
+    assert_eq!(call.id, "c1");
+    assert!(call.input.is_empty());
+    assert_eq!(call.raw_input.as_deref(), Some(PARTIAL));
 }
 
 /// As in Python, a done call with no arguments at all reads as `{}` even on

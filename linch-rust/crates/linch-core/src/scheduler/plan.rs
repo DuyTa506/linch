@@ -251,6 +251,15 @@ impl Planner<'_> {
             };
             return call;
         };
+        // Arguments that are not an object are never guessed at: the call
+        // is an ordinary tool error, which the model reads and answers by
+        // calling again.
+        if let Some(message) = block.input_error() {
+            call.action = PlannedAction::Error {
+                error: ToolOutputError::new(message),
+            };
+            return call;
+        }
         if let Some(message) = (self.gate)(block) {
             call.action = PlannedAction::Error {
                 error: ToolOutputError::new(message),

@@ -317,6 +317,7 @@ mod tests {
             id: "c1".into(),
             name: "Write".into(),
             input: json!({"content": secret}).as_object().cloned().unwrap(),
+            raw_input: None,
         };
         let mut message = Message::new(
             Role::Assistant,

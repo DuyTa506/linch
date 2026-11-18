@@ -10,7 +10,8 @@ use common::*;
 use linch_core::events::kinds::ResultSubtype;
 use linch_core::provider::scripted::TurnBuilder;
 use linch_core::{
-    AgentSpec, Event, PermissionMode, ProviderEvent, ProviderRetry, RunOptions, ToolScope,
+    AgentSpec, ContentBlock, Event, PermissionMode, ProviderEvent, ProviderRetry, RunOptions,
+    ToolResultPart, ToolScope,
 };
 use serde_json::json;
 
@@ -61,4 +62,54 @@ async fn invalid_final_tool_arguments_do_not_fail_the_run() {
         runs.lock().unwrap().is_empty(),
         "the tool ran with guessed input"
     );
+}
+
+/// What the model reads and what it is replayed: the call stays in the
+/// log with the text it wrote, the provider is replayed `{}` for it, and
+/// its result is an error that names the tool, the parse error and the
+/// start of the text. Nothing is retried: the provider is called twice.
+#[tokio::test]
+async fn the_model_reads_an_error_for_the_call_and_is_replayed_empty_input() {
+    let mut broken = TurnBuilder::new(MODEL)
+        .tool_call("c1", "Read", &json!({"value": "a.txt"}))
+        .build();
+    for event in &mut broken.events {
+        if let ProviderEvent::ToolUseInputDelta(delta) = event {
+            delta.json_delta = r#"{"value": "a.t"#.into();
+        }
+    }
+    let runs = Runs::default();
+    let provider = Arc::new(Flaky::new(vec![broken, text_turn("done")]));
+    let stores = Arc::new(Stores::default());
+    let tools = registry(vec![Echo::new("Read", ToolScope::Read, &runs)]);
+    let permissions = policy(PermissionMode::SkipDangerous);
+    let agent = agent_with(spec(), provider.clone(), tools, permissions, stores.clone());
+    let envelopes = finish(agent.run("go", RunOptions::new("s1"))).await;
+    assert!(runs.lock().unwrap().is_empty(), "the tool ran");
+    assert_eq!(provider.calls().len(), 2, "no retry of the provider call");
+
+    let log = messages(&*stores, "s1").await;
+    let ContentBlock::ToolUse(call) = &log[1].content[0] else {
+        panic!("the call is not in the log: {:?}", log[1]);
+    };
+    assert_eq!(call.raw_input.as_deref(), Some(r#"{"value": "a.t"#));
+    assert!(call.input.is_empty());
+    let ContentBlock::ToolResult(result) = &log[2].content[0] else {
+        panic!("no tool result: {:?}", log[2]);
+    };
+    assert!(result.is_error);
+    assert_eq!(result.tool_use_id, "c1");
+    let ToolResultPart::Text(text) = &result.content[0] else {
+        panic!("not text");
+    };
+    assert!(
+        text.text.starts_with("invalid JSON arguments for Read: "),
+        "{}",
+        text.text
+    );
+    assert!(text.text.ends_with(r#"received: {"value": "a.t"#));
+    let ended = (envelopes.iter())
+        .filter(|e| matches!(e.event, Event::ToolCallEnd(_)))
+        .count();
+    assert_eq!(ended, 1);
 }

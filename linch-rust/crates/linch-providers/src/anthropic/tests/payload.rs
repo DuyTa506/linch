@@ -289,6 +289,7 @@ fn assistant_turns_replay_signed_thinking_and_drop_unsigned() {
         id: "toolu_1".into(),
         name: "get_weather".into(),
         input: json!({"city": "Paris"}).as_object().unwrap().clone(),
+        raw_input: None,
     };
     let thinking = |text: &str, signature: Option<&str>| {
         ContentBlock::Thinking(ThinkingBlock {
@@ -662,6 +663,7 @@ fn the_cached_prefix_of_one_turn_is_a_prefix_of_the_next() {
         id: "toolu_1".into(),
         name: "get_weather".into(),
         input: json!({"city": "Hue"}).as_object().unwrap().clone(),
+        raw_input: None,
     };
     let ask = || Message::user_text("what is the weather");
     let mut first_user = ask();

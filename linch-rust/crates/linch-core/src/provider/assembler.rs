@@ -56,16 +56,19 @@ struct OpenCall {
 /// has a non-empty id (unique across the whole stream) and a non-empty
 /// name; an input delta or `tool_use_end` must name a call that is
 /// currently open; every opened call must end before `message_end`, and its
-/// concatenated input deltas must parse as a JSON object. `message_end`'s
+/// concatenated input deltas should parse as a JSON object. `message_end`'s
 /// `stop_reason` is `tool_use` if and only if at least one tool call
 /// completed.
 ///
-/// A `max_tokens` stop is the exception: the output limit may cut a call
-/// off, so a call still open, or whose input is not a whole JSON object, is
-/// dropped instead. The turn then stops with `max_tokens` when no call is
-/// left, and with `tool_use` when calls that finished remain. So a provider
-/// reports `max_tokens` as it came and keeps streaming tool input; on any
-/// other stop such a call fails the stream at `message_end`.
+/// A call whose input does not parse as a JSON object is not a stream
+/// error: the block is kept with an empty `input` and the model's text in
+/// [`ToolUseBlock::raw_input`], and the run answers it with an error the
+/// model reads instead of running it. A `max_tokens` stop is the exception:
+/// the output limit may cut a call off, so a call still open, or whose input
+/// is not a whole JSON object, is dropped instead. The turn then stops with
+/// `max_tokens` when no call is left, and with `tool_use` when calls that
+/// finished remain. So a provider reports `max_tokens` as it came and keeps
+/// streaming tool input.
 ///
 /// # Coalescing
 ///
@@ -96,9 +99,10 @@ pub struct Assembler {
     thinking_buf: String,
     thinking_sig: Option<String>,
     open_calls: HashMap<String, OpenCall>,
-    /// Why the first closed call with broken input is invalid; reported at
-    /// `message_end` unless the output limit cut it off.
-    broken_call: Option<StreamError>,
+    /// The closed calls whose input is not a JSON object, already in
+    /// `content` with their raw text; dropped at `message_end` when the
+    /// output limit cut them off.
+    broken_calls: HashSet<String>,
     seen_tool_ids: HashSet<String>,
     stop_reason: Option<StopReason>,
     usage: Option<Usage>,
@@ -239,22 +243,19 @@ impl Assembler {
                 event: "tool_use_end",
             });
         };
-        let id = end.id;
+        let (id, name) = (end.id, call.name);
         match serde_json::from_str(&call.input) {
             Ok(serde_json::Value::Object(input)) => {
-                let name = call.name;
-                self.content
-                    .push(ContentBlock::ToolUse(ToolUseBlock { id, name, input }));
+                let block = ToolUseBlock::new(id, name, input);
+                self.content.push(ContentBlock::ToolUse(block));
             }
-            // Judged at `message_end`, whose stop reason says whether the
-            // output limit cut the call off.
-            Ok(_) => {
-                self.broken_call
-                    .get_or_insert(StreamError::NonObjectToolInput { id });
-            }
-            Err(source) => {
-                self.broken_call
-                    .get_or_insert(StreamError::InvalidToolInput { id, source });
+            // A call the model can be told about: kept, marked, and never
+            // run. `message_end`'s stop reason says whether the output
+            // limit cut it off instead, which drops it.
+            _ => {
+                self.broken_calls.insert(id.clone());
+                let block = ToolUseBlock::invalid(id, name, call.input);
+                self.content.push(ContentBlock::ToolUse(block));
             }
         }
         Ok(())
@@ -272,10 +273,11 @@ impl Assembler {
         if stop_reason == StopReason::MaxTokens {
             // Calls the output limit cut off.
             self.open_calls.clear();
-            self.broken_call = None;
-        }
-        if let Some(error) = self.broken_call.take() {
-            return Err(error);
+            let broken = std::mem::take(&mut self.broken_calls);
+            self.content.retain(|block| match block {
+                ContentBlock::ToolUse(call) => !broken.contains(&call.id),
+                _ => true,
+            });
         }
         if !self.open_calls.is_empty() {
             let mut ids: Vec<String> = self.open_calls.keys().cloned().collect();

@@ -229,6 +229,7 @@ vẫn tiếp tục.
 | `Host tool "<name>" timed out after <n>ms` | Tool của ứng dụng chủ không trả lời trong `timeout` của nó (mặc định 300 s); task của nó đã bị hủy | Tăng `@tool(timeout=...)`, hoặc làm tool nhanh hơn |
 | `Input for tool "<name>" does not match its schema:` theo sau là các vấn đề | Đầu vào của mô hình không khớp schema | Thường mô hình tự sửa; kiểm tra schema và mô tả |
 | `Tool "<name>" is not registered` | Mô hình gọi một tool mà agent không có | Kiểm tra danh sách tool trong event `init` |
+| `invalid JSON arguments for <tool>: <lỗi parse>; received: <200 ký tự đầu>` | Các đối số mà model stream cho lời gọi không phải một đối tượng JSON (bị cắt giữa chừng, sai cú pháp, hoặc là một mảng). Tool không chạy và run đi tiếp: model đọc lỗi này và gọi lại. Message của assistant giữ lời gọi với `input: {}` và văn bản model đã viết trong `raw_input` (provider chỉ được phát lại `{}`, không bao giờ là văn bản đó) | Thường model tự sửa; một model lần nào cũng sai cần schema đơn giản hơn hoặc `max_tokens` lớn hơn |
 | `Tool call denied: <reason>` | `Deny(reason)` khi phê duyệt | Đúng như dự kiến |
 | `Tool call denied: <tool> denied by <kind> rule in layer "<layer>"` | Một quy tắc quyền đã từ chối lệnh gọi | Đổi quy tắc nếu lệnh gọi nên chạy ([Tool](./tools.md#permission-rules)) |
 | `Read <path> before changing it.` | `Write` lên một tệp có sẵn hoặc `Edit` mà chưa có `Read` trong session này, hoặc sau `close_session` hay khi khởi động lại | Đúng như dự kiến; mô hình đọc, rồi mới ghi |

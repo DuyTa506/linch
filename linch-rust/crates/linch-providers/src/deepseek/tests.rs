@@ -160,6 +160,7 @@ fn tool_loop_body_carries_tools_calls_reasoning_and_results() {
         id: "c1".into(),
         name: "get_weather".into(),
         input: json!({"city": "Paris"}).as_object().unwrap().clone(),
+        raw_input: None,
     };
     let body = build_payload(&ProviderRequest {
         tools: vec![weather_tool()],
@@ -202,6 +203,7 @@ fn turns_without_thinking_send_empty_reasoning_while_thinking_is_on() {
         id: "c1".into(),
         name: "get_weather".into(),
         input: json!({"city": "Paris"}).as_object().unwrap().clone(),
+        raw_input: None,
     };
     let messages = vec![
         Message::user_text("hi"),
