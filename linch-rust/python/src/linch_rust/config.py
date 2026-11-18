@@ -83,9 +83,10 @@ class Filesystem(TypedDict, total=False):
     with Postgres stores every session of the namespace shares them.
 
     Attributes:
-        offload_threshold_tokens: Move a text tool result estimated above
-            this many tokens (four bytes per token) into the filesystem,
-            leaving its first lines and its path. Absent, with no
+        offload_threshold_tokens: Move a tool result (a string, a structured
+            value or an error message) estimated above this many tokens
+            (four bytes per token) into the filesystem, leaving its first
+            lines and its path. Absent, with no
             `offload_threshold_fraction` either: never offload.
         offload_threshold_fraction: Offload above this fraction of the
             provider's context window for the spec's model, at least 1000

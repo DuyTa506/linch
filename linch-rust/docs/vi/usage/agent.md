@@ -567,7 +567,7 @@ prompt để dạy model cách dùng chúng.
 
 | Trường | Mặc định | Điều khiển gì |
 |---|---|---|
-| `offload_threshold_tokens` | không có | Chuyển một kết quả tool dạng văn bản được ước tính trên số token này (bốn byte mỗi token) vào hệ thống tệp, để lại vài dòng đầu và đường dẫn của nó cho model `read_file` |
+| `offload_threshold_tokens` | không có | Chuyển một kết quả tool (chuỗi, giá trị có cấu trúc hoặc thông báo lỗi) được ước tính trên số token này (bốn byte mỗi token) vào hệ thống tệp, để lại vài dòng đầu và đường dẫn của nó cho model `read_file` ([phạm vi phủ](./tools.md#long-tool-results)) |
 | `memory` | `False` | Cho model thấy chỉ dẫn lưu ký ức dưới `/memories/` và 200 dòng đầu (tối đa 16 KiB) của `MEMORY.md`, bao khung như dữ liệu không đáng tin, đọc lại cho mỗi request ([Memory](./memory.md#file-memory)). Deep agent luôn có |
 | `memory_scope` | `"principal"` | `/memories/` của ai mà model thấy: `"principal"` cho mỗi principal một thư mục riêng (`/memories/<key>/MEMORY.md`), `"namespace"` một tệp cho mọi run của namespace ([Memory](./memory.md#file-memory)) |
 | `offload_threshold_fraction` | không có | Offload khi vượt tỷ lệ này của [context window](./providers.md#context-window) của provider, tối thiểu 1000 token; Python Linch dùng 0.1. Chỉ dùng khi không có `offload_threshold_tokens`. Không có cả hai thì kết quả không bao giờ bị offload |

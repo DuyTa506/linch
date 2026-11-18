@@ -704,7 +704,7 @@ trước. Mọi thứ còn lại nằm ở [Scheduler](./scheduler.md#để-mode
 `filesystem: {}` thêm `ls`, `read_file`, `write_file` và `edit_file` trên các tệp
 văn bản nằm trong kho, không phải trên đĩa: ghi chú nháp, kế hoạch, và cả các kết
 quả tool quá lớn cho cuộc hội thoại. Với `offload_threshold_tokens`, một kết quả
-văn bản được ước tính trên số token đó sẽ được ghi vào
+(chuỗi, giá trị có cấu trúc hoặc lỗi) được ước tính trên số token đó sẽ được ghi vào
 `/offload/<tool>_<tool_use_id>.txt` và model nhận vài dòng đầu cùng đường dẫn:
 
 ```python
@@ -756,8 +756,7 @@ read_file: 27 chars, ends 'api line 1999\napi line 2000'
 `ls` và `read_file` có scope read; `write_file` và `edit_file` có scope write, nên
 chúng hỏi ở mode `default`. Một tệp ảo chứa tối đa 10 MiB: một `write_file` hoặc
 `edit_file` (kể cả `replace_all`) làm nó lớn hơn sẽ nhận lỗi `too_large` và không
-thay đổi gì. Lỗi, kết quả có giá trị không phải chuỗi (chẳng hạn dict của một host
-tool) và chính kết quả của các tool hệ thống tệp thì không bao giờ bị offload.
+thay đổi gì. Chính kết quả của các tool hệ thống tệp thì không bao giờ bị offload.
 Nơi các tệp nằm tuân theo kho lưu trữ: theo từng session trong memory, hoặc dùng
 chung cho mọi session của namespace trong Postgres
 ([Kho lưu trữ](./stores.md#the-virtual-filesystem)).
@@ -776,14 +775,32 @@ thứ compaction và context window phải trả giá. Một số tool tự gi�
 | `Glob` | 1000 đường dẫn |
 | Một tool MCP | 30000 byte văn bản kết quả |
 | `memory_recall` | 8 KiB ngữ cảnh được gợi lại mỗi request |
-| `Read` | mặc định 2000 dòng và tệp tối đa 10 MiB; một dòng không bị giới hạn độ rộng, nên một dòng minify có thể trả về hàng megabyte (offload bên dưới giữ con trỏ nhỏ, nhưng `read_file` cũng theo dòng, nên đọc lại dòng đó vẫn trả về nguyên vẹn) |
+| `Read` | mặc định 2000 dòng và tệp tối đa 10 MiB; một dòng không bị giới hạn độ rộng, nên một dòng minify có thể trả về hàng megabyte (một khoảng trống đã biết: offload bên dưới phủ cả kết quả của `Read` và `read_file` phân trang một dòng dài, nhưng chính `Read` không cắt dòng) |
 
 Một host tool không có giới hạn riêng. Với các tool đó, và với mọi kết quả mà một giới hạn ở
 trên cho qua, cơ chế duy nhất là offload sang hệ thống tệp:
 `filesystem: {"offload_threshold_tokens": 8000}` (hoặc `offload_threshold_fraction`) ghi một
-kết quả văn bản có ước lượng trên ngưỡng vào một tệp và để lại cho model mười dòng đầu (tối đa 2000
-byte) cùng đường dẫn ([Hệ thống tệp ảo](#hệ-thống-tệp-ảo)). 8000 là giá trị khuyến nghị: một kết quả dưới
-ngưỡng đó, khoảng 32 KB, đủ rẻ để giữ nguyên vẹn.
+kết quả có ước lượng trên ngưỡng vào một tệp và để lại cho model mười dòng đầu (tối đa 2000
+byte; con trỏ ghi "cut at 2000 bytes" khi số byte cắt ngắn phần xem trước) cùng đường dẫn
+([Hệ thống tệp ảo](#hệ-thống-tệp-ảo)). 8000 là giá trị khuyến nghị: một kết quả dưới
+ngưỡng đó, khoảng 32 KB, đủ rẻ để giữ nguyên vẹn. Offload phủ:
+
+- **Một chuỗi**, được lưu nguyên.
+- **Một giá trị có cấu trúc** (đối tượng hoặc mảng JSON của một host tool hay tool MCP), được ước
+  lượng theo JSON gọn của nó và lưu dưới dạng JSON định dạng đẹp, mỗi giá trị một dòng, nên
+  `read_file` phân trang được theo dòng. Model thấy con trỏ, là một chuỗi; `metadata` của lời gọi
+  chỉ giữ các kích thước (`original_tokens`, `original_bytes`, `offloaded_to`,
+  `original_kind: "json"`), không bao giờ giữ chính giá trị.
+- **Một lỗi**: một thông báo trên ngưỡng được lưu nguyên, và model thấy vài dòng đầu cùng đường
+  dẫn làm thông báo của chính lỗi đó. `code` của lỗi và `details` của nó được giữ (`details` có
+  thêm `offloaded_to`, `original_tokens` và `original_bytes` khi nó là một đối tượng hoặc vắng
+  mặt), nên việc thử lại và loop guard phân loại nó như trước.
+- **Một dòng rất dài** (JSON hoặc XML minify, base64, protobuf gửi dưới dạng văn bản): nó được
+  offload như một chuỗi, và `read_file` trả về tối đa 16384 byte của một dòng mỗi lần gọi, cắt tại
+  ranh giới ký tự và kết thúc bằng lời gọi để đọc tiếp, ví dụ
+  `[line 1 continues at byte 16384; read_file(path="/offload/x.txt", offset=1, limit=1, byte_offset=16384)]`.
+  `byte_offset` là byte của dòng để bắt đầu và đi cùng `limit=1`; một tệp mà mọi dòng đều ngắn hơn
+  được đọc đúng như khi lưu.
 
 Trong một lần chạy kịch bản 30 lượt, mỗi lượt có một kết quả tool 2, 12, 60 hoặc 200 KB và
 không có compaction, request cuối nặng 484956 token ước lượng khi không có giới hạn và 141961
@@ -792,8 +809,13 @@ khoảng 70%. Các số này được đo bằng bộ test kịch bản với m�
 quả trong view, không phải với model thật và không phải với chính offload; offload chỉ giữ mười
 dòng của một kết quả dài, nên mức tiết kiệm ít nhất cũng bằng, trừ phần model chọn đọc lại.
 
-Offload không phủ mọi kết quả: lỗi, giá trị không phải chuỗi và chính kết quả của bốn tool hệ
-thống tệp đi qua nguyên vẹn. Với store trong bộ nhớ, các tệp chỉ sống bằng tiến trình, nên một
+Offload không phủ mọi kết quả. Kết quả dưới ngưỡng được giữ nguyên vẹn, và nhiều kết quả như
+vậy cộng dồn lại; compaction mới là thứ cắt bớt chúng. Chính kết quả của bốn tool hệ thống tệp đi
+qua nguyên vẹn. Một tool không thể trả về ảnh hay dữ liệu nhị phân dưới dạng JSON, nên không có gì
+loại đó để offload. Các dòng của chính `Read` không bị cắt (xem bảng). `details` của một lỗi dành
+cho host và không bao giờ tới model, nên không được offload. [Run contract](./agent.md#the-run-contract)
+của agent chứa phiên bản policy của hook và schema của `read_file`, nên một run đã lưu trước khi
+một trong hai thay đổi không thể được resume (`ContractMismatch`). Với store trong bộ nhớ, các tệp chỉ sống bằng tiến trình, nên một
 run được resume ở nơi khác thấy con trỏ nhưng không thấy tệp
 ([Kho lưu trữ](./stores.md#the-virtual-filesystem)).
 

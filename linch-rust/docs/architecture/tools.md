@@ -477,23 +477,44 @@ each session a fresh memory backend (call `forget` when it ends), and
 `vfs::PROMPT` (`tools.rs:24`) teaches the model the virtual filesystem; the
 host adds it to the system prompt when it offers these tools.
 
-`ResultOffload` (`crates/linch-tools/src/vfs/offload.rs:72`) is a
-`post_tool_use` hook. A successful result whose value is a string and is
-estimated above `threshold_tokens` (four bytes per token) is written whole to
-`/offload/{tool}_{tool_use_id}.txt` and replaced by its first 10 lines (at most 2000 bytes) and a
-pointer the model can follow with `read_file`. Errors, structured values and
-the four virtual filesystem tools are never offloaded, so reading an offloaded
-file back is never offloaded again (`offload.rs:51-62`).
+`ResultOffload` (`crates/linch-tools/src/vfs/offload.rs:87`) is a
+`post_tool_use` hook. A result estimated above `threshold_tokens` (four bytes
+per token) is written whole to `/offload/{tool}_{tool_use_id}.txt` and
+replaced by its first 10 lines (at most 2000 bytes; the pointer says "cut at
+2000 bytes" when the bytes ended the preview) and a pointer the model can
+follow with `read_file`. Three kinds are covered (`offload.rs:152`,
+`offload.rs:190`):
+
+- A string is stored as it is.
+- A structured value is sized by its compact canonical JSON, stored as
+  pretty-printed JSON (one value per line, so `read_file` can page it) and
+  replaced by the same pointer as a string; its metadata gains the sizes and
+  `original_kind: "json"`, never the value.
+- An error's message is stored and replaced by the pointer, through
+  `PostToolUseResponse::Replace` carrying an `Err`: the `code` is kept, so the
+  loop guard classifies it as before (a tool's retry runs before the hook, so
+  which errors are retried does not change), and the `details` gain the sizes
+  and the path when they are an object or absent.
+
+The four virtual filesystem tools are never offloaded, so reading an
+offloaded file back is never offloaded again (`offload.rs:254`). `read_file`
+returns at most 16384 bytes of one line per call (`tools.rs:277`), ending a
+cut line with the call that continues it (`byte_offset`), so one huge line
+pages like many short ones; a file with no longer line reads byte for byte as
+it is stored.
 
 - The replacement is the call's result from then on: the tool-end event, the
   session log and later requests hold the pointer, not the payload.
 - The backend write finishes before the hook answers, so a logged pointer
   names a written file when the backend is durable. A crash between the write
   and the tool end leaves an unreferenced file; a retry of the call writes the
-  same path (`offload.rs:9-17`).
-- The hook fails open (`offload.rs:119`): a storage failure shows in the hook
+  same path (`offload.rs:12-20`).
+- The hook fails open (`offload.rs:245`): a storage failure shows in the hook
   record and the original result goes to the model.
-- Its policy id `linch.vfs.offload`, version 1, is part of the run contract.
+- Its policy id `linch.vfs.offload`, version 2, is part of the run contract.
+  The version moves when what the hook covers does, and `read_file`'s schema
+  is in the contract too, so a stored run of an agent with `filesystem`
+  cannot resume across such a change (`ContractMismatch`).
 
 With `MemorySessions`, a run resumed in another process finds the pointer but
 not the file.
