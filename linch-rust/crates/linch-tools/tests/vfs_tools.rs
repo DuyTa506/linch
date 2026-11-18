@@ -239,3 +239,138 @@ fn the_prompt_names_the_tools_and_the_offload_pointer() {
     }
     assert!(PROMPT.contains("read_file(path, offset, limit)"));
 }
+
+/// The most bytes of one line `read_file` returns in one call.
+const LINE_PAGE: usize = 16 * 1024;
+
+async fn write(t: &Tools, path: &str, content: &str) {
+    let written = call(&t.write, json!({"path": path, "content": content})).await;
+    written.unwrap();
+}
+
+/// Reads line `line` of `path` page by page, following the continuation
+/// hint, and returns the pages and the text they add up to.
+async fn page_line(t: &Tools, path: &str, line: usize) -> (Vec<String>, String) {
+    let mut pages = Vec::new();
+    let mut whole = String::new();
+    let mut next = json!({"path": path, "offset": line, "limit": 1});
+    loop {
+        let out = text(call(&t.read, next.clone()).await);
+        let marker = format!("\n[line {line} continues at byte ");
+        let Some((page, rest)) = out.rsplit_once(&marker) else {
+            whole.push_str(&out);
+            pages.push(out);
+            return (pages, whole);
+        };
+        let at: usize = rest.split(';').next().unwrap().parse().unwrap();
+        let hint = format!(
+            "[line {line} continues at byte {at}; read_file(path=\"{path}\", offset={line}, \
+             limit=1, byte_offset={at})]"
+        );
+        assert!(
+            out.ends_with(&hint),
+            "the output ends with the exact hint: {}",
+            &out[page.len()..]
+        );
+        whole.push_str(page);
+        pages.push(out.clone());
+        next = json!({"path": path, "offset": line, "limit": 1, "byte_offset": at});
+    }
+}
+
+#[tokio::test]
+async fn one_huge_line_is_paged_by_byte_offset_to_its_end() {
+    let t = tools();
+    let line: String = (0..500_000usize)
+        .map(|i| char::from(b'a' + (i % 26) as u8))
+        .collect();
+    write(&t, "/big", &line).await;
+    let (pages, whole) = page_line(&t, "/big", 1).await;
+    assert_eq!(whole, line, "the pages add up to the exact bytes");
+    assert_eq!(pages.len(), 500_000_usize.div_ceil(LINE_PAGE));
+    assert!(pages.iter().all(|page| page.len() < LINE_PAGE + 200));
+    assert!(pages[0].starts_with(&line[..LINE_PAGE]));
+    assert!(pages[0].contains("continues at byte 16384;"));
+}
+
+#[tokio::test]
+async fn a_page_is_cut_on_a_character_boundary() {
+    let t = tools();
+    // Three bytes per character; 16384 is not a multiple of 3.
+    let line = "€".repeat(20_000);
+    write(&t, "/wide", &line).await;
+    let (pages, whole) = page_line(&t, "/wide", 1).await;
+    assert_eq!(whole, line);
+    assert!(
+        pages[0].contains("continues at byte 16383;"),
+        "cut at the boundary below 16384"
+    );
+}
+
+#[tokio::test]
+async fn a_long_line_among_short_ones_is_cut_in_place() {
+    let t = tools();
+    let long = "x".repeat(LINE_PAGE + 10);
+    write(&t, "/mix", &format!("first\n{long}\nlast\n")).await;
+    let hint = "[line 2 continues at byte 16384; read_file(path=\"/mix\", offset=2, \
+                limit=1, byte_offset=16384)]";
+    let want = format!("first\n{}\n{hint}\nlast", &long[..LINE_PAGE]);
+    for args in [
+        json!({"path": "/mix"}),
+        json!({"path": "/mix", "offset": 1, "limit": 3}),
+    ] {
+        assert_eq!(text(call(&t.read, args).await), want);
+    }
+    let (_, whole) = page_line(&t, "/mix", 2).await;
+    assert_eq!(whole, long);
+}
+
+#[tokio::test]
+async fn files_with_no_long_line_read_byte_for_byte_as_before() {
+    let t = tools();
+    let at_bound = "y".repeat(LINE_PAGE);
+    let body = format!("a\n{at_bound}\nc\n");
+    write(&t, "/ok", &body).await;
+    assert_eq!(text(call(&t.read, json!({"path": "/ok"})).await), body);
+    let window = call(&t.read, json!({"path": "/ok", "offset": 2, "limit": 2})).await;
+    assert_eq!(
+        text(window),
+        format!("{at_bound}\nc"),
+        "a line at the bound is whole"
+    );
+    let many: String = (1..=5000).map(|n| format!("line {n}\n")).collect();
+    write(&t, "/many", &many).await;
+    assert_eq!(text(call(&t.read, json!({"path": "/many"})).await), many);
+}
+
+#[tokio::test]
+async fn byte_offset_needs_one_line_and_a_valid_position() {
+    let t = tools();
+    write(&t, "/w", "€€€\nsecond").await;
+    let with = |extra: Value| {
+        let mut args = json!({"path": "/w", "offset": 1, "limit": 1});
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        args
+    };
+    let read = |extra: Value| call(&t.read, with(extra));
+    assert_eq!(text(read(json!({"byte_offset": 3})).await), "€€");
+    assert_eq!(text(read(json!({"byte_offset": 0})).await), "€€€");
+    for past in [9, 10] {
+        let out = text(read(json!({"byte_offset": past})).await);
+        assert_eq!(
+            out,
+            "<no bytes at byte_offset {past}; line 1 has 9 bytes>"
+                .replace("{past}", &past.to_string())
+        );
+    }
+    for bad in [
+        json!({"byte_offset": 1}),
+        json!({"limit": 2, "byte_offset": 3}),
+    ] {
+        assert_eq!(code(read(bad).await), "invalid_input");
+    }
+    let no_limit = call(&t.read, json!({"path": "/w", "byte_offset": 3})).await;
+    assert_eq!(code(no_limit), "invalid_input");
+}

@@ -386,10 +386,9 @@ fn a_failed_write_does_not_clear_the_count() {
     assert!(watch.tool_trip().is_some());
 }
 
-/// `ResultOffload` replaces a long result with a preview that names a file
-/// made from the call's id, so identical results would never look alike.
-#[test]
-fn an_offloaded_result_repeats_whatever_its_file_name() {
+/// Three calls of `Bash` whose result `ResultOffload` replaced with `preview`
+/// and a pointer to a file made from the call's id: the guard's verdict.
+fn offloaded_trip(preview: &str) -> Option<LoopGuardEvent> {
     let mut watch = Watch::new(&LoopGuard::default(), HashSet::new(), HashSet::new());
     let command = json!({"command": "cargo test"});
     for id in ["toolu_1", "toolu_2", "toolu_3"] {
@@ -404,7 +403,7 @@ fn an_offloaded_result_repeats_whatever_its_file_name() {
         }));
         let path = format!("/offload/Bash_{id}.txt");
         let text = format!(
-            "line 1\n\n[Tool result truncated: ~900 tokens (3600 bytes) offloaded to '{path}'. \
+            "{preview}\n\n[Tool result truncated: ~900 tokens (3600 bytes) offloaded to '{path}'. \
              Showing the first 10 lines. Use read_file(path=\"{path}\", offset=...)]"
         );
         let result = ToolResultBlock::text(id, text, false);
@@ -414,7 +413,22 @@ fn an_offloaded_result_repeats_whatever_its_file_name() {
             steer_id: None,
         }));
     }
-    let trip = watch.tool_trip().unwrap();
+    watch.tool_trip()
+}
+
+/// `ResultOffload` replaces a long result with a preview that names a file
+/// made from the call's id, so identical results would never look alike.
+#[test]
+fn an_offloaded_result_repeats_whatever_its_file_name() {
+    let trip = offloaded_trip("line 1").unwrap();
+    assert!(trip.detail.contains("'Bash'"), "{}", trip.detail);
+}
+
+/// A structured value is offloaded as pretty JSON; its pointer is a string
+/// like any other, so the same result again is still a repeat.
+#[test]
+fn an_offloaded_structured_result_repeats_whatever_its_file_name() {
+    let trip = offloaded_trip("{\n  \"rows\": [\n    {\"id\": 0}").unwrap();
     assert!(trip.detail.contains("'Bash'"), "{}", trip.detail);
 }
 

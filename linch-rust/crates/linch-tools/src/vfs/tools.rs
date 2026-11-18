@@ -180,6 +180,13 @@ impl ReadFile {
                     "type": "integer",
                     "minimum": 1,
                     "description": "Maximum lines to return (default: entire file)."
+                },
+                "byte_offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Byte to start from inside the line at offset; only with \
+                                    limit=1. A line longer than 16384 bytes is cut and ends \
+                                    with the exact call that continues it."
                 }
             },
             "required": ["path"]
@@ -196,8 +203,9 @@ impl Tool for ReadFile {
 
     fn description(&self) -> &str {
         "Read a file from the virtual filesystem. Supports paged reading via offset \
-         (1-indexed line number) and limit. Use this to inspect offloaded tool \
-         results or files you wrote with write_file."
+         (1-indexed line number) and limit; a line longer than 16384 bytes is cut \
+         and ends with the call (byte_offset) that continues it. Use this to inspect \
+         offloaded tool results or files you wrote with write_file."
     }
 
     fn input_schema(&self) -> &JsonObject {
@@ -210,7 +218,7 @@ impl Tool for ReadFile {
 
     fn summarize(&self, input: &JsonObject) -> String {
         let mut summary = format!("read_file({:?}", path_of(input));
-        for key in ["offset", "limit"] {
+        for key in ["offset", "limit", "byte_offset"] {
             if let Some(value) = input.get(key).and_then(|v| v.as_u64()) {
                 summary.push_str(&format!(", {key}={value}"));
             }
@@ -223,14 +231,25 @@ impl Tool for ReadFile {
         let path = path_field(&input)?;
         let offset = optional_count(&input, "offset")?;
         let limit = optional_count(&input, "limit")?;
+        let byte_offset = optional_count(&input, "byte_offset")?;
+        if byte_offset.is_some() && limit != Some(1) {
+            return Err(invalid(
+                "byte_offset continues one line: pass limit=1 and the line's offset",
+            ));
+        }
         let text = (self.files.backend(&ctx.session_id).read(&path).await).map_err(tool_error)?;
         if text.is_empty() {
             return Ok(ToolOutput::new("<file is empty>"));
         }
-        if offset.is_none() && limit.is_none() {
+        let whole = offset.is_none() && limit.is_none();
+        // No line can be longer than the text, so a short file is read as it is.
+        if whole && text.len() <= LINE_PAGE_BYTES {
             return Ok(ToolOutput::new(text));
         }
         let lines = split_lines(&text);
+        if whole && lines.iter().all(|line| line.len() <= LINE_PAGE_BYTES) {
+            return Ok(ToolOutput::new(text));
+        }
         let total = lines.len();
         let offset = offset.unwrap_or(1).max(1);
         let start = usize::try_from(offset - 1).unwrap_or(usize::MAX);
@@ -241,8 +260,56 @@ impl Tool for ReadFile {
         }
         let take = limit.map_or(total, |n| usize::try_from(n).unwrap_or(usize::MAX));
         let end = start.saturating_add(take).min(total);
-        Ok(ToolOutput::new(lines[start..end].join("\n")))
+        let from = byte_offset.map_or(0, |at| usize::try_from(at).unwrap_or(usize::MAX));
+        let mut shown = Vec::with_capacity(end - start);
+        for (at, line) in lines[start..end].iter().enumerate() {
+            // `byte_offset` needs `limit=1`, so it only ever meets the first line.
+            let from = if at == 0 { from } else { 0 };
+            shown.push(page_line(line, from, start + at + 1, &path)?);
+        }
+        Ok(ToolOutput::new(shown.join("\n")))
     }
+}
+
+/// Most bytes of one line a `read_file` call returns: a longer line is cut
+/// there (on a character boundary) and ends with the call that continues
+/// it, so one minified line never comes back whole.
+const LINE_PAGE_BYTES: usize = 16 * 1024;
+
+/// Line number `number` of `path`, from byte `from`, at most
+/// [`LINE_PAGE_BYTES`] of it. A cut ends with the exact continuation call.
+fn page_line(
+    line: &str,
+    from: usize,
+    number: usize,
+    path: &str,
+) -> Result<String, ToolOutputError> {
+    if from > 0 && from >= line.len() {
+        return Ok(format!(
+            "<no bytes at byte_offset {from}; line {number} has {} bytes>",
+            line.len()
+        ));
+    }
+    if !line.is_char_boundary(from) {
+        return Err(invalid(format!(
+            "byte_offset {from} is inside a character of line {number}; \
+             use the byte_offset a previous read_file reported"
+        )));
+    }
+    let rest = &line[from..];
+    if rest.len() <= LINE_PAGE_BYTES {
+        return Ok(rest.to_owned());
+    }
+    let mut end = LINE_PAGE_BYTES;
+    while !rest.is_char_boundary(end) {
+        end -= 1;
+    }
+    let next = from + end;
+    Ok(format!(
+        "{}\n[line {number} continues at byte {next}; read_file(path=\"{path}\", \
+         offset={number}, limit=1, byte_offset={next})]",
+        &rest[..end]
+    ))
 }
 
 /// Create or replace a virtual file. Scope `write`.
