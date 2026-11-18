@@ -69,6 +69,15 @@ async fn probe(rpc: &mut Rpc, name: &str, params: Value, asked: &str) -> Shape {
     }
 }
 
+/// B's answer for A's id must be a refusal, not a success that happens to
+/// match: a method that answered would have read or changed A's data.
+fn assert_refused(name: &str, shape: &Shape) {
+    assert!(
+        matches!(shape, Shape::Err(..)),
+        "{name}: B was not refused: {shape:?}"
+    );
+}
+
 /// The params of a method that takes a run id, with what it also requires.
 fn run_params(name: &str, agent: &str, id: &str) -> Value {
     let mut params = json!({"agent": agent, "run_id": id});
@@ -155,6 +164,7 @@ async fn a_tenant_cannot_tell_another_tenants_id_from_one_nobody_has() {
             &made.run,
         )
         .await;
+        assert_refused(name, &real);
         let params = run_params(name, &agent, missing_run);
         let gone = probe(&mut beta, name, params, missing_run).await;
         assert_eq!(real, gone, "{name}: A's run and a missing one read alike");
@@ -164,6 +174,9 @@ async fn a_tenant_cannot_tell_another_tenants_id_from_one_nobody_has() {
         let build = |id: &str| json!({"agent": agent, "run_id": id});
         let real = probe(&mut beta, name, build(&made.workflow), &made.workflow).await;
         let gone = probe(&mut beta, name, build(missing_workflow), missing_workflow).await;
+        if name == method::WORKFLOW_STATUS {
+            assert_refused(name, &real);
+        }
         assert_eq!(
             real, gone,
             "{name}: A's workflow and a missing one read alike"
@@ -184,6 +197,7 @@ async fn a_tenant_cannot_tell_another_tenants_id_from_one_nobody_has() {
         &missing_job.to_string(),
     )
     .await;
+    assert_refused(method::JOB_GET, &real);
     assert_eq!(real, gone, "job.get: A's job and a missing one read alike");
     // A schedule, by id: pause, resume and delete.
     for name in [
@@ -195,6 +209,9 @@ async fn a_tenant_cannot_tell_another_tenants_id_from_one_nobody_has() {
         let real = probe(&mut beta, name, real, &made.schedule).await;
         let gone = json!({"agent": agent, "id": missing_schedule});
         let gone = probe(&mut beta, name, gone, missing_schedule).await;
+        if name != method::SCHEDULE_DELETE {
+            assert_refused(name, &real);
+        }
         assert_eq!(
             real, gone,
             "{name}: A's schedule and a missing one read alike"

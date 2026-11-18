@@ -73,7 +73,7 @@ async fn observe(diagnostic: bool) -> Observed {
     let envelopes = finish(agent.run("go", options)).await;
     let stored = stores.runs.events(NS, &RunId::new("r1"), 0).await.unwrap();
     let stored = (stored.iter())
-        .map(|envelope| (envelope.seq, envelope.event.to_value().unwrap()))
+        .map(|envelope| (envelope.seq, timeless(&envelope.event)))
         .collect();
     let writes = format!("{:?}", stores.log.lock().unwrap());
     Observed {
@@ -81,6 +81,15 @@ async fn observe(diagnostic: bool) -> Observed {
         stored,
         writes,
     }
+}
+
+/// The event as JSON without its wall-clock durations, which differ run to run.
+fn timeless(event: &Event) -> serde_json::Value {
+    let mut value = event.to_value().unwrap();
+    if let Some(object) = value.as_object_mut() {
+        object.remove("duration_ms");
+    }
+    value
 }
 
 fn diagnostics(envelopes: &[Envelope]) -> Vec<CacheDiagnosticEvent> {
@@ -138,7 +147,7 @@ async fn off_the_stream_the_log_and_the_writes_are_what_they_always_were() {
     let strip = |envelopes: &[Envelope]| -> Vec<(u64, serde_json::Value)> {
         (envelopes.iter())
             .filter(|envelope| !matches!(envelope.event, Event::CacheDiagnostic(_)))
-            .map(|envelope| (envelope.seq, envelope.event.to_value().unwrap()))
+            .map(|envelope| (envelope.seq, timeless(&envelope.event)))
             .collect()
     };
     assert_eq!(strip(&on.envelopes), strip(&off.envelopes));

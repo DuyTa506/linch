@@ -524,11 +524,13 @@ async fn a_gemini_generation_config_gains_fields_but_keeps_the_requests() {
 
 const SALT: &str = "3f1c9a77b2d04e55a1f0c3b6d8e9a2417c5b60d3e8f4a9b1c2d3e4f5a6b7c8d9";
 
+// The headers and client fields are private, so the struct cannot be built
+// with `..default()` here.
+#[allow(clippy::field_reassign_with_default)]
 fn salted() -> RequestOptions {
-    RequestOptions {
-        cache_salt: crate::CacheSalt::new(SALT),
-        ..RequestOptions::default()
-    }
+    let mut options = RequestOptions::default();
+    options.cache_salt = crate::CacheSalt::new(SALT);
+    options
 }
 
 /// Every adapter, the field it sends a cache salt in (none when the vendor
