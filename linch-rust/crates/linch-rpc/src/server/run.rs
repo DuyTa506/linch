@@ -1,10 +1,11 @@
 //! The run methods and the task that drives one run's stream.
 
+use std::collections::VecDeque;
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 
 use futures::{FutureExt, StreamExt};
-use linch::{Principal, RunError, RunId, RunOptions, RunStream};
+use linch::{Envelope, Event, Principal, RunError, RunId, RunOptions, RunStream};
 use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::sync::CancellationToken;
 
@@ -43,7 +44,7 @@ impl Server {
             _place: place,
         };
         tables.runs.insert(stream.run_id().clone(), driven);
-        Ok(Reply::Run(stream))
+        Ok(Reply::Started(stream))
     }
 
     pub(super) fn resume(&self, params: ResumeParams) -> Result<Reply, ErrorObject> {
@@ -249,25 +250,56 @@ impl Server {
         );
     }
 
+    /// Poll a new run's stream until the run is stored: its `init` envelope,
+    /// which comes only after the create commit, or the end of the stream
+    /// (an error: nothing was stored). What it yielded meanwhile is returned
+    /// for [`Self::drive`] to forward in order. `None` when the connection
+    /// ended first: the run is dropped and the host never saw its id.
+    pub(super) async fn until_stored(&self, stream: &mut RunStream) -> Option<VecDeque<Next>> {
+        let mut held = VecDeque::new();
+        loop {
+            let next = tokio::select! {
+                biased;
+                () = self.0.shutdown.cancelled() => {
+                    lock(&self.0.tables).runs.remove(stream.run_id());
+                    return None;
+                }
+                next = Next::poll(stream) => next,
+            };
+            let stored = matches!(&next, Next::Item(Ok(e)) if matches!(e.event, Event::Init(_)));
+            let ended = !matches!(next, Next::Item(Ok(_)));
+            held.push_back(next);
+            if stored || ended {
+                return Some(held);
+            }
+        }
+    }
+
     /// Forward every envelope as soon as the stream yields it, for the
-    /// writer to send in `run.event`s, then send `run.end`.
-    pub(super) async fn drive(&self, mut stream: RunStream) {
+    /// writer to send in `run.event`s, then send `run.end`. `held` is what
+    /// [`Self::until_stored`] polled already.
+    pub(super) async fn drive(&self, mut stream: RunStream, mut held: VecDeque<Next>) {
         let run_id = stream.run_id().clone();
         let error = loop {
-            // A panic inside the run (a tool, a hook) ends it like an error:
-            // it stays at its last durable state and can be resumed.
-            let Ok(next) = AssertUnwindSafe(stream.next()).catch_unwind().await else {
-                let message = "the run failed inside the server (a panic); \
-                               it stays at its last durable state";
-                break Some(ErrorObject::new(code::INTERNAL_ERROR, message));
+            let next = match held.pop_front() {
+                Some(next) => next,
+                None => Next::poll(&mut stream).await,
             };
             match next {
-                None => break None,
-                Some(Err(error)) => {
+                // A panic inside the run (a tool, a hook) ends it like an
+                // error: it stays at its last durable state and can be
+                // resumed.
+                Next::Panicked => {
+                    let message = "the run failed inside the server (a panic); \
+                                   it stays at its last durable state";
+                    break Some(ErrorObject::new(code::INTERNAL_ERROR, message));
+                }
+                Next::End => break None,
+                Next::Item(Err(error)) => {
                     self.warn_pool_exhausted(&error, &run_id);
                     break Some(ErrorObject::from(&error));
                 }
-                Some(Ok(envelope)) => match serde_json::value::to_raw_value(&envelope) {
+                Next::Item(Ok(envelope)) => match serde_json::value::to_raw_value(&envelope) {
                     Ok(raw) => self.0.outbox.envelope(run_id.clone(), raw).await,
                     Err(error) => {
                         let message = format!("envelope could not be encoded: {error}");
@@ -289,6 +321,24 @@ impl Server {
         let end = RunEnd { run_id, error };
         let params = to_value(&end).expect("run.end params encode");
         self.0.outbox.notify(method::RUN_END, params).await;
+    }
+}
+
+/// What a run's stream yielded.
+pub(super) enum Next {
+    Item(Result<Envelope, RunError>),
+    End,
+    /// The poll panicked.
+    Panicked,
+}
+
+impl Next {
+    async fn poll(stream: &mut RunStream) -> Self {
+        match AssertUnwindSafe(stream.next()).catch_unwind().await {
+            Err(_) => Self::Panicked,
+            Ok(None) => Self::End,
+            Ok(Some(item)) => Self::Item(item),
+        }
     }
 }
 

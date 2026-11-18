@@ -59,6 +59,37 @@ impl TestDb {
         query.execute(&self.admin).await.expect("drop the table");
     }
 
+    /// Make every insert into `table` of the test schema wait `delay_sql`
+    /// first (an SQL expression of seconds, such as `0.2`), so a write the
+    /// server has begun is not yet committed. Needs the tables: open an
+    /// agent first.
+    pub async fn delay_inserts(&self, table: &str, delay_sql: &str) {
+        let schema = &self.schema;
+        for sql in [
+            format!(
+                "CREATE FUNCTION {schema}.slow_insert() RETURNS trigger LANGUAGE plpgsql AS \
+                 $$ BEGIN PERFORM pg_sleep({delay_sql}); RETURN NEW; END $$"
+            ),
+            format!(
+                "CREATE TRIGGER slow_insert BEFORE INSERT ON {schema}.{table} \
+                 FOR EACH ROW EXECUTE FUNCTION {schema}.slow_insert()"
+            ),
+        ] {
+            let query = sqlx::query(AssertSqlSafe(sql));
+            query.execute(&self.admin).await.expect("install the delay");
+        }
+    }
+
+    /// Whether `table` holds a row whose `run_id` is `run_id`.
+    pub async fn has_run(&self, table: &str, run_id: &str) -> bool {
+        let sql = format!(
+            "SELECT count(*) FROM {}.{table} WHERE run_id = $1",
+            self.schema
+        );
+        let query = sqlx::query_scalar::<_, i64>(AssertSqlSafe(sql)).bind(run_id);
+        query.fetch_one(&self.admin).await.expect("count the runs") > 0
+    }
+
     /// Drop the schema.
     pub async fn drop(self) {
         let sql = format!("DROP SCHEMA IF EXISTS {} CASCADE", self.schema);
