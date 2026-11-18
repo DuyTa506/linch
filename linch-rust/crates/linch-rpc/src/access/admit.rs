@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use linch::permissions::RuleDecision;
 use linch::verification::Check;
 use linch::{
-    AgentConfig, AgentSpec, McpTransportConfig, PermissionMode, PermissionPolicy, Principal,
-    ProviderConfig, StoreConfig,
+    AgentConfig, AgentSpec, ExecutionConfig, McpTransportConfig, PermissionMode, PermissionPolicy,
+    Principal, ProviderConfig, StoreConfig,
 };
 use serde_json::json;
 
@@ -22,7 +22,8 @@ impl Tenant {
     /// provider, endpoints, permissions, workspace, store and MCP servers
     /// are all allowed. The workspace, the project root and the config
     /// directory are replaced by the paths that were checked, `bash` is
-    /// turned off unless the tenant may run exec tools, and a Postgres
+    /// turned off unless the tenant may run exec tools, the execution
+    /// backend must be one of the tenant's (absent: its first), and a Postgres
     /// store that names no pool size gets the default size or the tenant's
     /// `max_pool_connections`, whichever is smaller.
     pub(crate) async fn admit(&self, config: &mut AgentConfig) -> Result<(), ErrorObject> {
@@ -78,6 +79,7 @@ impl Tenant {
             config.config_dir = Some(dir.await?);
         }
         config.bash &= allow.exec_tools;
+        allow.admit_execution(&mut config.execution)?;
         if let StoreConfig::Postgres {
             dsn,
             max_connections,
@@ -154,6 +156,36 @@ impl Tenant {
 }
 
 impl Allowlists {
+    /// A config that names a backend must name one of the tenant's
+    /// `execution` entries exactly, so its policy (image, network, limits,
+    /// paths) is the operator's; one that names none gets the first entry,
+    /// which is how a tenant is held to a sandbox. The local backend stays
+    /// absent, as in a config that never named it.
+    fn admit_execution(&self, chosen: &mut Option<ExecutionConfig>) -> Result<(), ErrorObject> {
+        let asked = chosen.clone().unwrap_or_default();
+        let admitted = match chosen {
+            Some(_) => self.execution.contains(&asked),
+            None => match self.execution.first() {
+                Some(first) => {
+                    *chosen = (!first.is_local()).then(|| first.clone());
+                    true
+                }
+                None => false,
+            },
+        };
+        if !admitted {
+            let message = format!(
+                "execution backend {} is not in the tenant's execution list",
+                asked.kind()
+            );
+            return Err(refused("execution", message));
+        }
+        if chosen.as_ref().is_some_and(ExecutionConfig::is_local) {
+            *chosen = None;
+        }
+        Ok(())
+    }
+
     fn admit_provider(&self, provider: &ProviderConfig) -> Result<(), ErrorObject> {
         if matches!(provider, ProviderConfig::Scripted { .. }) && !self.scripted_provider {
             let message = "the scripted provider is not allowed on this connection";

@@ -7,7 +7,9 @@
 //! [`Bash`] runs a command in its own process group in the same root; with
 //! `run_in_background` it starts the command in a per-agent [`Processes`]
 //! registry, which [`BashOutput`] reads and [`BashKill`] stops.
-//! [`workspace_tools`] wires all eight together.
+//! [`workspace_tools`] wires all eight together over one
+//! [`ExecutionBackend`]: `local` (commands run as the process's user),
+//! `sandbox` (Landlock, seccomp and rlimits) or `docker` (see [`exec`]).
 //!
 //! [`vfs`] is the virtual filesystem apart from the workspace: file
 //! backends, the `ls`, `read_file`, `write_file` and `edit_file` tools, and
@@ -22,6 +24,7 @@
 
 mod bash;
 mod edit;
+pub mod exec;
 pub mod fs;
 mod glob;
 mod grep;
@@ -38,6 +41,7 @@ use linch_core::Tool;
 
 pub use bash::{Bash, BashKill, BashOutput, MAX_RUNNING, NO_SUCH_PROCESS_CODE, Processes};
 pub use edit::Edit;
+pub use exec::{DockerPolicy, ExecutionBackend, ExecutionConfig, ExecutionError, SandboxPolicy};
 pub use fs::{ExecutionFs, FsError, LocalFs};
 pub use glob::Glob;
 pub use grep::Grep;
@@ -48,17 +52,18 @@ pub use tracker::ReadTracker;
 pub use write::Write;
 
 /// `Read`, `Write`, `Edit`, `Grep`, `Glob`, `Bash`, `BashOutput` and
-/// `BashKill` over one local workspace, sharing `reads`, with `Bash`'s
-/// background commands in `processes`. The host keeps `reads` and
-/// `processes` to call [`ReadTracker::forget`] and
-/// [`Processes::close_session`] when a session ends.
+/// `BashKill` over one execution backend, sharing `reads`, with `Bash`'s
+/// background commands in `processes`. The host keeps `reads`,
+/// `processes` and `backend` to call [`ReadTracker::forget`],
+/// [`Processes::close_session`] and [`ExecutionBackend::close_session`]
+/// when a session ends.
 pub fn workspace_tools(
-    fs: Arc<LocalFs>,
+    backend: &ExecutionBackend,
     reads: Arc<ReadTracker>,
     processes: Arc<Processes>,
 ) -> Vec<Arc<dyn Tool>> {
-    let bash = Bash::new(fs.root()).with_processes(Arc::clone(&processes));
-    let fs: Arc<dyn ExecutionFs> = fs;
+    let bash = Bash::in_backend(backend).with_processes(Arc::clone(&processes));
+    let fs: Arc<dyn ExecutionFs> = backend.fs().clone();
     vec![
         Arc::new(Read::new(fs.clone(), reads.clone())),
         Arc::new(Write::new(fs.clone(), reads.clone())),

@@ -9,7 +9,24 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 ### Added
 
 - Cancel a suspended run: `Agent::cancel`, `run.cancel` with an `agent` handle, and `Agent.cancel(run_id)` / `Run.cancel()` in Python end a run waiting for an approval or an answer, from any process and across restarts on Postgres; each pending call gets a `Tool call aborted` result so the session stays paired, the run ends `aborted`, and a late approve or answer gets `RunTerminal`.
-
+- Execution backends: `AgentConfig.execution` runs `Bash` (foreground and
+  background) through `local` (the default, unchanged), `sandbox` or
+  `docker`; the file tools share the backend's workspace. A non-local
+  backend is part of the run contract through `Bash`'s description.
+- The `sandbox` backend: Landlock (ABI 6, fail closed) confines reads and
+  writes to the workspace, a private per-session `HOME`/`TMPDIR` and system
+  directories, and scopes signals; a seccomp filter refuses Unix sockets,
+  `io_uring` and, with the network off, every socket; `prlimit` caps each
+  process's memory, CPU time and file size, and the command's processes.
+- The `docker` backend: `docker run --rm` per command with Python Linch's
+  limits (2 GiB, 2 CPUs, 512 pids, no capabilities, no new privileges),
+  network `none` by default, and `docker rm -f` on timeout, cancel, kill and
+  when a background command's lifeline fires.
+- Tenant admission of execution backends: `allow.execution` lists the
+  backends a tenant's configs may choose, with the operator's policy; a
+  config naming none gets the first, so a tenant can be held to a sandbox.
+- `LocalExecution`, `SandboxExecution`, `DockerExecution` and `Execution`
+  TypedDicts in the Python client.
 - Context-length recovery: each adapter maps its provider's refusal of a
   prompt longer than the context window to `ProviderError::ContextLength`
   (error kind `context_length`, never retried); with `spec.compaction` set,

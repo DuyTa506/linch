@@ -219,6 +219,8 @@ each with a pattern of at most 1024 bytes or at most 32 keywords
 ## Related pages
 
 - [Tools](./tools.md): permission rules, approvals.
+- [Sandbox](./sandbox.md): where `Bash` runs and what each backend confines; a
+  fourth guardrail, below the permission modes.
 - [Agent config](./agent.md): `spec`, intercept callbacks, the run contract.
 - [Structured output](./structured-output.md): the output schema and its retries.
 - [Events](./events.md): `verification`, `error`, `partial_assistant`, `tool_progress`.

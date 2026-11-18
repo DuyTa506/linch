@@ -3,7 +3,7 @@
 use linch_core::{BuildError, PolicyError, ProviderError, RegistryError};
 use linch_ext::deep_agent::DeepAgentError;
 use linch_mcp::McpError;
-use linch_tools::FsError;
+use linch_tools::{ExecutionError, FsError};
 use thiserror::Error;
 
 use crate::profile::ProfileError;
@@ -26,6 +26,11 @@ pub enum OpenError {
     /// The workspace root is missing or not a directory.
     #[error("workspace unusable: {0}")]
     Workspace(#[source] FsError),
+    /// The execution backend cannot confine what its policy says on this
+    /// host (no Landlock, no `prlimit`, no `docker`), or its policy is
+    /// invalid. The open fails rather than run `Bash` unconfined.
+    #[error("execution backend unusable: {0}")]
+    Execution(#[source] ExecutionError),
     /// A built-in tool could not be registered.
     #[error("tool registration failed: {0}")]
     Tools(#[from] RegistryError),

@@ -172,10 +172,11 @@ phần bắt đầu và kết thúc được stage và ghi cùng barrier kế ti
 
 ## Tool workspace
 
-`workspace_tools(fs, reads, processes)` (`crates/linch-tools/src/lib.rs:55`)
+`workspace_tools(backend, reads, processes)` (`crates/linch-tools/src/lib.rs:60`)
 trả về `Read`, `Write`, `Edit`, `Grep`, `Glob`, `Bash`, `BashOutput` và
-`BashKill` trên một `LocalFs`, dùng chung một `ReadTracker` và một registry
-`Processes`. Crate này chỉ dành cho Unix vì Bash dùng process group.
+`BashKill` trên một `ExecutionBackend` (`LocalFs` của nó cho các tool tệp, shell của
+nó cho `Bash`; xem [Execution backend](#execution-backend)), dùng chung một
+`ReadTracker` và một registry `Processes`. Crate này chỉ dành cho Unix vì Bash dùng process group.
 
 | Tool | Scope | Hành vi |
 |---|---|---|
@@ -218,27 +219,28 @@ và lúc dùng. Công việc tệp chặn chạy trên blocking pool của Tokio
 
 ### Bash
 
-`Bash` (`crates/linch-tools/src/bash.rs:48`) không bị `LocalFs` giới hạn: nó
-bắt đầu trong thư mục gốc, nhưng lệnh có thể chạm tới mọi thứ mà user của process truy
-cập được. Hãy dùng permission engine (mặc định nó hỏi cho `exec`) hoặc một thế giới thực
-thi được sandbox khi điều đó quan trọng. Những gì nó bảo đảm:
+`Bash` (`crates/linch-tools/src/bash.rs:68`) không bị `LocalFs` giới hạn: với
+backend `local` mặc định nó bắt đầu trong thư mục gốc, nhưng lệnh có thể chạm tới mọi
+thứ mà user của process truy cập được. Hãy dùng permission engine (mặc định nó hỏi cho
+`exec`) hoặc backend `sandbox` hay `docker` khi điều đó quan trọng.
+Những gì nó bảo đảm dưới mọi backend:
 
 - stdin bị đóng và lệnh dẫn đầu một process group mới
-  (`crates/linch-tools/src/bash/process.rs:91-117`);
+  (`crates/linch-tools/src/bash/process.rs:106-142`);
 - cả group nhận `SIGKILL` khi timeout, khi hủy, khi future của lời gọi
   bị drop, và khi shell thoát, nên các job nền không bao giờ sống lâu hơn
-  lời gọi (`process.rs:122-170`);
+  lời gọi (`process.rs:146-200`);
 - chỉ chín biến của host được truyền qua (`PATH`, `HOME`, `TERM`, `LANG`,
   `LC_ALL`, `LC_CTYPE`, `USER`, `SHELL`, `TMPDIR`), nên thông tin xác thực của host
-  nằm ngoài môi trường (`bash.rs:33`); `with_env` thêm các biến khác (`bash.rs:82`);
+  nằm ngoài môi trường (`bash.rs:41`); `with_env` thêm các biến khác (`bash.rs:142`);
 - timeout mặc định là 120 s (30 phút khi chạy nền) và bị chặn ở 30 phút
-  (`bash.rs:29-32`);
+  (`bash.rs:30-33`);
   khi có deadline của lời gọi, nó kết thúc 100 ms trước deadline đó, để đầu ra cho đến lúc
-  đó đến được model thay vì một timeout chung chung (`bash.rs:140`);
+  đó đến được model thay vì một timeout chung chung (`bash.rs:198`);
 - mỗi stream giữ 4000 byte đầu và 26 000 byte cuối
   (`bash/capture.rs:5-8`);
 - mọi exit status khác 0 là một kết quả lỗi mang cùng văn bản, với mã
-  `exit_status`, `timeout` hoặc `aborted` (`bash.rs:240-244`).
+  `exit_status`, `timeout` hoặc `aborted` (`bash.rs:281`).
 
 ### Bash chạy nền
 
@@ -258,7 +260,7 @@ tới một process mới.
   (nối với `Agent::close_session`), `Processes::close` và `Drop` của registry
   (agent đóng). Mỗi cách đều kill cả group và chờ reap.
 - **Lifeline.** Một lệnh chạy nền chạy dưới một wrapper `/bin/sh` nhỏ
-  (`process.rs:34`) có stdin là một pipe do server giữ. Một watchdog trong group của
+  (`process.rs:35`) có stdin là một pipe do server giữ. Một watchdog trong group của
   lệnh chặn trên pipe đó bằng builtin `read` và kill group khi nó đóng, việc kernel làm
   khi server chết, kể cả bằng `SIGKILL`. Nó không cần gì trên `PATH` của lệnh. Một lệnh
   foreground không có lifeline: nó chết cùng lời gọi của nó, nhưng một server bị kill
@@ -274,6 +276,72 @@ tới một process mới.
   `no_such_process` (`control.rs:22`) và một thông báo nói rằng background process không
   sống sót qua restart. Không có gì về chúng được journal: kết quả bền vững của lời gọi
   khởi động giữ id của nó, và model khởi động lại lệnh.
+
+### Execution backend
+
+`ExecutionBackend` (`crates/linch-tools/src/exec.rs:120`) là một thế giới thực thi,
+`ExecutionBackend` của Python: `LocalFs` mà các tool tệp dùng và một shell mà `Bash`
+dùng để khởi động lệnh. Mỗi cái thuộc về một agent đã mở, agent này gọi
+`close_session` của nó từ `Agent::close_session`. `ExecutionBackend::open`
+(`exec.rs:149`) dựng nó từ một `ExecutionConfig` (`exec.rs:49`), được gắn tag bởi
+`backend`; nó chặn và thất bại với `ExecutionError` khi backend không thể giới hạn
+những gì policy của nó nói, nên facade mở nó trên một blocking task và từ chối agent
+thay vì chạy `Bash` không bị giới hạn.
+
+Seam của shell là trait `Shell` riêng của crate (`exec.rs:248`): `spawn` khởi động một
+`Launch` (lệnh, root, môi trường của `Bash`, session, có cần lifeline hay không) làm
+leader của một process group mới với stdout và stderr được pipe, và trả về `Child`
+cùng một `Cleanup` tùy chọn để chạy sau khi kill. Mọi thứ sau spawn, `supervise` với
+việc kill group, drain, reap, mức trần và pipe lifeline, đều dùng chung, nên mọi
+backend giữ các bảo đảm ở trên và `Processes::start` (`bash/background.rs:139`) chạy
+các lệnh nền qua cùng shell đó.
+
+| Backend | Shell | Thay đổi gì |
+|---|---|---|
+| `local` | `LocalShell` (`exec.rs:264`) | Không gì cả: `process::spawn`, từng byte giống `Bash` cũ (golden test trong `crates/linch-tools/tests/execution_golden.rs` và `crates/linch/tests/execution_golden.rs`) |
+| `sandbox` | `SandboxShell` (`exec/sandbox/shell.rs:102`) | Landlock, seccomp và `prlimit` bao quanh shell; một `HOME`/`TMPDIR` riêng cho mỗi session |
+| `docker` | `DockerShell` (`exec/docker.rs:178`) | `docker run --rm` cho mỗi lệnh; `docker rm -f` làm cleanup |
+
+Một backend không phải local kết thúc mô tả của `Bash` bằng
+`ExecutionBackend::describe` (`Bash::in_backend`, `bash.rs:91`): model biết cái gì bị
+giới hạn, và vì mô tả là một phần định nghĩa của mỗi tool, backend cùng toàn bộ policy
+của nó là một phần của hợp đồng run. Backend local không thêm gì, nên các định nghĩa
+và hợp đồng của nó là những cái có từ trước khi có backend.
+
+**Sandbox.** Landlock và seccomp giới hạn *thread* gọi, và một process fork từ nó kế
+thừa cả hai. `SandboxShell::spawn` (`sandbox/shell.rs:198`) giao mỗi lệnh cho một
+`std::thread` mới; thread này tạo home của session, đếm các task của user trong `/proc`
+(`user_tasks`, `shell.rs:288`), tự giới hạn mình (`Rules::confine`, `shell.rs:61`),
+vào runtime Tokio và spawn `prlimit --as --cpu --fsize --nproc -- /bin/sh ...`
+(`limits`, `shell.rs:179`); `prlimit` đặt các giới hạn rồi exec shell, nên pid,
+group và stdin của lifeline được giữ nguyên. Các thread của chính server không bao giờ
+bị giới hạn, và không có code nào chạy giữa fork và exec, nên crate giữ
+`forbid(unsafe_code)`. Nếu lời gọi đã biến mất trong lúc đó, thread kill group mới.
+
+- Landlock ABI 6 với `CompatLevel::HardRequirement`: truy cập tệp được xử lý, TCP bind
+  và connect khi mạng tắt, cùng các scope signal và abstract Unix socket. `open` chạy
+  `confine` một lần trên một thread dùng một lần, và mỗi lần spawn kiểm tra trạng thái
+  là `FullyEnforced` với `no_new_privs`.
+- Đọc và thực thi: `SYSTEM_READ_PATHS` (`exec/sandbox.rs:87`), `read_paths`, và khi mạng
+  bật là đích của `/etc/resolv.conf`. Mọi quyền: root và home của session. Quyền tệp:
+  năm thiết bị (`sandbox/shell.rs:35`), không có `/dev/tty`, terminal của server.
+- Bộ lọc seccomp (`crates/linch-tools/src/exec/sandbox/seccomp.rs`) kill một syscall của kiến
+  trúc khác, từ chối các syscall x32, `io_uring_setup` và `socket(AF_UNIX)`, và khi
+  mạng tắt là mọi `socket`. Landlock chỉ giới hạn pathname Unix socket từ ABI 9, và
+  một socket của user của server (session bus, socket Docker) sẽ khởi động thứ gì đó
+  ngoài sandbox.
+- `RLIMIT_NPROC` đếm mọi task của user, nên giới hạn là số đếm lúc spawn cộng
+  `max_processes`: khoảng dư, không phải hạn ngạch.
+- Home là `s<n>` dưới một `TempDir` mà shell sở hữu; `close_session` xóa một cái trên
+  blocking pool, và việc agent bị drop xóa tất cả.
+
+**Docker.** `DockerShell::run_args` (`docker.rs:224`) dựng `docker run` của Python
+(`--memory`, `--cpus`, `--pids-limit`, `--cap-drop ALL`,
+`--security-opt no-new-privileges`, `--network`, `--user`, root được mount tại chính
+đường dẫn của nó) với môi trường được truyền theo tên. Một lệnh nền chạy dưới
+`DOCKER_LIFELINE` (`docker.rs:118`), watchdog của nó chạy `docker rm -f` trước khi kill
+group. Chưa được kiểm chứng với một daemon trong CI ở đây;
+`crates/linch-tools/tests/docker.rs` bỏ qua khi không có.
 
 ## Hệ thống tệp ảo và chuyển kết quả ra ngoài
 

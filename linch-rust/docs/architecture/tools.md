@@ -168,10 +168,11 @@ its start and end staged and written with the next barrier. See
 
 ## Workspace tools
 
-`workspace_tools(fs, reads, processes)` (`crates/linch-tools/src/lib.rs:55`)
+`workspace_tools(backend, reads, processes)` (`crates/linch-tools/src/lib.rs:60`)
 returns `Read`, `Write`, `Edit`, `Grep`, `Glob`, `Bash`, `BashOutput` and
-`BashKill` over one `LocalFs`, sharing one `ReadTracker` and one `Processes`
-registry. The crate is Unix-only because Bash uses process groups.
+`BashKill` over one `ExecutionBackend` (its `LocalFs` for the file tools, its
+shell for `Bash`; see [Execution backends](#execution-backends)), sharing one
+`ReadTracker` and one `Processes` registry. The crate is Unix-only because Bash uses process groups.
 
 | Tool | Scope | Behavior |
 |---|---|---|
@@ -214,27 +215,28 @@ and use. Blocking file work runs on Tokio's blocking pool.
 
 ### Bash
 
-`Bash` (`crates/linch-tools/src/bash.rs:48`) is not confined by `LocalFs`: it
-starts in the root, but the command can reach anything the process user can.
-Use the permission engine (it asks for `exec` by default) or a sandboxed
-execution world when that matters. What it does guarantee:
+`Bash` (`crates/linch-tools/src/bash.rs:68`) is not confined by `LocalFs`:
+with the default `local` backend it starts in the root, but the command can
+reach anything the process user can. Use the permission engine (it asks for
+`exec` by default) or the `sandbox` or `docker` backend when that matters.
+What it guarantees under every backend:
 
 - stdin is closed and the command leads a new process group
-  (`crates/linch-tools/src/bash/process.rs:91-117`);
+  (`crates/linch-tools/src/bash/process.rs:106-142`);
 - the whole group gets `SIGKILL` on timeout, on cancel, when the call's future
   is dropped, and when the shell exits, so background jobs never outlive the
-  call (`process.rs:122-170`);
+  call (`process.rs:146-200`);
 - only nine host variables pass through (`PATH`, `HOME`, `TERM`, `LANG`,
   `LC_ALL`, `LC_CTYPE`, `USER`, `SHELL`, `TMPDIR`), so host credentials stay
-  out of the environment (`bash.rs:33`); `with_env` adds more (`bash.rs:82`);
+  out of the environment (`bash.rs:41`); `with_env` adds more (`bash.rs:142`);
 - the timeout defaults to 120 s (30 min in the background) and is capped at
-  30 min (`bash.rs:29-32`);
+  30 min (`bash.rs:30-33`);
   with a call deadline it ends 100 ms before it, so the output so far reaches
-  the model instead of a generic timeout (`bash.rs:140`);
+  the model instead of a generic timeout (`bash.rs:198`);
 - each stream keeps its first 4000 and last 26 000 bytes
   (`bash/capture.rs:5-8`);
 - any exit status but 0 is an error result carrying the same text, with code
-  `exit_status`, `timeout` or `aborted` (`bash.rs:240-244`).
+  `exit_status`, `timeout` or `aborted` (`bash.rs:281`).
 
 ### Background Bash
 
@@ -254,7 +256,7 @@ never names a new process.
   to `Agent::close_session`), `Processes::close` and the registry's `Drop`
   (the agent closing). Each kills the whole group and waits for the reap.
 - **The lifeline.** A background command runs under a small `/bin/sh` wrapper
-  (`process.rs:34`) whose stdin is a pipe the server holds. A watchdog in the
+  (`process.rs:35`) whose stdin is a pipe the server holds. A watchdog in the
   command's group blocks on that pipe with the `read` builtin and kills the
   group when it closes, which the kernel does when the server dies, even by
   `SIGKILL`. It needs nothing on the command's `PATH`. A foreground command
@@ -270,6 +272,78 @@ never names a new process.
   `no_such_process` (`control.rs:22`) and a message that says background
   processes do not survive a restart. Nothing about them is journaled: the
   start call's durable result keeps its id, and the model starts it again.
+
+### Execution backends
+
+`ExecutionBackend` (`crates/linch-tools/src/exec.rs:120`) is one execution
+world, Python's `ExecutionBackend`: the `LocalFs` the file tools use and a
+shell `Bash` starts commands with. One belongs to one opened agent, which
+calls its `close_session` from `Agent::close_session`. `ExecutionBackend::open`
+(`exec.rs:149`) builds it from an `ExecutionConfig` (`exec.rs:49`), tagged by
+`backend`; it is blocking and fails with `ExecutionError` when the backend
+cannot confine what its policy says, so the facade opens it on a blocking
+task and refuses the agent rather than run `Bash` unconfined.
+
+The shell seam is the crate-private `Shell` trait (`exec.rs:248`): `spawn`
+starts a `Launch` (command, root, `Bash`'s environment, session, whether it
+needs the lifeline) as the leader of a new process group with stdout and
+stderr piped, and returns the `Child` with an optional `Cleanup` to run after
+a kill. Everything after the spawn, `supervise` with its group kill, drain,
+reap, caps and lifeline pipe, is shared, so every backend keeps the
+guarantees above and `Processes::start` (`bash/background.rs:139`) runs
+background commands through the same shell.
+
+| Backend | Shell | What changes |
+|---|---|---|
+| `local` | `LocalShell` (`exec.rs:264`) | Nothing: `process::spawn`, byte for byte the old `Bash` (golden tests in `crates/linch-tools/tests/execution_golden.rs` and `crates/linch/tests/execution_golden.rs`) |
+| `sandbox` | `SandboxShell` (`exec/sandbox/shell.rs:102`) | Landlock, seccomp and `prlimit` around the shell; a private `HOME`/`TMPDIR` per session |
+| `docker` | `DockerShell` (`exec/docker.rs:178`) | `docker run --rm` per command; `docker rm -f` as the cleanup |
+
+A non-local backend ends `Bash`'s description with
+`ExecutionBackend::describe` (`Bash::in_backend`, `bash.rs:91`): the model
+learns what is confined, and since the description is part of each tool's
+definition, the backend and its whole policy are part of the run contract.
+The local backend adds nothing, so its definitions and contract are the ones
+before backends existed.
+
+**The sandbox.** Landlock and seccomp restrict the calling *thread*, and a
+process forked from it inherits both. `SandboxShell::spawn` (`sandbox/shell.rs:198`)
+hands each command to a fresh `std::thread` that creates the session's home,
+counts the user's tasks in `/proc` (`user_tasks`, `shell.rs:288`), restricts
+itself (`Rules::confine`, `shell.rs:61`), enters the Tokio runtime and
+spawns `prlimit --as --cpu --fsize --nproc -- /bin/sh ...`
+(`limits`, `shell.rs:179`); `prlimit` sets the limits and execs the shell,
+so the pid, the group and the lifeline's stdin stay. The server's own threads
+are never restricted, and no code runs between fork and exec, so the crate
+keeps `forbid(unsafe_code)`. If the call went away meanwhile, the thread
+kills the new group.
+
+- Landlock ABI 6 with `CompatLevel::HardRequirement`: handled file access,
+  TCP bind and connect when the network is off, and the signal and abstract
+  Unix socket scopes. `open` runs `confine` once on a throwaway thread, and
+  every spawn checks the status is `FullyEnforced` with `no_new_privs`.
+- Read and execute: `SYSTEM_READ_PATHS` (`exec/sandbox.rs:87`), `read_paths`,
+  and with the network on `/etc/resolv.conf`'s target. Everything: the root
+  and the session's home. File rights: five devices (`sandbox/shell.rs:35`), not `/dev/tty`, the
+  server's terminal.
+- The seccomp filter (`crates/linch-tools/src/exec/sandbox/seccomp.rs`) kills a
+  syscall of a foreign architecture, refuses x32 syscalls, `io_uring_setup`
+  and `socket(AF_UNIX)`, and with the network off every `socket`. Landlock
+  restricts pathname Unix sockets only from ABI 9, and a socket of the
+  server's user (a session bus, a Docker socket) would start something
+  outside the sandbox.
+- `RLIMIT_NPROC` counts every task of the user, so the limit is the count at
+  the spawn plus `max_processes`: headroom, not a quota.
+- Homes are `s<n>` under a `TempDir` the shell owns; `close_session` removes
+  one on the blocking pool, and the agent dropping removes them all.
+
+**Docker.** `DockerShell::run_args` (`docker.rs:224`) builds Python's
+`docker run` (`--memory`, `--cpus`, `--pids-limit`, `--cap-drop ALL`,
+`--security-opt no-new-privileges`, `--network`, `--user`, the root mounted
+at its own path) with the environment passed by name. A background command
+runs under `DOCKER_LIFELINE` (`docker.rs:118`), whose watchdog runs
+`docker rm -f` before killing the group. Not verified against a daemon in CI
+here; `crates/linch-tools/tests/docker.rs` skips without one.
 
 ## Virtual filesystem and result offload
 

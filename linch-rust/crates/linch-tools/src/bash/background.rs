@@ -7,12 +7,11 @@
 //! exiting (its process group is killed then, as in the foreground),
 //! its timeout, `BashKill`, the session closing, or the registry dropping.
 
+use std::collections::HashMap;
 use std::collections::hash_map::RandomState;
-use std::collections::{BTreeMap, HashMap};
 use std::hash::{BuildHasher, Hasher};
 use std::io;
 use std::mem;
-use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -23,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::capture::Capture;
 use super::process::{self, End};
+use crate::exec::{Launch, Shell};
 
 /// Most processes of one session that may run at once.
 pub const MAX_RUNNING: usize = 4;
@@ -48,6 +48,12 @@ const REAPED: Duration = Duration::from_secs(5);
 pub struct Processes {
     sessions: Mutex<HashMap<SessionId, Vec<Arc<Proc>>>>,
     started: AtomicU64,
+    /// Held from the count check to the insert, so two starts cannot both
+    /// pass [`MAX_RUNNING`] while a backend spawns.
+    starting: tokio::sync::Mutex<()>,
+    /// The session of the start in flight, and whether it was closed while
+    /// its command spawned; always locked after `sessions`.
+    in_flight: Mutex<Option<(SessionId, bool)>>,
 }
 
 /// One background process.
@@ -95,7 +101,13 @@ impl Processes {
     /// Kill every process of `session` and forget them; their supervisors
     /// reap them. Sync, so a session-close callback can call it.
     pub fn close_session(&self, session: &SessionId) {
-        let procs = self.lock().remove(session).unwrap_or_default();
+        let procs = {
+            let mut sessions = self.lock();
+            if let Some((starting, closed)) = &mut *self.in_flight() {
+                *closed |= starting == session;
+            }
+            sessions.remove(session).unwrap_or_default()
+        };
         for proc in procs {
             proc.kill.cancel();
         }
@@ -103,7 +115,13 @@ impl Processes {
 
     /// Kill every process of every session and forget them.
     pub fn close(&self) {
-        let sessions = mem::take(&mut *self.lock());
+        let sessions = {
+            let mut sessions = self.lock();
+            if let Some((_, closed)) = &mut *self.in_flight() {
+                *closed = true;
+            }
+            mem::take(&mut *sessions)
+        };
         for proc in sessions.into_values().flatten() {
             proc.kill.cancel();
         }
@@ -116,26 +134,29 @@ impl Processes {
         procs.iter().filter(|proc| proc.is_running()).count()
     }
 
-    /// Start `command` for `session` and supervise it on the current Tokio
-    /// runtime until it ends or `timeout` passes.
-    pub(super) fn start(
+    /// Start `launch` with `shell` for `session` and supervise it on the
+    /// current Tokio runtime until it ends or `timeout` passes.
+    pub(super) async fn start(
         &self,
         session: &SessionId,
-        command: &str,
-        cwd: &Path,
-        env: &BTreeMap<String, String>,
+        shell: &dyn Shell,
+        launch: Launch<'_>,
         timeout: Duration,
     ) -> Result<Arc<Proc>, StartError> {
-        let mut sessions = self.lock();
-        let procs = sessions.entry(session.clone()).or_default();
-        if procs.iter().filter(|proc| proc.is_running()).count() >= MAX_RUNNING {
+        let _starting = self.starting.lock().await;
+        if self.running(session) >= MAX_RUNNING {
             return Err(StartError::Full);
         }
-        let child = process::spawn(command, cwd, env, true).map_err(StartError::Spawn)?;
+        *self.in_flight() = Some((session.clone(), false));
+        let spawned = shell.spawn(launch).await;
+        let spawned = spawned.map_err(|error| {
+            self.in_flight().take();
+            StartError::Spawn(error)
+        })?;
         let (finished, done) = watch::channel(false);
         let proc = Arc::new(Proc {
             id: self.fresh_id(),
-            pid: child.id(),
+            pid: spawned.child.id(),
             timeout,
             kill: CancellationToken::new(),
             state: Mutex::default(),
@@ -145,7 +166,7 @@ impl Processes {
         tokio::spawn(async move {
             let (out, err) = (Arc::clone(&supervised), Arc::clone(&supervised));
             let end = process::supervise(
-                child,
+                spawned,
                 supervised.timeout,
                 &supervised.kill,
                 |chunk| out.lock().stdout.push(chunk),
@@ -157,9 +178,23 @@ impl Processes {
             supervised.lock().end = Some(end.unwrap_or(End::Aborted));
             let _ = finished.send(true);
         });
+        let mut sessions = self.lock();
+        let closed = self.in_flight().take().is_some_and(|(_, closed)| closed);
+        if closed {
+            // Its session closed while it spawned: it ends with the others.
+            proc.kill.cancel();
+            return Ok(proc);
+        }
+        let procs = sessions.entry(session.clone()).or_default();
         procs.push(Arc::clone(&proc));
         prune(procs);
         Ok(proc)
+    }
+
+    fn in_flight(&self) -> MutexGuard<'_, Option<(SessionId, bool)>> {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The process `id` of `session`, if the registry has it.
@@ -231,5 +266,65 @@ impl Proc {
 
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    use async_trait::async_trait;
+    use tokio::sync::Notify;
+
+    use super::*;
+    use crate::bash::process::Spawned;
+    use crate::exec::LocalShell;
+
+    /// A local shell that spawns only once `go` is notified.
+    #[derive(Debug, Default)]
+    struct Slow {
+        go: Notify,
+        waiting: Notify,
+    }
+
+    #[async_trait]
+    impl Shell for Slow {
+        async fn spawn(&self, launch: Launch<'_>) -> io::Result<Spawned> {
+            self.waiting.notify_one();
+            self.go.notified().await;
+            LocalShell.spawn(launch).await
+        }
+    }
+
+    /// A session closed while its command spawns still loses the command.
+    #[tokio::test]
+    async fn a_session_closed_mid_start_kills_the_new_process() {
+        let processes = Arc::new(Processes::new());
+        let shell = Arc::new(Slow::default());
+        let session = SessionId::from("s1");
+        let env = BTreeMap::new();
+        let start = {
+            let (processes, shell, session) =
+                (Arc::clone(&processes), Arc::clone(&shell), session.clone());
+            tokio::spawn(async move {
+                let launch = Launch {
+                    command: "sleep 30",
+                    cwd: Path::new("/"),
+                    env: &env,
+                    session: &session,
+                    lifeline: true,
+                };
+                let timeout = Duration::from_secs(30);
+                processes.start(&session, &*shell, launch, timeout).await
+            })
+        };
+        shell.waiting.notified().await;
+        processes.close_session(&session);
+        shell.go.notify_one();
+        let proc = start.await.unwrap().unwrap();
+        proc.wait(Duration::from_secs(5)).await;
+        assert!(!proc.is_running(), "the process outlived its session");
+        assert_eq!(processes.running(&session), 0);
     }
 }

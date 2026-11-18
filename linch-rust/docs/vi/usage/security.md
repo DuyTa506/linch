@@ -221,6 +221,8 @@ dịch được hoặc khớp văn bản rỗng, và một keyword rỗng hoặc
 ## Các trang liên quan
 
 - [Tool](./tools.md): quy tắc quyền, phê duyệt.
+- [Sandbox](./sandbox.md): nơi `Bash` chạy và mỗi backend giới hạn những gì; một
+  guardrail thứ tư, nằm dưới các permission mode.
 - [Config của agent](./agent.md): `spec`, intercept callback, hợp đồng của run.
 - [Structured output](./structured-output.md): output schema và các retry của nó.
 - [Event](./events.md): `verification`, `error`, `partial_assistant`, `tool_progress`.

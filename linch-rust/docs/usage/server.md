@@ -109,7 +109,7 @@ token twice is refused. A tenant only a worker serves needs no token.
 | `allow` field | When absent | What it allows |
 |---|---|---|
 | `scripted_provider` | `false` | The `scripted` provider, for tests and evals |
-| `exec_tools` | `false` | `Bash` for workspace agents, which runs commands as the server's user |
+| `exec_tools` | `false` | `Bash` for workspace agents, which runs commands through the agent's execution backend |
 | `max_runs` | 16 | Runs the tenant drives at once, across all its connections |
 | `max_agents` | 16 | Agents the tenant keeps open at once, across all its connections |
 | `max_connections` | 8 | Connections acting for the tenant at once |
@@ -123,6 +123,7 @@ token twice is refused. A tenant only a worker serves needs no token.
 | `max_schedules` | none: no schedules | Schedules the tenant may keep in each database ([Scheduler](./scheduler.md#what-a-tenant-may-schedule)) |
 | `min_schedule_interval_ms` | 60000 | The shortest time between two fires of its schedules |
 | `max_queued_jobs` | none: no background runs | Unfinished background jobs it may have when it queues one |
+| `execution` | `[{"backend": "local"}]` | The execution backends a config may choose, each with its whole policy; a config's `execution` must equal one, and a config naming none gets the first, so `[{"backend": "sandbox"}]` holds the tenant to the sandbox ([Sandbox](./sandbox.md)) |
 
 The live providers at their public endpoints and the memory stores need no
 entry. A `postgres_dsns` entry without a user stands for the server's own
@@ -346,11 +347,12 @@ is read, no MCP process starts and no database is connected. A refusal is
 | `mcp_command` | A stdio command and argument list that match no entry | The server would start that program |
 | `mcp_env` | An `env` name the matching entry does not list | It could change what the program loads |
 | `mcp_url` | An MCP HTTP URL outside `mcp_urls` | The server would connect there |
+| `execution` | An `execution` that equals no `allow.execution` entry, or none when that list is empty | The backend decides what `Bash` can reach; its policy is the operator's |
 | `redaction` | More than 32 `spec.redaction` rules, or a pattern over 1024 bytes | The server compiles each pattern and runs it on every response and tool result |
 | `verification` | More than 32 `spec.verification` verifiers, a pattern over 1024 bytes, or more than 32 keywords in one | The same, for every final answer |
 
 A path that does not exist is refused like one outside the roots, so a
-client cannot probe the server's file system. Three changes are made
+client cannot probe the server's file system. Four changes are made
 silently instead:
 
 - Without `exec_tools`, the config's `bash` is turned off and the agent opens
@@ -358,6 +360,8 @@ silently instead:
   its contract differs from the same config on stdio.
 - The workspace, the project root and the config directory are replaced by
   the canonical paths that were checked.
+- A config without `execution` gets the tenant's first `allow.execution`
+  entry, which holds the tenant to a sandbox when that is the first.
 - A Postgres store without `max_connections` gets the default pool size or
   the tenant's `max_pool_connections`, whichever is smaller.
 
@@ -370,7 +374,7 @@ carries one.
 
 | Who | What it sees of the server's environment |
 |---|---|
-| `Bash` | Only `PATH`, `HOME`, `TERM`, `LANG`, `LC_ALL`, `LC_CTYPE`, `USER`, `SHELL`, `TMPDIR` |
+| `Bash` | Only `PATH`, `HOME`, `TERM`, `LANG`, `LC_ALL`, `LC_CTYPE`, `USER`, `SHELL`, `TMPDIR`; in the `sandbox` backend `HOME` and `TMPDIR` are its private home, and no other process's `/proc/<pid>/environ` is readable ([Sandbox](./sandbox.md)) |
 | An MCP stdio server | Only `HOME`, `LOGNAME`, `PATH`, `SHELL`, `TERM`, `USER`, plus the `env` its transport sets |
 | Another process of the same user | On Linux the server is marked not dumpable, so `/proc/<server pid>/environ` and its memory cannot be read |
 

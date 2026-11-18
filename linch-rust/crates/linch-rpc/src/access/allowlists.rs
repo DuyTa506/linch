@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
-use linch::PermissionMode;
+use linch::{ExecutionConfig, PermissionMode};
 use serde::Deserialize;
 use sqlx::postgres::{PgConnectOptions, PgSslMode};
 use url::{Origin, Url};
@@ -36,7 +36,8 @@ pub const DEFAULT_MIN_SCHEDULE_INTERVAL: Duration = Duration::from_secs(60);
 
 /// What a tenant may ask for, built with the methods below. A new value
 /// allows the memory stores, the permission modes `default` and
-/// `accept_edits`, the live providers at their public endpoints, and
+/// `accept_edits`, the live providers at their public endpoints, the
+/// `local` execution backend (which matters only with exec tools), and
 /// nothing else: no `Bash`, no workspace; and at most
 /// [`DEFAULT_MAX_RUNS`] live runs, [`DEFAULT_MAX_AGENTS`] open agents and
 /// [`DEFAULT_MAX_CONNECTIONS`] connections at once, and Postgres pools of
@@ -58,6 +59,7 @@ pub struct Allowlists {
     pub(super) postgres: Vec<PgTarget>,
     pub(super) mcp_commands: Vec<McpCommand>,
     pub(super) mcp_origins: Vec<Origin>,
+    pub(super) execution: Vec<ExecutionConfig>,
 }
 
 /// One MCP `stdio` server a tenant may start: its program and arguments,
@@ -231,6 +233,7 @@ impl Allowlists {
             postgres: Vec::new(),
             mcp_commands: Vec::new(),
             mcp_origins: Vec::new(),
+            execution: vec![ExecutionConfig::Local {}],
         }
     }
 
@@ -316,12 +319,25 @@ impl Allowlists {
         self
     }
 
-    /// Whether a workspace agent gets `Bash`, which runs commands
-    /// unconfined, as the server's user, with `BashOutput` and `BashKill`
-    /// for its background commands. Off by default: the agent then has
-    /// none of the three, whatever its config's `bash` says.
+    /// Whether a workspace agent gets `Bash`, which runs commands through
+    /// its execution backend (see [`Self::execution`]; unconfined, as the
+    /// server's user, with the default `local`), with `BashOutput` and
+    /// `BashKill` for its background commands. Off by default: the agent
+    /// then has none of the three, whatever its config's `bash` says.
     pub fn exec_tools(mut self, allowed: bool) -> Self {
         self.exec_tools = allowed;
+        self
+    }
+
+    /// The execution backends a config may choose, each with the policy
+    /// the operator set, replacing the default `[local]`. A config's
+    /// `execution` must equal an entry exactly, so a client cannot pick
+    /// its own image, network or limits; a config without one gets the
+    /// first entry. So `[sandbox]` holds every agent of the tenant to that
+    /// sandbox and denies the local backend, and an empty list refuses
+    /// every config.
+    pub fn execution(mut self, backends: &[ExecutionConfig]) -> Self {
+        self.execution = backends.to_vec();
         self
     }
 

@@ -110,7 +110,7 @@ sẽ bị từ chối. Một tenant chỉ do worker phục vụ thì không cầ
 | Trường `allow` | Khi không có | Cho phép gì |
 |---|---|---|
 | `scripted_provider` | `false` | Provider `scripted`, cho kiểm thử và đánh giá |
-| `exec_tools` | `false` | `Bash` cho agent có workspace, chạy lệnh với tư cách người dùng của server |
+| `exec_tools` | `false` | `Bash` cho agent có workspace, chạy lệnh qua execution backend của agent |
 | `max_runs` | 16 | Số run mà tenant điều khiển cùng lúc, trên tất cả các kết nối của nó |
 | `max_agents` | 16 | Số agent mà tenant giữ mở cùng lúc, trên tất cả các kết nối của nó |
 | `max_connections` | 8 | Số kết nối hành động thay mặt tenant cùng lúc |
@@ -124,6 +124,7 @@ sẽ bị từ chối. Một tenant chỉ do worker phục vụ thì không cầ
 | `max_schedules` | không có: không có lịch | Số lịch mà tenant được giữ trong mỗi cơ sở dữ liệu ([Scheduler](./scheduler.md#tenant-được-lập-lịch-gì)) |
 | `min_schedule_interval_ms` | 60000 | Khoảng thời gian ngắn nhất giữa hai lần kích hoạt của các lịch của nó |
 | `max_queued_jobs` | không có: không có run nền | Số job nền chưa xong mà nó được có khi đưa thêm một job vào hàng đợi |
+| `execution` | `[{"backend": "local"}]` | Các execution backend mà một cấu hình có thể chọn, mỗi cái kèm toàn bộ policy của nó; `execution` của cấu hình phải bằng một mục, và cấu hình không nêu gì nhận mục đầu tiên, nên `[{"backend": "sandbox"}]` giữ tenant trong sandbox ([Sandbox](./sandbox.md)) |
 
 Các provider thật ở endpoint công khai của chúng và các kho lưu trữ trong bộ nhớ không
 cần mục nào. Một mục `postgres_dsns` không có người dùng đại diện cho người dùng của
@@ -347,11 +348,12 @@ kiểm tra: `NotAllowed` trong Python, có `kind` là tên đó.
 | `mcp_command` | Một lệnh stdio và danh sách đối số không khớp mục nào | Server sẽ khởi động chương trình đó |
 | `mcp_env` | Một tên `env` mà mục khớp không liệt kê | Nó có thể thay đổi những gì chương trình nạp |
 | `mcp_url` | Một URL MCP HTTP ngoài `mcp_urls` | Server sẽ kết nối tới đó |
+| `execution` | Một `execution` không bằng mục `allow.execution` nào, hoặc có một cái khi danh sách đó rỗng | Backend quyết định `Bash` chạm tới được gì; policy của nó thuộc về operator |
 | `redaction` | Hơn 32 rule trong `spec.redaction`, hoặc một pattern dài quá 1024 byte | Server biên dịch từng pattern và chạy nó trên mọi response và kết quả tool |
 | `verification` | Hơn 32 verifier trong `spec.verification`, một pattern dài quá 1024 byte, hoặc hơn 32 keyword trong một verifier | Tương tự, cho mọi câu trả lời cuối cùng |
 
 Một đường dẫn không tồn tại bị từ chối giống như đường dẫn ngoài các root, để client
-không thể dò hệ thống tệp của server. Ba thay đổi được thực hiện âm thầm thay vì từ
+không thể dò hệ thống tệp của server. Bốn thay đổi được thực hiện âm thầm thay vì từ
 chối:
 
 - Khi không có `exec_tools`, `bash` của cấu hình bị tắt và agent mở mà không có
@@ -359,6 +361,7 @@ chối:
   với cùng cấu hình đó trên stdio.
 - Workspace, project root và thư mục cấu hình được thay bằng các đường dẫn chuẩn tắc
   đã được kiểm tra.
+- Một cấu hình không có `execution` nhận mục `allow.execution` đầu tiên của tenant, giữ tenant trong sandbox khi đó là mục đầu.
 - Một kho Postgres không có `max_connections` nhận kích thước pool mặc định hoặc
   `max_pool_connections` của tenant, tùy giá trị nào nhỏ hơn.
 
@@ -371,7 +374,7 @@ theo khóa.
 
 | Ai | Thấy gì từ môi trường của server |
 |---|---|
-| `Bash` | Chỉ `PATH`, `HOME`, `TERM`, `LANG`, `LC_ALL`, `LC_CTYPE`, `USER`, `SHELL`, `TMPDIR` |
+| `Bash` | Chỉ `PATH`, `HOME`, `TERM`, `LANG`, `LC_ALL`, `LC_CTYPE`, `USER`, `SHELL`, `TMPDIR`; trong backend `sandbox`, `HOME` và `TMPDIR` là home riêng của nó, và `/proc/<pid>/environ` của process khác không đọc được ([Sandbox](./sandbox.md)) |
 | Một MCP stdio server | Chỉ `HOME`, `LOGNAME`, `PATH`, `SHELL`, `TERM`, `USER`, cộng với `env` mà transport của nó đặt |
 | Tiến trình khác của cùng người dùng | Trên Linux, server được đánh dấu không dump được, nên không đọc được `/proc/<server pid>/environ` và bộ nhớ của nó |
 

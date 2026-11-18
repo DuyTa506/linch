@@ -315,8 +315,10 @@ status: final
   have been read.
 - **Confinement.** Paths are relative to the workspace. `..`, absolute paths
   outside it and symlinks that lead out are refused.
-- **`Bash` is not confined.** It starts in the workspace but can reach
-  anything the server's user can. It asks in modes `default` and
+- **`Bash` is not confined by default.** With the default `local` backend it
+  starts in the workspace but can reach anything the server's user can;
+  `execution` runs it in a sandbox or a container instead
+  ([Sandbox](./sandbox.md)). It asks in modes `default` and
   `accept_edits`; only nine variables of the server's environment (`PATH`,
   `HOME`, `TERM`, `LANG`, `LC_ALL`, `LC_CTYPE`, `USER`, `SHELL`, `TMPDIR`)
   reach the command, so provider keys do not. Its timeout is 120 s by default.

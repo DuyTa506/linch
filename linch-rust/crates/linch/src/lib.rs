@@ -56,9 +56,10 @@ mod profile;
 pub mod project;
 
 pub use config::{
-    AgentConfig, DeepAgentConfig, DeepAgentProfileChoice, FilesystemConfig, MIN_LEASE_TTL_MS,
-    McpConfig, McpTransportConfig, ModelRates, PricingOverrides, ProviderConfig,
-    ReasoningSummaryConfig, ReconnectConfig, StoreConfig,
+    AgentConfig, DeepAgentConfig, DeepAgentProfileChoice, DockerPolicy, ExecutionConfig,
+    FilesystemConfig, MIN_LEASE_TTL_MS, McpConfig, McpTransportConfig, ModelRates,
+    PricingOverrides, ProviderConfig, ReasoningSummaryConfig, ReconnectConfig, SandboxPolicy,
+    StoreConfig,
 };
 pub use error::OpenError;
 pub use linch_core::*;

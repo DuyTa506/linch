@@ -245,6 +245,7 @@ impl From<&OpenError> for ErrorObject {
             }
             OpenError::Provider(_) => Self::new(code::PROVIDER_UNAVAILABLE, message),
             OpenError::Workspace(_)
+            | OpenError::Execution(_)
             | OpenError::Tools(_)
             | OpenError::Policy(_)
             | OpenError::DeepAgent(_)

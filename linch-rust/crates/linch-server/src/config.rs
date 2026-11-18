@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use linch::PermissionMode;
+use linch::{ExecutionConfig, PermissionMode};
 use linch_rpc::{AccessError, Allowlists, McpCommand, Tenant, Tokens};
 use serde::Deserialize;
 use thiserror::Error;
@@ -122,9 +122,9 @@ impl fmt::Debug for TokenSource {
 pub struct AllowConfig {
     /// Whether the `scripted` provider is allowed (for tests and evals).
     pub scripted_provider: bool,
-    /// Whether a workspace agent gets `Bash`, which runs commands
-    /// unconfined, as the server's user, with `BashOutput` and `BashKill`;
-    /// off when absent.
+    /// Whether a workspace agent gets `Bash`, which runs commands through
+    /// its execution backend (unconfined, as the server's user, with
+    /// `local`), with `BashOutput` and `BashKill`; off when absent.
     pub exec_tools: bool,
     /// Runs the tenant's connections may drive at once, together, at
     /// least 1; [`linch_rpc::DEFAULT_MAX_RUNS`] when absent.
@@ -167,6 +167,11 @@ pub struct AllowConfig {
     pub mcp_commands: Vec<McpCommand>,
     /// Endpoints an MCP `http` transport may name.
     pub mcp_urls: Vec<String>,
+    /// Execution backends a config may choose, each with its whole policy
+    /// (`{"backend": "sandbox", ...}`); a config naming none gets the
+    /// first. `[{"backend": "local"}]` when absent; list only a sandbox to
+    /// hold the tenant to it.
+    pub execution: Option<Vec<ExecutionConfig>>,
 }
 
 /// The server config could not be read or set up. No message holds a
@@ -343,6 +348,9 @@ impl AllowConfig {
         }
         if let Some(modes) = &self.permission_modes {
             allow = allow.permission_modes(modes);
+        }
+        if let Some(backends) = &self.execution {
+            allow = allow.execution(backends);
         }
         Ok(allow)
     }

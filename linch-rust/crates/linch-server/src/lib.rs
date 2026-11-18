@@ -38,7 +38,8 @@
 //!        "postgres_dsns": ["postgres://linch_acme@db.internal:5432/linch"],
 //!        "mcp_commands": [{"command": "/usr/local/bin/git-mcp",
 //!                          "args": ["--read-only"], "env": ["GIT_TOKEN"]}],
-//!        "mcp_urls": ["https://mcp.internal"]}}}}
+//!        "mcp_urls": ["https://mcp.internal"],
+//!        "execution": [{"backend": "sandbox", "network": false}]}}}}
 //! ```
 //!
 //! At least one of `socket`, `http` and `worker` is required, and with a
@@ -55,7 +56,9 @@
 //! cores, at least 10 and at most 32). `max_schedules` and
 //! `max_queued_jobs` give the tenant schedules and background runs (none
 //! when absent), and `min_schedule_interval_ms` (60000 when absent) is the
-//! shortest time between two fires. A 0 is refused when the config
+//! shortest time between two fires. `execution`, the backends a config
+//! may run `Bash` through (a config naming none gets the first), defaults
+//! to `[{"backend": "local"}]`. A 0 is refused when the config
 //! loads. See [`linch_rpc::Allowlists`] for how
 //! each entry matches.
 //!

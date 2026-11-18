@@ -15,6 +15,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::capture::Capture;
+use crate::exec::Cleanup;
 
 /// How long to keep reading after the group is killed. Only a process that
 /// left the group (`setsid`) can hold a pipe open past this.
@@ -31,7 +32,7 @@ const REAP: Duration = Duration::from_secs(2);
 /// outlives the server. `exec` keeps the shell's pid, the group leader's.
 /// The watchdog uses only builtins (nothing ever writes the pipe, so
 /// `read` returns at end of file), so it works whatever the `PATH`.
-const LIFELINE: &str = "exec 3<&0 </dev/null; (read -r _ <&3; kill -KILL 0) >/dev/null 2>&1 & \
+pub(crate) const LIFELINE: &str = "exec 3<&0 </dev/null; (read -r _ <&3; kill -KILL 0) >/dev/null 2>&1 & \
                         exec 3<&-; exec /bin/sh -c \"$1\"";
 
 /// Why the command stopped.
@@ -53,24 +54,21 @@ pub(super) struct Finished {
     pub stderr: Capture,
 }
 
-/// Run `command` with `/bin/sh -c` in `cwd` with exactly `env`, stdin
-/// closed, keeping the captured output.
+/// Supervise a foreground command an execution backend started, keeping
+/// the captured output.
 ///
-/// The shell leads a new process group. When the shell exits, times out or
+/// The command leads a new process group. When the shell exits, times out or
 /// is cancelled, the whole group gets `SIGKILL`, so nothing it started
 /// outlives the call. Dropping the returned future kills the group too.
 pub(super) async fn run(
-    command: &str,
-    cwd: &Path,
-    env: &BTreeMap<String, String>,
+    spawned: Spawned,
     timeout: Duration,
     cancel: &CancellationToken,
 ) -> io::Result<Finished> {
-    let child = spawn(command, cwd, env, false)?;
     let mut out = Capture::default();
     let mut err = Capture::default();
     let end = supervise(
-        child,
+        spawned,
         timeout,
         cancel,
         |chunk| out.push(chunk),
@@ -84,28 +82,53 @@ pub(super) async fn run(
     })
 }
 
+/// A command the execution backend started, with what to run once its
+/// group is killed before it exited (a container to remove).
+#[derive(Debug)]
+pub(crate) struct Spawned {
+    pub child: Child,
+    pub cleanup: Option<Cleanup>,
+}
+
+/// The arguments of `/bin/sh` for `command`: `-c` and the command, or with
+/// `lifeline` the [`LIFELINE`] wrapper that runs it.
+pub(crate) fn shell_args(command: &str, lifeline: bool) -> Vec<&str> {
+    match lifeline {
+        true => vec!["-c", LIFELINE, "linch-bash", command],
+        false => vec!["-c", command],
+    }
+}
+
 /// Start `command` under `/bin/sh` in `cwd` with exactly `env`, as the
 /// leader of a new process group, stdout and stderr piped. With `lifeline`
 /// the command runs under [`LIFELINE`], so it dies with this process;
 /// otherwise its stdin is closed.
-pub(super) fn spawn(
+pub(crate) fn spawn(
     command: &str,
     cwd: &Path,
     env: &BTreeMap<String, String>,
     lifeline: bool,
 ) -> io::Result<Child> {
     let mut shell = Command::new("/bin/sh");
-    if lifeline {
-        shell
-            .arg("-c")
-            .arg(LIFELINE)
-            .arg("linch-bash")
-            .arg(command)
-            .stdin(Stdio::piped());
-    } else {
-        shell.arg("-c").arg(command).stdin(Stdio::null());
-    }
-    shell
+    shell.args(shell_args(command, lifeline));
+    start(shell, cwd, env, lifeline)
+}
+
+/// Start `program` in `cwd` with exactly `env`, as the leader of a new
+/// process group, stdout and stderr piped, stdin a pipe with `lifeline`
+/// (the caller holds its write end) and closed without.
+pub(crate) fn start(
+    mut program: Command,
+    cwd: &Path,
+    env: &BTreeMap<String, String>,
+    lifeline: bool,
+) -> io::Result<Child> {
+    let stdin = match lifeline {
+        true => Stdio::piped(),
+        false => Stdio::null(),
+    };
+    program
+        .stdin(stdin)
         .current_dir(cwd)
         .env_clear()
         .envs(env)
@@ -117,18 +140,20 @@ pub(super) fn spawn(
 }
 
 /// Pump `child`'s output into `on_out` and `on_err` until it exits, times
-/// out or `cancel` fires; then kill its whole group, drain what is left
-/// and reap the shell. Dropping the future kills the group too.
+/// out or `cancel` fires; then kill its whole group, drain what is left,
+/// reap the shell and, unless it exited, run the cleanup. Dropping the
+/// future kills the group too and starts the cleanup.
 pub(super) async fn supervise(
-    mut child: Child,
+    spawned: Spawned,
     timeout: Duration,
     cancel: &CancellationToken,
     mut on_out: impl FnMut(&[u8]),
     mut on_err: impl FnMut(&[u8]),
 ) -> io::Result<End> {
+    let Spawned { mut child, cleanup } = spawned;
     // Declared after `child`, so on drop it kills the group before the
     // child handle goes.
-    let mut group = Group::of(child.id());
+    let mut group = Group::of(child.id(), cleanup);
     let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
         unreachable!("both streams are piped");
     };
@@ -160,6 +185,7 @@ pub(super) async fn supervise(
     };
     if !matches!(end, End::Exited(_)) {
         let _ = tokio::time::timeout(REAP, child.wait()).await;
+        group.clean().await;
     }
     // The shell is reaped (or left to tokio's reaper), so its id may be
     // reused: never signal the group again.
@@ -175,18 +201,19 @@ async fn pump(mut pipe: impl AsyncRead + Unpin, push: &mut impl FnMut(&[u8])) {
     }
 }
 
-/// The command's process group, killed when this guard drops while armed.
-struct Group(Option<Pid>);
+/// The command's process group, killed when this guard drops while armed,
+/// with the cleanup to run after a kill.
+struct Group(Option<Pid>, Option<Cleanup>);
 
 impl Group {
     /// The group led by process `id`. Ids 0 and 1 never name a group here;
     /// `kill(-1)` would signal every process.
-    fn of(id: Option<u32>) -> Self {
+    fn of(id: Option<u32>, cleanup: Option<Cleanup>) -> Self {
         let pid = id
             .and_then(|id| i32::try_from(id).ok())
             .filter(|&id| id > 1)
             .and_then(Pid::from_raw);
-        Self(pid)
+        Self(pid, cleanup)
     }
 
     /// Send `SIGKILL` to every process in the group. An empty group is fine.
@@ -196,14 +223,25 @@ impl Group {
         }
     }
 
+    /// Run the cleanup, if any, and wait for it.
+    async fn clean(&mut self) {
+        if let Some(cleanup) = self.1.take() {
+            cleanup.run().await;
+        }
+    }
+
     fn disarm(&mut self) {
         self.0 = None;
+        self.1 = None;
     }
 }
 
 impl Drop for Group {
     fn drop(&mut self) {
         self.kill();
+        if let Some(cleanup) = self.1.take() {
+            cleanup.detach();
+        }
     }
 }
 

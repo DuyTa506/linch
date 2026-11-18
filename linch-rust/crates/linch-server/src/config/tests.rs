@@ -50,6 +50,29 @@ fn a_config_names_listeners_tenants_tokens_and_allowlists() {
 }
 
 #[test]
+fn a_tenant_lists_its_execution_backends_with_their_policies() {
+    let text = json!({
+        "http": "127.0.0.1:1",
+        "tenants": {
+            "acme": {"tokens": [{"value": "tok-acme-inline-0001"}],
+                     "allow": {"execution": [{"backend": "sandbox", "memory_bytes": 1073741824},
+                                             {"backend": "docker", "image": "alpine:3.20"}]}},
+            "beta": {"tokens": [{"value": "tok-beta-inline-0001"}]}
+        }
+    })
+    .to_string();
+    let config = ServerConfig::from_json(&text).unwrap();
+    let acme = config.tenants["acme"].allow.execution.as_ref().unwrap();
+    let kinds: Vec<&str> = acme.iter().map(ExecutionConfig::kind).collect();
+    assert_eq!(kinds, ["sandbox", "docker"]);
+    assert_eq!(config.tenants["beta"].allow.execution, None);
+    assert!(config.tokens(no_env).is_ok());
+    let typo = json!({"http": "127.0.0.1:1", "tenants": {"a": {"tokens": [],
+                      "allow": {"execution": [{"backend": "sandbox", "netwrok": true}]}}}});
+    assert!(ServerConfig::from_json(&typo.to_string()).is_err());
+}
+
+#[test]
 fn bad_configs_are_refused_without_echoing_tokens() {
     let cases = [
         (json!({"tenants": {}}), "neither socket nor http"),
