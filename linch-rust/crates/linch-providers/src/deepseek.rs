@@ -64,6 +64,10 @@ pub struct DeepSeekOptions {
     /// The context window of every model; `None` gives 128000, Python's
     /// conservative fallback.
     pub context_window: Option<u64>,
+    /// Extra body fields, headers and a timeout for every request.
+    pub request: crate::RequestOptions,
+    /// Chat Completions settings (`parallel_tool_calls`, usage option).
+    pub chat: crate::ChatOptions,
 }
 
 impl DeepSeekOptions {
@@ -73,6 +77,8 @@ impl DeepSeekOptions {
             api_key,
             base_url: DEFAULT_BASE_URL.into(),
             context_window: None,
+            request: crate::RequestOptions::default(),
+            chat: crate::ChatOptions::default(),
         }
     }
 
@@ -99,7 +105,9 @@ impl DeepSeek {
     /// for example when no TLS roots are available.
     pub fn new(options: DeepSeekOptions) -> Result<Self, ProviderError> {
         crate::base_url::require(&options.base_url)?;
-        let client = crate::transport::client(CONNECT_TIMEOUT, READ_TIMEOUT)
+        let client = options
+            .request
+            .client(CONNECT_TIMEOUT, READ_TIMEOUT)
             .map_err(|err| http::transport(Some(&options.api_key), &err))?;
         Ok(Self { client, options })
     }
@@ -165,10 +173,15 @@ impl Provider for DeepSeek {
     /// and input modalities.
     async fn list_models(&self) -> Result<ModelList, ModelsError> {
         let url = format!("{}/models", self.options.base_url.trim_end_matches('/'));
+        let request = &self.options.request;
         let key = &self.options.api_key;
-        let bearer = format!("Bearer {}", key.expose());
-        let headers = [("authorization", bearer.as_str())];
-        let value = crate::models::get_json(&self.client, &url, &headers, Some(key)).await?;
+        let bearer = (request.key_to_send(key)).map(|key| format!("Bearer {}", key.expose()));
+        let headers: Vec<(&str, &str)> = (bearer.as_deref())
+            .map(|value| ("authorization", value))
+            .into_iter()
+            .collect();
+        let value = (crate::models::get_json(&self.client, &url, &headers, Some(key)).await)
+            .map_err(|err| request.scrub_error(err))?;
         let row = crate::models::OpenAiRow {
             context: Some("context_window"),
             output: Some("max_output_tokens"),
@@ -182,23 +195,34 @@ impl Provider for DeepSeek {
         request: ProviderRequest,
         cancel: CancellationToken,
     ) -> Result<ProviderStream, ProviderError> {
-        let body = build_payload(&request)?;
+        let mut body = build_payload(&request)?;
+        self.options.chat.apply(&mut body);
+        self.options.request.merge_body(&mut body);
         let url = format!(
             "{}/chat/completions",
             self.options.base_url.trim_end_matches('/')
         );
         let key = &self.options.api_key;
         let overflow = &crate::overflow::DEEPSEEK;
-        let response = http::post(&self.client, &url, Some(key), &body, overflow, &cancel).await?;
+        let response = http::post(
+            &self.client,
+            &url,
+            (!self.options.request.sets_key_header()).then_some(key),
+            &body,
+            overflow,
+            &cancel,
+        )
+        .await
+        .map_err(|err| self.options.request.scrub_error(err))?;
         let translator =
             Translator::new(request.model, Some(ReasoningField::ReasoningContent), usage)
                 .refusing(overflow);
-        Ok(stream::events(
+        Ok(self.options.request.scrub_stream(stream::events(
             response.bytes_stream(),
             translator,
             cancel,
             Some(key.clone()),
-        ))
+        )))
     }
 }
 

@@ -20,12 +20,15 @@ pub mod openai;
 mod openai_compat;
 mod overflow;
 mod pricing;
+mod request;
 pub mod responses;
 pub mod servers;
 mod sse;
 #[cfg(test)]
 mod test_server;
 mod transport;
+#[cfg(test)]
+mod wire_tests;
 
 pub use anthropic::{Anthropic, AnthropicOptions};
 pub use api_key::ApiKey;
@@ -34,5 +37,6 @@ pub use deepseek::{DeepSeek, DeepSeekOptions};
 pub use gemini::{Gemini, GeminiOptions};
 pub use openai::{OpenAiChat, OpenAiChatOptions};
 pub use pricing::{ModelPricing, cost, model_pricing};
+pub use request::{ChatOptions, RequestOptions, is_key_header};
 pub use responses::{OpenAiResponses, ReasoningSummary, ResponsesOptions};
 pub use servers::{Server, ServerOptions};

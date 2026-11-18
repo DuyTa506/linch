@@ -225,7 +225,7 @@ async fn the_beta_header_goes_with_a_native_request() {
     let body = json!({});
     let cancel = CancellationToken::new();
     let beta = Some(catalog::BETA);
-    let _ = http::post(&client, &url, &key, &body, beta, &cancel).await;
+    let _ = http::post(&client, &url, &key, true, &body, beta, &cancel).await;
     let raw = server.join().unwrap();
     assert!(
         raw.contains("anthropic-beta: inline-tools-2026-09-15"),

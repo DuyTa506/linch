@@ -16,6 +16,7 @@ mod mcp;
 mod memory;
 mod pricing;
 mod redact;
+mod request;
 
 pub use deep_agent::{DeepAgentConfig, DeepAgentProfileChoice};
 pub use filesystem::FilesystemConfig;
@@ -23,6 +24,7 @@ pub use mcp::{McpConfig, McpTransportConfig, ReconnectConfig};
 pub use memory::{MemoryConfig, RecallConfig};
 pub(crate) use pricing::pricing;
 pub use pricing::{ModelRates, PricingOverrides};
+pub use request::{ChatConfig, RequestConfig};
 
 /// A task list shared by every session of an agent, shown with each request
 /// ([`AgentConfig::task_ledger`]).
@@ -232,6 +234,12 @@ pub enum ProviderConfig {
         /// The context window of every model; absent: 128000.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_window: Option<u64>,
+        /// Extra body fields, headers and a timeout for every request.
+        #[serde(default, skip_serializing_if = "RequestConfig::is_default")]
+        request: RequestConfig,
+        /// Chat Completions settings.
+        #[serde(default, skip_serializing_if = "ChatConfig::is_default")]
+        chat: ChatConfig,
     },
     /// OpenAI Chat Completions.
     #[serde(rename = "openai-chat")]
@@ -243,6 +251,12 @@ pub enum ProviderConfig {
         /// 200000, others 128000).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_window: Option<u64>,
+        /// Extra body fields, headers and a timeout for every request.
+        #[serde(default, skip_serializing_if = "RequestConfig::is_default")]
+        request: RequestConfig,
+        /// Chat Completions settings.
+        #[serde(default, skip_serializing_if = "ChatConfig::is_default")]
+        chat: ChatConfig,
     },
     /// The OpenAI Responses API.
     #[serde(rename = "openai-responses")]
@@ -261,6 +275,9 @@ pub enum ProviderConfig {
         /// off by default, not verified against the live API).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         native_catalog_changes: bool,
+        /// Extra body fields, headers and a timeout for every request.
+        #[serde(default, skip_serializing_if = "RequestConfig::is_default")]
+        request: RequestConfig,
     },
     /// The Anthropic Messages API.
     #[serde(rename = "anthropic")]
@@ -274,6 +291,9 @@ pub enum ProviderConfig {
         /// that take it; off by default, not verified against the live API).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         native_catalog_changes: bool,
+        /// Extra body fields, headers and a timeout for every request.
+        #[serde(default, skip_serializing_if = "RequestConfig::is_default")]
+        request: RequestConfig,
     },
     /// Gemini `streamGenerateContent`.
     #[serde(rename = "gemini")]
@@ -281,6 +301,9 @@ pub enum ProviderConfig {
         /// API root; the public endpoint when absent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         base_url: Option<String>,
+        /// Extra body fields, headers and a timeout for every request.
+        #[serde(default, skip_serializing_if = "RequestConfig::is_default")]
+        request: RequestConfig,
     },
     /// A vLLM OpenAI-compatible server.
     #[serde(rename = "vllm")]
@@ -291,6 +314,12 @@ pub enum ProviderConfig {
         /// (`max_model_len` on `/v1/models`), else 128000.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_window: Option<u64>,
+        /// Extra body fields, headers and a timeout for every request.
+        #[serde(default, skip_serializing_if = "RequestConfig::is_default")]
+        request: RequestConfig,
+        /// Chat Completions settings.
+        #[serde(default, skip_serializing_if = "ChatConfig::is_default")]
+        chat: ChatConfig,
     },
     /// An SGLang OpenAI-compatible server.
     #[serde(rename = "sglang")]
@@ -301,6 +330,12 @@ pub enum ProviderConfig {
         /// (`max_model_len` on `/v1/models`), else 128000.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_window: Option<u64>,
+        /// Extra body fields, headers and a timeout for every request.
+        #[serde(default, skip_serializing_if = "RequestConfig::is_default")]
+        request: RequestConfig,
+        /// Chat Completions settings.
+        #[serde(default, skip_serializing_if = "ChatConfig::is_default")]
+        chat: ChatConfig,
     },
     /// A llama.cpp server.
     #[serde(rename = "llamacpp")]
@@ -311,6 +346,12 @@ pub enum ProviderConfig {
         /// (`n_ctx` on `/props`), else 128000.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_window: Option<u64>,
+        /// Extra body fields, headers and a timeout for every request.
+        #[serde(default, skip_serializing_if = "RequestConfig::is_default")]
+        request: RequestConfig,
+        /// Chat Completions settings.
+        #[serde(default, skip_serializing_if = "ChatConfig::is_default")]
+        chat: ChatConfig,
     },
     /// Replays `turns` in call order, for tests and evals (see
     /// [`linch_core::ScriptedFixture`] for the turn shape).
@@ -343,6 +384,37 @@ impl ProviderConfig {
             Self::Vllm { .. } | Self::SgLang { .. } | Self::LlamaCpp { .. } => &["/v1", ""],
             Self::DeepSeek { .. } | Self::Anthropic { .. } | Self::Gemini { .. } => &[""],
             Self::Scripted { .. } => &[],
+        }
+    }
+
+    /// The request settings of a live provider; `None` for `scripted`.
+    pub fn request(&self) -> Option<&RequestConfig> {
+        match self {
+            Self::DeepSeek { request, .. }
+            | Self::OpenAiChat { request, .. }
+            | Self::OpenAiResponses { request, .. }
+            | Self::Anthropic { request, .. }
+            | Self::Gemini { request, .. }
+            | Self::Vllm { request, .. }
+            | Self::SgLang { request, .. }
+            | Self::LlamaCpp { request, .. } => Some(request),
+            Self::Scripted { .. } => None,
+        }
+    }
+
+    /// The Chat Completions settings of `deepseek`, `openai-chat`, `vllm`,
+    /// `sglang` and `llamacpp`; `None` for the others.
+    pub fn chat(&self) -> Option<&ChatConfig> {
+        match self {
+            Self::DeepSeek { chat, .. }
+            | Self::OpenAiChat { chat, .. }
+            | Self::Vllm { chat, .. }
+            | Self::SgLang { chat, .. }
+            | Self::LlamaCpp { chat, .. } => Some(chat),
+            Self::OpenAiResponses { .. }
+            | Self::Anthropic { .. }
+            | Self::Gemini { .. }
+            | Self::Scripted { .. } => None,
         }
     }
 }

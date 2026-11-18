@@ -362,6 +362,24 @@ key and any `Bearer` token, even for a keyless local server (a proxy may add
 one). Each options struct has `from_env()`, which reads the adapter's
 variable and returns `None` when it is unset or empty.
 
+### Request options
+
+`RequestOptions` (`request.rs`) carries `extra_body`, a read `timeout` and
+default headers for every adapter; `ChatOptions` carries the Chat Completions
+knobs (`parallel_tool_calls`, `include_stream_options`, `chat_template_kwargs`,
+`sampling_params`). Default headers go on the `reqwest` client, which never
+replaces a header set per request, so a caller's key header (`authorization`,
+`x-api-key`, `x-goog-api-key`, `api-key`) makes the adapter skip its own key
+header (`sets_key_header`, `key_to_send`) instead of overriding it, for a turn, a
+model list and a window probe alike. `merge_body` runs last on the built payload
+and skips the fields in `PROTECTED_FIELDS` (the model, `stream`, `temperature`,
+the conversation, the tools and `tool_choice` in each wire's spelling, and the
+state fields `store`, `previous_response_id`, `conversation`); Gemini's
+`generationConfig` is merged field by field with the request's own winning.
+Header values are marked sensitive, never appear in `Debug`, and `scrub_error`
+and `scrub_stream` remove those of 8 bytes or more from every error text an
+adapter returns. The settings are not part of the run contract.
+
 ## The adapters
 
 Every adapter takes the model from each request, not from its options.

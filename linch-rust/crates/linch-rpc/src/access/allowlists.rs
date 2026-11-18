@@ -57,6 +57,7 @@ pub struct Allowlists {
     pub(super) tool_cache_shared: bool,
     pub(super) tool_cache_bytes: u64,
     pub(super) task_ledger: bool,
+    pub(super) provider_request: bool,
     pub(super) max_runs: usize,
     pub(super) max_agents: usize,
     pub(super) max_connections: usize,
@@ -241,6 +242,7 @@ impl Allowlists {
             tool_cache_shared: false,
             tool_cache_bytes: DEFAULT_TOOL_CACHE_BYTES,
             task_ledger: false,
+            provider_request: false,
             max_runs: DEFAULT_MAX_RUNS,
             max_agents: DEFAULT_MAX_AGENTS,
             max_connections: DEFAULT_MAX_CONNECTIONS,
@@ -452,6 +454,20 @@ impl Allowlists {
     /// reads it, a store read per turn that no run budget counts.
     pub fn task_ledger(mut self, allowed: bool) -> Self {
         self.task_ledger = allowed;
+        self
+    }
+
+    /// Whether a config's provider may set `request` (extra body fields,
+    /// headers, a timeout) and `chat` (parallel tool calls, stream usage,
+    /// template kwargs, sampling fields). Off by default: these ride every
+    /// request to the endpoint the tenant names (an endpoint the operator
+    /// allowed, or the provider's own), and body fields and headers are
+    /// how a client would steer a gateway. Even when on, a header that
+    /// carries a credential or reroutes a request (`authorization` and the
+    /// other key headers, `cookie`, `proxy-*`, `forwarded`, `x-forwarded-*`)
+    /// is refused, and the counts and sizes are bounded.
+    pub fn provider_request(mut self, allowed: bool) -> Self {
+        self.provider_request = allowed;
         self
     }
 

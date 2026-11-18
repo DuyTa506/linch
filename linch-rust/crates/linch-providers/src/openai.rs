@@ -92,6 +92,10 @@ pub struct OpenAiChatOptions {
     /// The context window of every model; `None` takes Python's table
     /// (gpt-5.5 and gpt-5.4 400000, o1 200000, others 128000).
     pub context_window: Option<u64>,
+    /// Extra body fields, headers and a timeout for every request.
+    pub request: crate::RequestOptions,
+    /// Chat Completions settings (`parallel_tool_calls`, usage option).
+    pub chat: crate::ChatOptions,
 }
 
 impl OpenAiChatOptions {
@@ -101,6 +105,8 @@ impl OpenAiChatOptions {
             api_key,
             base_url: DEFAULT_BASE_URL.into(),
             context_window: None,
+            request: crate::RequestOptions::default(),
+            chat: crate::ChatOptions::default(),
         }
     }
 
@@ -123,6 +129,8 @@ pub struct OpenAiChat {
     context_window: Option<u64>,
     /// What [`Provider::prepare`] read from the server.
     probed: Arc<OnceLock<Probed>>,
+    request: crate::RequestOptions,
+    chat: crate::ChatOptions,
 }
 
 impl OpenAiChat {
@@ -138,6 +146,8 @@ impl OpenAiChat {
             Some(options.api_key),
             JsonObject::new(),
             options.context_window,
+            options.request,
+            options.chat,
         )
     }
 
@@ -154,6 +164,8 @@ impl OpenAiChat {
             options.api_key,
             options.thinking_off_kwargs,
             options.context_window,
+            options.request,
+            options.chat,
         )
     }
 
@@ -163,9 +175,12 @@ impl OpenAiChat {
         api_key: Option<ApiKey>,
         thinking_off: JsonObject,
         context_window: Option<u64>,
+        request: crate::RequestOptions,
+        chat: crate::ChatOptions,
     ) -> Result<Self, ProviderError> {
         crate::base_url::require(&base_url)?;
-        let client = crate::transport::client(CONNECT_TIMEOUT, READ_TIMEOUT)
+        let client = request
+            .client(CONNECT_TIMEOUT, READ_TIMEOUT)
             .map_err(|err| http::transport(api_key.as_ref(), &err))?;
         Ok(Self {
             client,
@@ -175,6 +190,8 @@ impl OpenAiChat {
             thinking_off,
             context_window,
             probed: Arc::default(),
+            request,
+            chat,
         })
     }
 }
@@ -271,15 +288,17 @@ impl Provider for OpenAiChat {
     async fn list_models(&self) -> Result<linch_core::ModelList, ModelsError> {
         let url = format!("{}/models", self.base_url.trim_end_matches('/'));
         let key = self.api_key.as_ref();
-        let bearer = key.map(|key| format!("Bearer {}", key.expose()));
+        let sent = key.filter(|_| !self.request.sets_key_header());
+        let bearer = sent.map(|key| format!("Bearer {}", key.expose()));
         let headers: Vec<(&str, &str)> = (bearer.as_deref())
             .map(|value| ("authorization", value))
             .into_iter()
             .collect();
-        let value = crate::models::get_json(&self.client, &url, &headers, key).await?;
+        let value = (crate::models::get_json(&self.client, &url, &headers, key).await)
+            .map_err(|err| self.request.scrub_error(err))?;
         let mut models = crate::models::openai_list(&value, self.profile.models.row);
         if self.profile.models.props_context {
-            let window = context::props_window(&self.client, &self.base_url, key).await;
+            let window = context::props_window(&self.client, &self.base_url, sent).await;
             for model in &mut models {
                 model.context_window = model.context_window.or(window);
             }
@@ -292,7 +311,10 @@ impl Provider for OpenAiChat {
         if self.context_window.is_some() || self.probed.get().is_some() {
             return;
         }
-        let key = self.api_key.as_ref();
+        let key = self
+            .api_key
+            .as_ref()
+            .filter(|_| !self.request.sets_key_header());
         let probed = context::probe(&self.client, self.profile.context, &self.base_url, key).await;
         let _ = self.probed.set(probed);
     }
@@ -302,22 +324,28 @@ impl Provider for OpenAiChat {
         request: ProviderRequest,
         cancel: CancellationToken,
     ) -> Result<ProviderStream, ProviderError> {
-        let body = profile::build_payload(self.profile, &self.thinking_off, &request)?;
+        let mut body = profile::build_payload(self.profile, &self.thinking_off, &request)?;
+        self.chat.apply(&mut body);
+        self.request.merge_body(&mut body);
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        let key = self.api_key.as_ref();
+        let key = self
+            .api_key
+            .as_ref()
+            .filter(|_| !self.request.sets_key_header());
         let overflow = self.profile.overflow;
-        let response = http::post(&self.client, &url, key, &body, overflow, &cancel).await?;
+        let response = (http::post(&self.client, &url, key, &body, overflow, &cancel).await)
+            .map_err(|err| self.request.scrub_error(err))?;
         let translator = Translator::new(
             request.model,
             self.profile.reasoning_field,
             self.profile.usage,
         )
         .refusing(overflow);
-        Ok(stream::events(
+        Ok(self.request.scrub_stream(stream::events(
             response.bytes_stream(),
             translator,
             cancel,
             self.api_key.clone(),
-        ))
+        )))
     }
 }

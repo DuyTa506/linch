@@ -86,6 +86,8 @@ pub struct AnthropicOptions {
     /// `api.anthropic.com` with the models that take it; off by default
     /// and not verified against the live API.
     pub native_catalog_changes: bool,
+    /// Extra body fields, headers and a timeout for every request.
+    pub request: crate::RequestOptions,
 }
 
 impl AnthropicOptions {
@@ -95,6 +97,7 @@ impl AnthropicOptions {
             api_key,
             base_url: DEFAULT_BASE_URL.into(),
             native_catalog_changes: false,
+            request: crate::RequestOptions::default(),
         }
     }
 
@@ -129,7 +132,9 @@ impl Anthropic {
     /// for example when no TLS roots are available.
     pub fn new(options: AnthropicOptions) -> Result<Self, ProviderError> {
         crate::base_url::require(&options.base_url)?;
-        let client = crate::transport::client(CONNECT_TIMEOUT, READ_TIMEOUT)
+        let client = options
+            .request
+            .client(CONNECT_TIMEOUT, READ_TIMEOUT)
             .map_err(|err| http::transport(&options.api_key, &err))?;
         Ok(Self { client, options })
     }
@@ -188,11 +193,12 @@ impl Provider for Anthropic {
     /// `GET /v1/models`, paged by `after_id` while `has_more`.
     async fn list_models(&self) -> Result<ModelList, ModelsError> {
         let base = self.options.base_url.trim_end_matches('/');
+        let request = &self.options.request;
         let key = &self.options.api_key;
-        let headers = [
-            ("x-api-key", key.expose()),
-            ("anthropic-version", API_VERSION),
-        ];
+        let mut headers = vec![("anthropic-version", API_VERSION)];
+        if let Some(key) = request.key_to_send(key) {
+            headers.push(("x-api-key", key.expose()));
+        }
         let mut models = Vec::new();
         let mut after: Option<String> = None;
         let mut truncated = false;
@@ -205,7 +211,8 @@ impl Provider for Anthropic {
                     percent_encoding::NON_ALPHANUMERIC,
                 ));
             }
-            let page = crate::models::get_json(&self.client, &url, &headers, Some(key)).await?;
+            let page = (crate::models::get_json(&self.client, &url, &headers, Some(key)).await)
+                .map_err(|err| request.scrub_error(err))?;
             let (listed, next) = crate::models::anthropic_page(&page);
             models.extend(listed);
             match next {
@@ -223,21 +230,32 @@ impl Provider for Anthropic {
         cancel: CancellationToken,
     ) -> Result<ProviderStream, ProviderError> {
         let native = catalog::enabled(&self.options, &request.model);
-        let body = payload::build(&request, native)?;
+        let mut body = payload::build(&request, native)?;
+        self.options.request.merge_body(&mut body);
         let url = format!(
             "{}/v1/messages",
             self.options.base_url.trim_end_matches('/')
         );
         let key = &self.options.api_key;
         let beta = native.then_some(catalog::BETA);
-        let response = http::post(&self.client, &url, key, &body, beta, &cancel).await?;
+        let response = http::post(
+            &self.client,
+            &url,
+            key,
+            !self.options.request.sets_key_header(),
+            &body,
+            beta,
+            &cancel,
+        )
+        .await
+        .map_err(|err| self.options.request.scrub_error(err))?;
         let translator = stream::Translator::new(request.model, key.clone());
-        Ok(stream::events(
+        Ok(self.options.request.scrub_stream(stream::events(
             response.bytes_stream(),
             translator,
             cancel,
             key.clone(),
-        ))
+        )))
     }
 }
 

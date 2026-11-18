@@ -54,6 +54,7 @@ fn provider(base_url: String) -> Anthropic {
         api_key: ApiKey::new(SECRET).unwrap(),
         base_url,
         native_catalog_changes: false,
+        request: crate::RequestOptions::default(),
     })
     .unwrap()
 }

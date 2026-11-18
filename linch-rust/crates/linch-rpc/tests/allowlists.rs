@@ -476,3 +476,140 @@ async fn a_task_ledger_needs_the_tenants_allowlist() {
     }));
     assert!(allowed.call(method::AGENT_OPEN, ledger).await.is_ok());
 }
+
+/// A vLLM provider at the one URL the tenant may use, with `extra` merged
+/// into the provider config.
+fn vllm_with(extra: Value) -> Value {
+    let mut provider = json!({"id": "vllm", "base_url": "http://127.0.0.1:9/v1"});
+    for (key, value) in extra.as_object().unwrap() {
+        provider[key] = value.clone();
+    }
+    config(json!({ "provider": provider }))
+}
+
+fn request_allowed() -> Rpc {
+    let urls = strings(&["http://127.0.0.1:9/v1"]);
+    Rpc::remote(acme(|allow| {
+        allow
+            .provider_base_urls(&urls)
+            .unwrap()
+            .provider_request(true)
+    }))
+}
+
+#[tokio::test]
+async fn provider_request_settings_are_denied_unless_the_tenant_may_set_them() {
+    let urls = strings(&["http://127.0.0.1:9/v1"]);
+    let denied = Rpc::remote(acme(|allow| allow.provider_base_urls(&urls).unwrap()));
+    for extra in [
+        json!({"request": {"default_headers": {"x-gateway-token": "t"}}}),
+        json!({"request": {"extra_body": {"top_k": 5}}}),
+        json!({"request": {"timeout_ms": 1000}}),
+        json!({"chat": {"parallel_tool_calls": false}}),
+        json!({"chat": {"include_stream_options": false}}),
+        json!({"chat": {"sampling_params": {"top_k": 5}}}),
+    ] {
+        let kind = refused(&denied, vllm_with(extra.clone())).await;
+        assert_eq!(kind.as_deref(), Some("provider_request"), "{extra}");
+    }
+    // The same endpoint without settings opens as before.
+    assert_eq!(refused(&denied, vllm_with(json!({}))).await, None);
+
+    let allowed = request_allowed();
+    let request = json!({"default_headers": {"x-gateway-token": "t"},
+                         "extra_body": {"top_k": 5}, "timeout_ms": 1000});
+    assert_eq!(
+        refused(&allowed, vllm_with(json!({"request": request}))).await,
+        None
+    );
+    // Allowed to set them, still not to point the key elsewhere.
+    let other = config(
+        json!({"provider": {"id": "vllm", "base_url": "http://127.0.0.1:10/v1",
+                                            "request": request}}),
+    );
+    assert_eq!(
+        refused(&allowed, other).await.as_deref(),
+        Some("provider_base_url")
+    );
+}
+
+#[tokio::test]
+async fn a_tenant_cannot_set_a_header_that_carries_a_credential_or_reroutes() {
+    let rpc = request_allowed();
+    for name in [
+        "Authorization",
+        "X-Api-Key",
+        "x-goog-api-key",
+        "api-key",
+        "Cookie",
+        "proxy-authorization",
+        "Proxy-Connection",
+        "forwarded",
+        "X-Forwarded-For",
+        "x-forwarded-host",
+    ] {
+        let headers = json!({name: "value-123456"});
+        let config = vllm_with(json!({"request": {"default_headers": headers}}));
+        let kind = refused(&rpc, config).await;
+        assert_eq!(kind.as_deref(), Some("provider_request"), "{name}");
+    }
+    let ok = json!({"anthropic-beta": "tools-2024", "x-gateway-token": "t"});
+    let config = vllm_with(json!({"request": {"default_headers": ok}}));
+    assert_eq!(refused(&rpc, config).await, None);
+}
+
+#[tokio::test]
+async fn provider_request_settings_are_bounded() {
+    // The bounds are the documented ones: 16 headers of 1 KiB, 16 KiB of
+    // body fields, a 10 minute timeout.
+    const MAX_REQUEST_HEADERS: usize = 16;
+    const MAX_REQUEST_HEADER_BYTES: usize = 1024;
+    const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024;
+    const MAX_REQUEST_TIMEOUT_MS: u64 = 600_000;
+    let rpc = request_allowed();
+    let too_many: serde_json::Map<String, Value> = (0..=MAX_REQUEST_HEADERS)
+        .map(|n| (format!("x-h{n}"), json!("v")))
+        .collect();
+    let long = "v".repeat(MAX_REQUEST_HEADER_BYTES);
+    let big = "b".repeat(MAX_REQUEST_BODY_BYTES);
+    let cases = [
+        json!({"request": {"default_headers": too_many}}),
+        json!({"request": {"default_headers": {"x-long": long}}}),
+        json!({"request": {"extra_body": {"blob": big}}}),
+        json!({"chat": {"sampling_params": {"blob": big}}}),
+        json!({"chat": {"chat_template_kwargs": {"blob": big}}}),
+        json!({"request": {"timeout_ms": MAX_REQUEST_TIMEOUT_MS + 1}}),
+    ];
+    for extra in cases {
+        let kind = refused(&rpc, vllm_with(extra.clone())).await;
+        assert_eq!(kind.as_deref(), Some("provider_request"), "{extra:.80}");
+    }
+    let at_the_cap = json!({"request": {"timeout_ms": MAX_REQUEST_TIMEOUT_MS}});
+    assert_eq!(refused(&rpc, vllm_with(at_the_cap)).await, None);
+}
+
+#[tokio::test]
+async fn a_provider_question_with_request_settings_needs_the_allowlist_too() {
+    let url = "http://127.0.0.1:9/v1".to_owned();
+    let provider = json!({"id": "vllm", "base_url": url,
+                          "request": {"extra_body": {"top_k": 5}}});
+    let models = json!({"provider": provider});
+    let one = json!({"provider": provider, "model": "m"});
+    let asking = Allowlists::new()
+        .provider_info(true)
+        .provider_base_urls(std::slice::from_ref(&url))
+        .unwrap();
+    let rpc = Rpc::remote(tenant("acme", asking));
+    for (method, params) in [
+        (method::PROVIDER_CAPABILITIES, &one),
+        (method::PROVIDER_MODELS, &models),
+        (method::PROVIDER_MODEL, &one),
+    ] {
+        let error = rpc.call(method, params.clone()).await.unwrap_err();
+        assert_eq!(
+            refusal(error),
+            (code::NOT_ALLOWED, Some("provider_request".into())),
+            "{method}"
+        );
+    }
+}

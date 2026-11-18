@@ -121,3 +121,28 @@ fn the_wire_form_keeps_the_secrets() {
     assert!(SECRETS.iter().all(|secret| text.contains(secret)), "{text}");
     assert_eq!(serde_json::from_value::<AgentConfig>(wire).unwrap(), config);
 }
+
+#[test]
+fn provider_header_values_are_hidden_but_the_wire_form_keeps_them() {
+    let config: AgentConfig = serde_json::from_value(json!({
+        "namespace": "t",
+        "spec": {"model": "m"},
+        "provider": {"id": "vllm", "base_url": "http://gw.internal/v1",
+                     "request": {"default_headers": {"x-gateway-token": "tok-gw"},
+                                 "extra_body": {"top_k": 5}, "timeout_ms": 1500}},
+    }))
+    .unwrap();
+    let shown = serde_json::to_value(&config).unwrap();
+    assert_eq!(
+        shown["provider"]["request"]["default_headers"]["x-gateway-token"],
+        "[redacted]"
+    );
+    assert_eq!(shown["provider"]["request"]["extra_body"]["top_k"], 5);
+    assert!(!format!("{config:?}").contains("tok-gw"));
+    let wire = config.to_value_with_secrets().unwrap();
+    assert_eq!(
+        wire["provider"]["request"]["default_headers"]["x-gateway-token"],
+        "tok-gw"
+    );
+    assert_eq!(serde_json::from_value::<AgentConfig>(wire).unwrap(), config);
+}

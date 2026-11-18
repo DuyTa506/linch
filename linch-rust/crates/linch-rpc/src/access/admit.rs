@@ -299,6 +299,7 @@ impl Allowlists {
             let message = "the scripted provider is not allowed on this connection";
             return Err(refused("provider", message.into()));
         }
+        self.admit_provider_request(provider)?;
         let Some(url) = base_url(provider) else {
             return Ok(());
         };
@@ -316,6 +317,70 @@ impl Allowlists {
             let message = "provider base_url is not in the tenant's provider_base_urls \
                            (origin and path), so the server's key may not be sent there";
             return Err(refused("provider_base_url", message.into()));
+        }
+        Ok(())
+    }
+
+    /// Refuse a provider's `request` and `chat` settings unless the tenant
+    /// may set them, then bound them: at most [`MAX_REQUEST_HEADERS`]
+    /// headers of [`MAX_REQUEST_HEADER_BYTES`] (name and value), no header
+    /// that carries a credential or reroutes the request, at most
+    /// [`MAX_REQUEST_BODY_BYTES`] of body fields (`extra_body`,
+    /// `sampling_params` and `chat_template_kwargs` together) and a timeout
+    /// of at most [`MAX_REQUEST_TIMEOUT_MS`]. A message names a header but
+    /// never its value.
+    fn admit_provider_request(&self, provider: &ProviderConfig) -> Result<(), ErrorObject> {
+        let request = provider.request().filter(|request| !request.is_default());
+        let chat = provider.chat().filter(|chat| !chat.is_default());
+        if request.is_none() && chat.is_none() {
+            return Ok(());
+        }
+        let refuse = |message: String| refused("provider_request", message);
+        if !self.provider_request {
+            return Err(refuse(
+                "provider request settings (request, chat) are not in the tenant's allowlists \
+                 (provider_request)"
+                    .into(),
+            ));
+        }
+        let mut body_bytes = 0;
+        if let Some(chat) = chat {
+            body_bytes +=
+                json_bytes(&chat.sampling_params) + json_bytes(&chat.chat_template_kwargs);
+        }
+        if let Some(request) = request {
+            body_bytes += json_bytes(&request.extra_body);
+            if request.default_headers.len() > MAX_REQUEST_HEADERS {
+                return Err(refuse(format!(
+                    "request.default_headers holds more than {MAX_REQUEST_HEADERS} headers"
+                )));
+            }
+            for (name, value) in &request.default_headers {
+                if name.len() + value.len() > MAX_REQUEST_HEADER_BYTES {
+                    return Err(refuse(format!(
+                        "request header {name:.64} is longer than {MAX_REQUEST_HEADER_BYTES} bytes"
+                    )));
+                }
+                if refused_header(name) {
+                    return Err(refuse(format!(
+                        "request header {name:.64} carries a credential or reroutes the request, \
+                         so a tenant may not set it"
+                    )));
+                }
+            }
+            if request
+                .timeout_ms
+                .is_some_and(|ms| ms.get() > MAX_REQUEST_TIMEOUT_MS)
+            {
+                return Err(refuse(format!(
+                    "request.timeout_ms is more than {MAX_REQUEST_TIMEOUT_MS}"
+                )));
+            }
+        }
+        if body_bytes > MAX_REQUEST_BODY_BYTES {
+            return Err(refuse(format!(
+                "request.extra_body and chat fields hold more than {MAX_REQUEST_BODY_BYTES} bytes"
+            )));
         }
         Ok(())
     }
@@ -398,7 +463,7 @@ fn base_url(provider: &ProviderConfig) -> Option<&str> {
         | ProviderConfig::OpenAiChat { base_url, .. }
         | ProviderConfig::OpenAiResponses { base_url, .. }
         | ProviderConfig::Anthropic { base_url, .. }
-        | ProviderConfig::Gemini { base_url } => base_url.as_deref(),
+        | ProviderConfig::Gemini { base_url, .. } => base_url.as_deref(),
         // Their keys are optional, but a key set in the environment is
         // still sent.
         ProviderConfig::Vllm { base_url, .. }
@@ -406,6 +471,39 @@ fn base_url(provider: &ProviderConfig) -> Option<&str> {
         | ProviderConfig::LlamaCpp { base_url, .. } => Some(base_url),
         ProviderConfig::Scripted { .. } => None,
     }
+}
+
+/// Most headers a tenant's `request.default_headers` may hold.
+pub const MAX_REQUEST_HEADERS: usize = 16;
+
+/// Longest header of a tenant's `request.default_headers`, name and value
+/// together, in bytes.
+pub const MAX_REQUEST_HEADER_BYTES: usize = 1024;
+
+/// Most bytes a tenant's `request.extra_body`, `chat.sampling_params` and
+/// `chat.chat_template_kwargs` may hold together as JSON: they ride every
+/// request of every run.
+pub const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024;
+
+/// Longest `request.timeout_ms` a tenant may set: ten minutes, the
+/// adapters' own longest limit. A longer one holds a connection open past
+/// anything the provider's default allows.
+pub const MAX_REQUEST_TIMEOUT_MS: u64 = 600_000;
+
+/// Whether a tenant may not set the header `name`: one that carries a
+/// credential (the provider key headers, `cookie`, anything `proxy-`) or
+/// that a gateway reads to route a request or to name its client
+/// (`forwarded`, `x-forwarded-*`). Case does not matter.
+fn refused_header(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    linch::providers::is_key_header(&name)
+        || matches!(name.as_str(), "cookie" | "cookie2" | "forwarded")
+        || name.starts_with("proxy-")
+        || name.starts_with("x-forwarded-")
+}
+
+fn json_bytes(object: &serde_json::Map<String, serde_json::Value>) -> usize {
+    serde_json::to_vec(object).map_or(usize::MAX, |bytes| bytes.len())
 }
 
 /// Most redaction rules, verifiers, or keywords of one verifier, a tenant's

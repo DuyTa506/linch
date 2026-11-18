@@ -345,3 +345,33 @@ async fn a_missing_key_names_its_variable() {
         other => panic!("{:?}", other.err()),
     }
 }
+
+#[tokio::test]
+async fn a_key_header_stands_in_for_a_missing_env_key_but_nothing_else_does() {
+    if std::env::var_os("GEMINI_API_KEY").is_some() {
+        eprintln!("skipped: GEMINI_API_KEY is set");
+        return;
+    }
+    let with_header = config(json!({
+        "namespace": "t",
+        "spec": {"model": "m"},
+        "provider": {"id": "gemini",
+                     "request": {"default_headers": {"x-goog-api-key": "stand-in"}}},
+    }));
+    assert!(
+        with_header.open().await.is_ok(),
+        "the header replaces the missing key"
+    );
+
+    let without_header = config(json!({
+        "namespace": "t",
+        "spec": {"model": "m"},
+        "provider": {"id": "gemini"},
+    }));
+    match without_header.open().await {
+        Err(OpenError::MissingKey { provider, env }) => {
+            assert_eq!((provider, env), ("gemini", "GEMINI_API_KEY"));
+        }
+        other => panic!("{:?}", other.err()),
+    }
+}

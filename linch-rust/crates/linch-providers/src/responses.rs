@@ -98,6 +98,8 @@ pub struct ResponsesOptions {
     /// prompt cache, instead of in `tools`. Used only with gpt-5.4 and
     /// later; off by default and not verified against the live API.
     pub native_catalog_changes: bool,
+    /// Extra body fields, headers and a timeout for every request.
+    pub request: crate::RequestOptions,
 }
 
 impl ResponsesOptions {
@@ -110,6 +112,7 @@ impl ResponsesOptions {
             reasoning_summary: None,
             store: true,
             native_catalog_changes: false,
+            request: crate::RequestOptions::default(),
         }
     }
 
@@ -135,7 +138,9 @@ impl OpenAiResponses {
     /// [`ProviderError::Transport`] when the HTTP client cannot be built.
     pub fn new(options: ResponsesOptions) -> Result<Self, ProviderError> {
         crate::base_url::require(&options.base_url)?;
-        let client = crate::transport::client(CONNECT_TIMEOUT, READ_TIMEOUT)
+        let client = options
+            .request
+            .client(CONNECT_TIMEOUT, READ_TIMEOUT)
             .map_err(|err| http::transport(Some(&options.api_key), &err))?;
         Ok(Self { client, options })
     }
@@ -187,10 +192,15 @@ impl Provider for OpenAiResponses {
     /// `GET {base}/models`, as OpenAI's list.
     async fn list_models(&self) -> Result<ModelList, ModelsError> {
         let url = format!("{}/models", self.options.base_url.trim_end_matches('/'));
+        let request = &self.options.request;
         let key = &self.options.api_key;
-        let bearer = format!("Bearer {}", key.expose());
-        let headers = [("authorization", bearer.as_str())];
-        let value = crate::models::get_json(&self.client, &url, &headers, Some(key)).await?;
+        let bearer = (request.key_to_send(key)).map(|key| format!("Bearer {}", key.expose()));
+        let headers: Vec<(&str, &str)> = (bearer.as_deref())
+            .map(|value| ("authorization", value))
+            .into_iter()
+            .collect();
+        let value = (crate::models::get_json(&self.client, &url, &headers, Some(key)).await)
+            .map_err(|err| request.scrub_error(err))?;
         let row = crate::models::OpenAiRow {
             context: None,
             output: None,
@@ -204,17 +214,27 @@ impl Provider for OpenAiResponses {
         request: ProviderRequest,
         cancel: CancellationToken,
     ) -> Result<ProviderStream, ProviderError> {
-        let body = payload::build_payload(&request, &self.options)?;
+        let mut body = payload::build_payload(&request, &self.options)?;
+        self.options.request.merge_body(&mut body);
         let url = format!("{}/responses", self.options.base_url.trim_end_matches('/'));
         let key = &self.options.api_key;
         let overflow = &crate::overflow::RESPONSES;
-        let response = http::post(&self.client, &url, Some(key), &body, overflow, &cancel).await?;
-        Ok(stream::events(
+        let response = http::post(
+            &self.client,
+            &url,
+            (!self.options.request.sets_key_header()).then_some(key),
+            &body,
+            overflow,
+            &cancel,
+        )
+        .await
+        .map_err(|err| self.options.request.scrub_error(err))?;
+        Ok(self.options.request.scrub_stream(stream::events(
             response.bytes_stream(),
             stream::Translator::new(request.model),
             cancel,
             key.clone(),
-        ))
+        )))
     }
 }
 

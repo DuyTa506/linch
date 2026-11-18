@@ -233,6 +233,8 @@ fn provider(base_url: String) -> OpenAiChat {
         api_key: ApiKey::new(SECRET).unwrap(),
         base_url,
         context_window: None,
+        request: crate::RequestOptions::default(),
+        chat: crate::ChatOptions::default(),
     })
     .unwrap()
 }

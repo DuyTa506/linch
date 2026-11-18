@@ -84,6 +84,8 @@ pub struct GeminiOptions {
     pub api_key: ApiKey,
     /// API root without the `/v1beta/models/...` path.
     pub base_url: String,
+    /// Extra body fields, headers and a timeout for every request.
+    pub request: crate::RequestOptions,
 }
 
 impl GeminiOptions {
@@ -92,6 +94,7 @@ impl GeminiOptions {
         Self {
             api_key,
             base_url: DEFAULT_BASE_URL.into(),
+            request: crate::RequestOptions::default(),
         }
     }
 
@@ -118,7 +121,9 @@ impl Gemini {
     /// for example when no TLS roots are available.
     pub fn new(options: GeminiOptions) -> Result<Self, ProviderError> {
         crate::base_url::require(&options.base_url)?;
-        let client = crate::transport::client(CONNECT_TIMEOUT, READ_TIMEOUT)
+        let client = options
+            .request
+            .client(CONNECT_TIMEOUT, READ_TIMEOUT)
             .map_err(|err| http::transport(&options.api_key, &err))?;
         Ok(Self { client, options })
     }
@@ -170,8 +175,12 @@ impl Provider for Gemini {
     /// `GET /v1beta/models`, paged by `pageToken` while `nextPageToken`.
     async fn list_models(&self) -> Result<ModelList, ModelsError> {
         let base = self.options.base_url.trim_end_matches('/');
+        let request = &self.options.request;
         let key = &self.options.api_key;
-        let headers = [("x-goog-api-key", key.expose())];
+        let headers: Vec<(&str, &str)> = (request.key_to_send(key))
+            .map(|key| ("x-goog-api-key", key.expose()))
+            .into_iter()
+            .collect();
         let mut models = Vec::new();
         let mut token: Option<String> = None;
         let mut truncated = false;
@@ -181,7 +190,8 @@ impl Provider for Gemini {
                 url.push_str("&pageToken=");
                 url.extend(utf8_percent_encode(token, PATH_SEGMENT));
             }
-            let page = crate::models::get_json(&self.client, &url, &headers, Some(key)).await?;
+            let page = (crate::models::get_json(&self.client, &url, &headers, Some(key)).await)
+                .map_err(|err| request.scrub_error(err))?;
             let (listed, next) = crate::models::gemini_page(&page);
             models.extend(listed);
             match next {
@@ -198,7 +208,8 @@ impl Provider for Gemini {
         request: ProviderRequest,
         cancel: CancellationToken,
     ) -> Result<ProviderStream, ProviderError> {
-        let body = payload::build(&request)?;
+        let mut body = payload::build(&request)?;
+        self.options.request.merge_body(&mut body);
         let model = request.model.trim_start_matches("models/");
         let url = format!(
             "{}/v1beta/models/{}:streamGenerateContent?alt=sse",
@@ -206,14 +217,23 @@ impl Provider for Gemini {
             utf8_percent_encode(model, PATH_SEGMENT),
         );
         let key = &self.options.api_key;
-        let response = http::post(&self.client, &url, key, &body, &cancel).await?;
+        let response = http::post(
+            &self.client,
+            &url,
+            key,
+            !self.options.request.sets_key_header(),
+            &body,
+            &cancel,
+        )
+        .await
+        .map_err(|err| self.options.request.scrub_error(err))?;
         let translator = stream::Translator::new(request.model, key.clone());
-        Ok(stream::events(
+        Ok(self.options.request.scrub_stream(stream::events(
             response.bytes_stream(),
             translator,
             cancel,
             key.clone(),
-        ))
+        )))
     }
 }
 

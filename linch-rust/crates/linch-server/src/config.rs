@@ -150,6 +150,10 @@ pub struct AllowConfig {
     /// Whether a config may set `task_ledger` (one task list shared by all
     /// the tenant's sessions, read on every request); off when absent.
     pub task_ledger: bool,
+    /// Whether a config's provider may set `request` (body fields,
+    /// headers, a timeout) and `chat`; off when absent. Key, cookie, proxy
+    /// and forwarding headers stay refused.
+    pub provider_request: bool,
     /// Runs the tenant's connections may drive at once, together, at
     /// least 1; [`linch_rpc::DEFAULT_MAX_RUNS`] when absent.
     pub max_runs: Option<usize>,
@@ -411,6 +415,7 @@ impl AllowConfig {
                 (self.max_tool_cache_bytes).unwrap_or(linch_rpc::DEFAULT_TOOL_CACHE_BYTES),
             )
             .task_ledger(self.task_ledger)
+            .provider_request(self.provider_request)
             .max_runs(self.max_runs.unwrap_or(linch_rpc::DEFAULT_MAX_RUNS))
             .max_connections((self.max_connections).unwrap_or(linch_rpc::DEFAULT_MAX_CONNECTIONS))
             .max_agents(self.max_agents.unwrap_or(linch_rpc::DEFAULT_MAX_AGENTS))
