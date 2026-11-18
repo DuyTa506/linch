@@ -361,7 +361,7 @@ async fn only_listed_classes_are_retried_and_attempts_run_out() {
 async fn a_call_past_the_timeout_retries_only_when_timeout_is_listed() {
     let wait = Duration::from_millis(400);
     let mut listed = fast(|r| r.retry_on = vec!["timeout".into()]);
-    listed.call_timeout_ms = Some(40);
+    listed.call_timeout_ms = Some(100);
     let tool = Shaky::slow_first(true, wait);
     let (agent, _) = agent_on(listed, &tool, Arc::new(Stores::default()));
     let events = finish(agent.run("go", RunOptions::new("s1"))).await;
@@ -370,7 +370,7 @@ async fn a_call_past_the_timeout_retries_only_when_timeout_is_listed() {
     assert_eq!(end_error(&events), Some(false));
 
     let mut unlisted = fast(|_| {});
-    unlisted.call_timeout_ms = Some(40);
+    unlisted.call_timeout_ms = Some(100);
     let tool = Shaky::slow_first(true, wait);
     let (agent, _) = agent_on(unlisted, &tool, Arc::new(Stores::default()));
     let events = finish(agent.run("go", RunOptions::new("s1"))).await;

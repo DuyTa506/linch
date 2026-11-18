@@ -87,7 +87,8 @@ pub struct AgentSpec {
     /// Most read-scope tools that run at once (default 4; 0 counts as 1).
     #[serde(default = "default_concurrency")]
     pub max_tool_concurrency: u32,
-    /// Longest one tool call may run, in milliseconds; `None` waits.
+    /// Longest one tool call may run, in milliseconds, at least 100; `None`
+    /// waits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_timeout_ms: Option<u64>,
     /// When to summarize the older part of the provider view; `None`
@@ -238,6 +239,13 @@ impl AgentSpec {
             tool_cache: None,
             policy: None,
         }
+    }
+
+    /// Why `call_timeout_ms` cannot run, if it cannot: under 100 it ends
+    /// every tool call before the tool can start.
+    pub(crate) fn call_timeout_problem(&self) -> Option<&'static str> {
+        (self.call_timeout_ms.is_some_and(|ms| ms < 100))
+            .then_some("call_timeout_ms must be at least 100 (milliseconds)")
     }
 
     /// The per-call tool timeout.

@@ -57,6 +57,106 @@ async fn a_live_servers_capabilities_name_its_window_as_the_servers() {
     assert!(caps.declared);
 }
 
+/// Wraps a provider and records when each call began and when its stream
+/// ended, as offsets from `origin`.
+struct Spans<P> {
+    inner: P,
+    origin: std::time::Instant,
+    spans: std::sync::Arc<std::sync::Mutex<Vec<(std::time::Duration, std::time::Duration)>>>,
+}
+
+#[async_trait::async_trait]
+impl<P: Provider> Provider for Spans<P> {
+    fn id(&self) -> &str {
+        self.inner.id()
+    }
+
+    async fn stream(
+        &self,
+        request: ProviderRequest,
+        cancel: CancellationToken,
+    ) -> Result<linch_core::ProviderStream, linch_core::ProviderError> {
+        let begun = self.origin.elapsed();
+        let index = {
+            let mut spans = self.spans.lock().unwrap();
+            spans.push((begun, begun));
+            spans.len() - 1
+        };
+        let (spans, origin) = (self.spans.clone(), self.origin);
+        let stream = self.inner.stream(request, cancel).await?;
+        Ok(stream
+            .inspect(move |_| spans.lock().unwrap()[index].1 = origin.elapsed())
+            .boxed())
+    }
+}
+
+/// Two runs at once through an agent whose gate holds `cap` calls; the
+/// recorded spans of the two provider calls.
+async fn two_runs(
+    provider: OpenAiChat,
+    model: &str,
+    cap: Option<u32>,
+) -> Vec<(std::time::Duration, std::time::Duration)> {
+    use std::sync::Arc;
+
+    use linch_core::{
+        AgentBuilder, AgentSpec, MemoryRunStore, MemorySessionStore, PermissionEngine,
+        PermissionMode, PermissionPolicy, ProviderGate, RunOptions, Thinking, ToolRegistry,
+    };
+
+    let spans = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider = Spans {
+        inner: provider,
+        origin: std::time::Instant::now(),
+        spans: spans.clone(),
+    };
+    let mut spec = AgentSpec::new(model);
+    spec.system_prompt = "Answer with one word.".into();
+    spec.max_turns = Some(1);
+    spec.max_output_tokens = Some(64);
+    spec.thinking = Some(Thinking::Disabled {});
+    let policy = PermissionPolicy::new(PermissionMode::Default, "/");
+    let mut builder = AgentBuilder::new(spec)
+        .provider(Arc::new(provider))
+        .tools(Arc::new(ToolRegistry::new()))
+        .permissions(PermissionEngine::new(policy).expect("valid policy"))
+        .run_store(Arc::new(MemoryRunStore::new()))
+        .session_store(Arc::new(MemorySessionStore::new()))
+        .namespace("live-gate");
+    if let Some(cap) = cap {
+        builder = builder.provider_gate(ProviderGate::new(cap.try_into().unwrap()));
+    }
+    let agent = builder.build().expect("valid agent");
+    let mut runs = Vec::new();
+    for session in ["a", "b"] {
+        let mut stream = agent.run("Name a colour.", RunOptions::new(session));
+        runs.push(tokio::spawn(async move {
+            while let Some(item) = stream.next().await {
+                item.expect("the run continues durably");
+            }
+        }));
+    }
+    for run in runs {
+        run.await.unwrap();
+    }
+    let spans = spans.lock().unwrap().clone();
+    eprintln!("spans (begin, end): {spans:?}");
+    spans
+}
+
+/// With a gate of one, two concurrent runs make their provider calls one
+/// after the other (two requests of at most 64 tokens).
+#[tokio::test]
+async fn a_gate_of_one_serialises_two_live_runs() {
+    let Some((provider, model)) = vllm("a_gate_of_one_serialises_two_live_runs") else {
+        return;
+    };
+    let mut spans = two_runs(provider, &model, Some(1)).await;
+    spans.sort();
+    assert_eq!(spans.len(), 2);
+    assert!(spans[0].1 <= spans[1].0, "the calls overlapped: {spans:?}");
+}
+
 /// Every effort level is accepted by a Qwen3 template, `high` and `max`
 /// included: they go out as `xhigh`.
 #[tokio::test]

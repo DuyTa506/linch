@@ -240,6 +240,12 @@ impl AgentBuilder {
         self
     }
 
+    /// Whether the host's pricing has a finite price for `model`.
+    fn prices(&self, model: &str) -> bool {
+        let price = (self.pricing.as_ref()).and_then(|price| price(model, &Usage::default()));
+        price.is_some_and(f64::is_finite)
+    }
+
     /// Build the agent and compute its contract digest from the spec, the
     /// tools registered now, the hook policies, the skills and the
     /// subagents.
@@ -249,8 +255,10 @@ impl AgentBuilder {
     ///         namespace is blank, the output schema does not compile (or
     ///         its root is not an object), a redaction rule or verifier
     ///         cannot run, the
-    ///         compaction, budget or
-    ///         provider retry settings cannot run, the loop guard allows no
+    ///         compaction, budget (a cost cap on a model with no price
+    ///         included) or
+    ///         provider retry settings cannot run, the tool call timeout
+    ///         is under 100 ms, the loop guard allows no
     ///         turn without a provider call, the tool retry or tool cache policy cannot run, a fallback model is blank
     ///         or repeats a model, a built-in tool's name is taken, the
     ///         final tool is not registered (or, made from the output
@@ -282,6 +290,17 @@ impl AgentBuilder {
             return Err(BuildError::Invalid(problem.into()));
         }
         if let Some(problem) = self.spec.budget.as_ref().and_then(|b| b.problem()) {
+            return Err(BuildError::Invalid(problem.into()));
+        }
+        let costed = (self.spec.budget.as_ref()).is_some_and(|b| b.max_cost_usd.is_some());
+        if costed && !self.prices(&self.spec.model) {
+            return Err(BuildError::Invalid(format!(
+                "budget.max_cost_usd needs a price for the model {:?}, which has none: set \
+                 `pricing` for it or cap budget.max_tokens instead",
+                self.spec.model
+            )));
+        }
+        if let Some(problem) = self.spec.call_timeout_problem() {
             return Err(BuildError::Invalid(problem.into()));
         }
         if let Some(problem) = self.spec.loop_guard.problem() {

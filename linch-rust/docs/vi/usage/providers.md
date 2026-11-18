@@ -237,7 +237,8 @@ qua `spec.thinking`. Các server (`vllm`, `sglang`, `llamacpp`) chuyển effort 
 chat template của model, nơi quyết định giá trị nào được nhận. Template Qwen3
 của vLLM chỉ nhận `low`, `medium` và `xhigh`, nên `high` và `max` được gửi là
 `xhigh`; SGLang nhận mọi mức (nó chỉ bật thinking) và llama.cpp để template của model từ
-chối mức; cả hai gửi nguyên mức.
+chối mức; cả hai gửi nguyên mức. Với model vLLM mà template không nhận `xhigh`, hãy tự
+đặt mức trong `request.extra_body.reasoning_effort`: nó thay giá trị đã ánh xạ.
 
 ### `anthropic`
 
@@ -269,6 +270,11 @@ dạng `tool_choice` nào hoạt động, trường giới hạn đầu ra nào 
 thinking. Một profile không sao chép gì từ profile của OpenAI. Bảng về những gì
 mỗi loại hỗ trợ nằm ở
 [trang providers của kiến trúc](../architecture/providers.md#openai-chat-completions-and-server-profiles).
+
+Chỉ vLLM có test chạy thật (`LINCH_TEST_VLLM_URL`; không đặt biến này thì chúng
+bị bỏ qua). Profile SGLang chưa được chạy với server thật, và `n_ctx` mà
+`GET /props` của llama.cpp trả về chỉ được đối chiếu với tài liệu của nó; nếu
+server trả lời khác, cửa sổ ngữ cảnh rơi về 128000 và `context_window` đặt nó.
 
 `base_url` là bắt buộc và gồm cả `/v1`. Key là tùy chọn: chỉ đặt nó trong môi
 trường của server khi inference server được khởi động cùng một key.
@@ -464,7 +470,7 @@ của nhà cung cấp ngày 2026-11-17):
 | Provider | Trường | Ghi chú |
 |---|---|---|
 | `openai-chat`, `openai-responses`, `vllm`, `sglang`, `llamacpp` | `temperature` | 0 đến 2. OpenAI nói mức hỗ trợ tham số khác nhau theo model; model từ chối nó sẽ trả lỗi HTTP, Linch không đoán trước. |
-| `anthropic` | `temperature` | 0 đến 1. Claude Opus 4.7 trở lên, Sonnet 5 trở lên và Haiku 5.5 trả 400 với giá trị khác mặc định ở mọi request; model cũ hơn chỉ từ chối khi thinking bật; API version `2026-10-21` bỏ nó. |
+| `anthropic` | `temperature` | 0 đến 1. Claude Sonnet 5.5 trả 400 với các tham số lấy mẫu (`temperature`, `top_p`, `top_k`): hướng dẫn migrate của nó bảo bỏ chúng và không nói giá trị mặc định có qua được không. Claude Opus 4.7 trở lên, Sonnet 5 và Haiku 5.5 trả 400 với giá trị khác mặc định ở mọi request; model cũ hơn chỉ từ chối khi thinking bật; API version `2026-10-21` bỏ nó. Theo tài liệu của Anthropic tính đến 2026-11-17 (<https://platform.claude.com/docs/en/models/sonnet-5-5/migration-guide>); Linch gửi đúng những gì spec đặt và không đoán trước việc từ chối. |
 | `deepseek` | `temperature` | 0 đến 2. Không có tác dụng ở chế độ thinking (mặc định), nơi nó được gửi và bị bỏ qua. |
 | `gemini` | `generationConfig.temperature` | 0.0 đến 2.0. Bị bỏ qua im lặng trên Gemini 3.6 Flash và các model mới hơn. |
 
