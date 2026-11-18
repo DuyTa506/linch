@@ -47,12 +47,22 @@ pub(crate) enum Span {
 pub(crate) enum ReadFirst {
     #[error("Read {path} before changing it.")]
     Unread { path: String },
-    #[error("{path} changed since it was last read; Read it again.")]
-    Stale { path: String },
+    #[error("Read this file again before {action} it.")]
+    Stale { path: String, action: &'static str },
     #[error("Read all of {path} before overwriting it.")]
     Partial { path: String },
     #[error("Read lines {start}-{end} of {path} before editing them.")]
     Lines { path: String, start: u64, end: u64 },
+}
+
+impl ReadFirst {
+    /// Name the action (`"editing"`, `"writing"`) in a stale-read message.
+    pub(crate) fn doing(self, verb: &'static str) -> Self {
+        match self {
+            Self::Stale { path, .. } => Self::Stale { path, action: verb },
+            other => other,
+        }
+    }
 }
 
 impl ReadTracker {
@@ -124,6 +134,7 @@ impl ReadTracker {
         if evidence.stamp != stamp {
             return Err(ReadFirst::Stale {
                 path: path.to_owned(),
+                action: "changing",
             });
         }
         if evidence.whole {
