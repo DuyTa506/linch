@@ -303,6 +303,7 @@ impl Runner {
             session_id: self.run.session_id.clone(),
             run_id: self.run.run_id.clone(),
             messages,
+            principal: self.run.principal.clone(),
         };
         let mut records = Vec::new();
         let run = chain.run_into(&request, &mut records);

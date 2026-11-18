@@ -159,7 +159,20 @@ last in the tool list, so the cached prefix of the others keeps its bytes.
 
 A response that calls it ends the run with the call's input as the answer:
 
-- The call never runs: there is no `tool_call_start` or `tool_call_end`.
+- The call never runs: there is no `tool_call_start` or `tool_call_end`. It
+  is decided like any call, though: the tool's input schema and validation,
+  the `pre_tool_use` callbacks and the permission rules apply, and the
+  `hook` events of the callbacks are emitted. A callback may rewrite the
+  input (the answer is the rewritten one), a veto or a deny rule goes back
+  as the call's error result, and an input the tool does not accept does too.
+  These refusals draw on `structured_output_retries`, so one that never lifts
+  ends the run `failed` with `StructuredOutputError` instead of looping, even
+  under a forced `tool_choice` with `max_turns` unset. An `Ask` decision
+  counts as allowed: nothing runs, so there is nothing to approve.
+- Before the call is decided, a [background subagent](./agent.md) still
+  running, or one that ended undelivered, is waited for as for a text answer.
+  The call's result then says the answer was not taken, the subagent's
+  notification rides in the same message, and the model calls the tool again.
 - Its input is checked like a text answer: a failure goes back as the call's
   error result (`Call the invoice tool again, ...`), under the same
   `structured_output_retries` and `verification` events, and past them the
@@ -168,14 +181,17 @@ A response that calls it ends the run with the call's input as the answer:
   failure, and none of the calls runs.
 - An input that passes meets the verifiers and the `stop` callbacks, which
   see it as JSON text; that text is the result's `final_text`, the object its
-  `structured_output`. A callback's retry goes back as the call's result.
+  `structured_output`. A callback's retry goes back as the call's result. A
+  `stop` callback that rewrites the text is checked again: it must still be a
+  JSON object that the output schema (if any) and the tool accept, and it
+  becomes the `structured_output`; one that is not ends the run `failed`.
 - The session gets a result for every call of the response before the run
   ends (`Final answer captured by the host.` for an answer taken), so the next
   run of the session starts paired, whatever ended this one. A crash after
   the decision finishes the run on resume without asking the model or a
   callback again.
-- It ends the run at once, even with [background subagents](./agent.md)
-  still running: they are cancelled, as at any end of a run.
+- It ends the run once nothing is left to hear: a subagent started after
+  the model's last turn is cancelled, as at any end of a run.
 
 When the final tool is the only tool, it is forced with a named
 `tool_choice`, or `required` where the provider refuses a named one, as
@@ -196,8 +212,9 @@ not a legal tool name (1 to 64 letters, digits, `_` or `-`).
 
 `spec.final_tool_name` names a registered tool whose call ends the run the
 same way, on any provider (Python's `final_tool_name`). Its input is checked
-against the output schema when there is one, and is the answer as it is
-otherwise. The tool never runs. `agent.open` refuses a name that is not a
+against the tool's own input schema and `validate`, then against the output
+schema when there is one, and is the answer as it is after that. The tool
+never runs. `agent.open` refuses a name that is not a
 registered tool.
 
 ```python
@@ -221,6 +238,12 @@ for one run, and the run stores it in its first `init` event
 It is sent with every request but on a turn that offers no tool (Python's
 rule: a skill that narrows a turn to no tool, for example). A forced choice holds every turn, so such a run can end only through
 its final tool, or `max_turns` and the [loop guard](./agent.md#loop_guard).
+A named tool is checked against each turn's own request, after any
+`before_provider_call` rewrite: on a turn that does not offer it (a skill
+narrowed the tools, tool search deferred it) the request goes out as `auto`
+instead of failing with the provider's 400, and that turn's `context_build`
+event has `metadata.tool_choice_dropped` with the tool's name. `required` is
+never dropped: a turn with at least one tool can satisfy it.
 `agent.open` refuses a named tool the agent does not offer (the final tool
 counts), `required` when it offers no tool at all, and a choice its provider
 refuses; a run's own one is refused with

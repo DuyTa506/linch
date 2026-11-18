@@ -69,10 +69,30 @@ class Filesystem(TypedDict, total=False):
             provider's context window for the spec's model, at least 1000
             tokens (Python Linch's `threshold_fraction`, 0.1 there). Used
             only when `offload_threshold_tokens` is absent.
+        memory: Show the model its file memory: an instruction to keep
+            memories under `/memories/`, and the first 200 lines of
+            `/memories/MEMORY.md` when the session's files hold it (Python
+            Linch's `FileMemoryContextBuilder`). Both are read again for
+            each request and ride its tail, never the session. A
+            `deep_agent` always has this. Off when absent. With memory
+            stores the file is dropped when its session closes; with
+            Postgres stores every session of the namespace shares the
+            files, and `memory_scope` says whose `MEMORY.md` it is. The
+            index is cut to 200 lines and 16 KiB and shown as untrusted
+            data.
+        memory_scope: Whose `/memories/` the model sees: `"principal"`
+            (the default when absent) gives each run's principal a
+            directory of its own, `/memories/<key>/MEMORY.md`, so a run with
+            fewer rights cannot plant notes for others (a run without a
+            principal shares `/memories/MEMORY.md`); `"namespace"` is that
+            one file for every run of the namespace. It separates by path,
+            not by permission. Used only with `memory` or a `deep_agent`.
     """
 
     offload_threshold_tokens: int
     offload_threshold_fraction: float
+    memory: bool
+    memory_scope: Literal["namespace", "principal"]
 
 
 class LocalExecution(TypedDict):
@@ -296,15 +316,23 @@ class LoopGuard(TypedDict, total=False):
     `repeated_failures` or `idle_turns`), an `ErrorEvent` named
     `LoopGuardError`, and a `ResultEvent` of subtype `error`, before its
     next provider call. Python counts identical inputs whatever the
-    result; here a repeat must also return the same result, an error result
-    is the failure streak's, a built-in tool that polls (`BashOutput`) never
-    repeats, and there is no `force_final_answer`.
+    result; here a repeat must also return the same result, within the
+    latest 20 results, an error result is the failure streak's, and there is
+    no `force_final_answer`. `max_identical_inputs` is Python's rule loosened
+    (10 among the latest 50 calls, not 3 in the whole run). A tool that polls
+    (`BashOutput`; a host tool or MCP tool declared `polls`) is waited on: it
+    ends the run only after
+    `max_idle_turns` identical answers in a row, or at once when a finished
+    command is read again.
 
     Attributes:
         max_identical_tool_calls: Calls of one tool with the same input
             and the same result, not an error, that end the run; the one
             that reaches it runs first. A call whose result changed is
             progress. 3 when absent, 0 never.
+        max_identical_inputs: Calls of one tool with the same input among
+            the latest 50, whatever their results, that end the run (a
+            tool that polls is not counted). 10 when absent, 0 never.
         max_consecutive_failures: Tool batches in a row whose every call
             failed that end the run. 3 when absent, 0 never.
         max_idle_turns: Most turns in a row that may end without a provider
@@ -314,6 +342,7 @@ class LoopGuard(TypedDict, total=False):
     """
 
     max_identical_tool_calls: int
+    max_identical_inputs: int
     max_consecutive_failures: int
     max_idle_turns: int
 
@@ -676,6 +705,16 @@ class AgentConfig(TypedDict, total=False):
             prices a model with, in place of the published table or in
             addition to it. A model neither lists costs `None`, as does any
             model a local server (`vllm`, `sglang`, `llamacpp`) serves.
+        max_provider_concurrency: The most provider calls its runs, and the
+            runs of every agent opened on the same server with the same
+            provider key and endpoint, make at once; the rest wait their
+            turn, first come first served. A run that waits has dispatched
+            nothing, so cancelling it leaves no delivery or receipt.
+            Unlimited when absent; at least 1. A remote tenant may ask for
+            at most its `max_provider_concurrency` and gets that when it
+            asks for none. The limit is the server process's: a worker
+            process or a second server counts its own calls. It is not
+            part of the run contract.
     """
 
     namespace: Required[str]
@@ -700,3 +739,4 @@ class AgentConfig(TypedDict, total=False):
     deep_agent: DeepAgent
     profile: Profile
     pricing: Mapping[str, ModelRates]
+    max_provider_concurrency: int

@@ -141,6 +141,11 @@ pub struct AllowConfig {
     /// least 1; the server's default pool size
     /// ([`linch::postgres::default_max_connections`]) when absent.
     pub max_pool_connections: Option<u32>,
+    /// The most provider calls the tenant's runs make at once on each
+    /// provider key and endpoint, at least 1; absent, unlimited. A config
+    /// may ask for less and gets this when it asks for nothing. It holds
+    /// within the server process, not across processes.
+    pub max_provider_concurrency: Option<u32>,
     /// Schedules the tenant may keep in each database, at least 1; absent,
     /// it may create none.
     pub max_schedules: Option<u64>,
@@ -242,6 +247,10 @@ impl ServerConfig {
                 ("max_connections", allow.max_connections),
                 ("max_agents", allow.max_agents),
                 ("max_pool_connections", pool),
+                (
+                    "max_provider_concurrency",
+                    allow.max_provider_concurrency.map(|max| max as usize),
+                ),
                 ("max_schedules", allow.max_schedules.map(|max| max as usize)),
                 (
                     "max_queued_jobs",
@@ -337,6 +346,7 @@ impl AllowConfig {
                 (self.max_pool_connections.and_then(NonZeroU32::new))
                     .unwrap_or_else(linch::postgres::default_max_connections),
             )
+            .max_provider_concurrency(self.max_provider_concurrency.and_then(NonZeroU32::new))
             .provider_base_urls(&self.provider_base_urls)?
             .workspace_roots(&self.workspace_roots)?
             .postgres_dsns(&self.postgres_dsns)?

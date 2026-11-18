@@ -52,6 +52,7 @@ use crate::provider::call::ModelCall;
 use crate::run::Phase;
 use crate::skills;
 
+use super::gate::Slot;
 use super::turn::{Runner, Step};
 
 /// Delivery `attempt` of the turn's primary call.
@@ -144,6 +145,13 @@ impl Runner {
             // A run that failed over summarizes on the model it now calls.
             request.model = self.model().to_owned();
         }
+        let slot = match self.slot().await? {
+            Slot::Cancelled => {
+                self.abort().await?;
+                return Ok(None);
+            }
+            held => held,
+        };
         let call =
             ModelCall::prepare_compaction(&self.run.run_id, self.turn, attempt, &request.model);
         self.summary_calls = self.summary_calls.max(attempt);
@@ -155,6 +163,7 @@ impl Runner {
         self.outbox.deliver(ready).await;
         // The summary is not the assistant's answer: no deltas.
         let outcome = (call.drive(&*agent.provider, request, &self.cancel, None)).await;
+        drop(slot);
         let mut receipt = outcome.receipt;
         self.settle(&mut receipt);
         let (usage, cost) = (receipt.usage, receipt.cost_usd);

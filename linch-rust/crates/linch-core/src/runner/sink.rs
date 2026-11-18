@@ -30,6 +30,7 @@ use crate::hooks::{Hooks, ToolUseStartRequest, ToolUseStopRequest};
 use crate::ids::{RunId, SessionId};
 use crate::journal::{Journal, JournalError};
 use crate::json::JsonValue;
+use crate::loop_guard::Watch;
 use crate::scheduler::{CallOutcome, PlannedAction, PlannedCall, ToolSink};
 use crate::skills::{SKILL_TOOL, requested};
 use crate::tool::ToolProgress;
@@ -49,6 +50,8 @@ pub(super) struct JournalSink<'a> {
     /// Durable events tools reported, in order, not staged yet (sync, so a
     /// report never waits on a flush).
     inbox: Mutex<Vec<Event>>,
+    /// The loop guard's counts, which see each event as it is staged.
+    watch: Mutex<&'a mut Watch>,
 }
 
 /// The guarded value even if a holder panicked; nothing panics while
@@ -64,6 +67,7 @@ impl<'a> JournalSink<'a> {
         run_id: RunId,
         session_id: SessionId,
         hooks: &'a Hooks,
+        watch: &'a mut Watch,
     ) -> Self {
         let durable = AtomicU64::new(journal.durable_seq());
         Self {
@@ -75,6 +79,7 @@ impl<'a> JournalSink<'a> {
             durable,
             started: Mutex::new(HashSet::new()),
             inbox: Mutex::new(Vec::new()),
+            watch: Mutex::new(watch),
         }
     }
 
@@ -134,8 +139,12 @@ impl<'a> JournalSink<'a> {
         let ready = {
             let mut journal = self.journal.lock().await;
             let reported = std::mem::take(&mut *lock(&self.inbox));
-            for event in reported.into_iter().chain(events) {
-                journal.stage(event);
+            {
+                let mut watch = lock(&self.watch);
+                for event in reported.into_iter().chain(events) {
+                    watch.see(&event);
+                    journal.stage(event);
+                }
             }
             if !barrier {
                 return Ok(());

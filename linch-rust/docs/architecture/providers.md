@@ -245,6 +245,36 @@ A `ContextLength` failure is not retryable, and before any event with a 4xx,
 failing ([context-length recovery](./compaction.md#context-length-recovery));
 that call is the turn's next attempt, not a retry.
 
+### The concurrency gate
+
+`max_provider_concurrency` builds a `ProviderGate`
+(`crates/linch-core/src/provider/gate.rs`): a FIFO semaphore whose clones
+share one budget, bound with `AgentBuilder::provider_gate` and cloned into
+a subagent's agent. It is not in the spec, so it is not in the contract
+digest, and unset it is not in the config's JSON either (pinned by
+`the_cap_is_off_the_wire_when_unset_and_out_of_the_contract`).
+
+The runner takes a place in `dispatch` after `before_provider_call` and
+before it stages the call's delivery, and in compaction before the summary's
+delivery (`runner/gate.rs`). A run that waits has staged no delivery, so a
+cancel there is the `abort` of a run that never called; the wait is
+`cancel.run_until_cancelled`, and a cancelled waiter leaves the queue
+(pinned by `cancelling_a_run_that_waits_leaves_no_call_and_no_receipt`).
+With a place free the path writes nothing. With none, whatever the run has
+staged (a failed receipt and its usage, a `model_fallback`, a child's
+events) is flushed before the wait, since a paid receipt must not sit in
+memory behind another run's call. The place is held through the delivery
+write, `provider_call_start` and `drive`, and dropped before the receipt is
+handled, so the backoff, `overflow` and the hooks never hold it.
+
+`PgPools` (the facade's per-scope shared state: the server keeps one per
+tenant and one for local connections) holds `Weak` gates by provider key
+variable and endpoint, not by size, so two agents' limits do not add up. A
+gate has the size of the open that created it, as a pool does, and goes with
+the last agent that holds it. Nothing shares a gate between processes; a
+Postgres-backed limiter is not built, and Python Linch's pluggable `Limiter`
+protocol (a host-supplied `acquire` and `release`) has no counterpart.
+
 ### Context-length refusals
 
 `crates/linch-providers/src/overflow.rs` holds one `Overflow` per provider

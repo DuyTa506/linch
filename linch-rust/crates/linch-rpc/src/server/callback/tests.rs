@@ -229,6 +229,7 @@ fn context_build_carries_the_messages_and_reads_blocks() {
         session_id,
         run_id,
         messages: Arc::new(vec![Arc::new(Message::user_text("hi"))]),
+        principal: None,
     };
     let wire = ContextBuild::encode(&request);
     assert_eq!(wire["messages"][0]["role"], "user");

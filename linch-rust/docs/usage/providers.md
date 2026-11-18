@@ -484,6 +484,53 @@ before retries existed, and `{"max_attempts": 1}` changes it. Python Linch
 also recovers from a prompt that is too long by compacting and calling
 again; this server does not.
 
+## Limit concurrent calls
+
+Many runs on one API key hit its rate limit together. `max_provider_concurrency`
+(an integer of at least 1, in the [agent config](./agent.md#top-level-fields))
+caps the provider calls in flight; a call over the cap waits its turn, first
+come first served. It is Python Linch's `max_provider_concurrency`, a
+semaphore around every live provider call, and there is no rate or token
+limit, as there is none in Python Linch.
+
+```python
+config = {
+    "namespace": "support",
+    "spec": {"model": "deepseek-flash"},
+    "provider": {"id": "deepseek"},
+    "max_provider_concurrency": 2,
+}
+```
+
+- **What it counts.** Each model call: a turn's call, a compaction summary
+  and a subagent's calls, all through the one limit. A retry's backoff, the
+  summary after a context-length refusal and the hooks around a call do not
+  hold a place, so a limit of 1 does not deadlock a run on itself.
+- **Scope.** All runs of the agent. Agents opened on one server that use the
+  same provider key and `base_url` origin (scheme, host and port, as the
+  tenant's `provider_base_urls` match it) share one limit, so `openai-chat`
+  and `openai-responses` on one `OPENAI_API_KEY` count together, and so do
+  two `base_url`s that differ only in path or query; a different key variable
+  or origin counts apart. A config that leaves `base_url` unset and one that
+  spells out the provider's default are two origins to this count. Agents that ask for different numbers on
+  one key share the limit of the first, which lasts until no open agent
+  uses it. For a remote tenant that is every agent and run of the tenant
+  ([the tenant's cap](./server.md#what-admission-refuses-and-why)). The
+  limit is the server process's: a [worker](./scheduler.md#run-a-worker) is
+  another process, and a second server another, each with its own count.
+  A limit shared across processes is not built.
+- **What a caller sees.** Nothing but time: the run is `running` and emits
+  no event while it waits. It has dispatched nothing, so no delivery or
+  receipt is written for the call (Python Linch begins its call record
+  before it waits; this server does not). Cancelling a run that waits aborts
+  it with no call, and it leaves the queue without taking a place.
+- **Durability.** If a run must wait and has events not yet written (a failed
+  call's receipt before a failover), they are written first; a run that
+  finds a place free writes nothing extra.
+- **Contract.** Unset is no limit and is not sent. The limit is not part of
+  the [run contract](./agent.md#the-run-contract), so changing it never
+  strands a suspended run.
+
 ## Cost
 
 Usage and result events carry `cost_usd`, `cumulative_cost_usd` and

@@ -185,6 +185,27 @@ pub async fn plan(
     BatchPlan { calls }
 }
 
+/// Decide one call, as [`plan`] decides each of a batch's, for the final
+/// tool call (see `runner/final_tool.rs`): validate its input, run the
+/// `pre_tool_use` chain, evaluate permission. No approval is recorded for it,
+/// and an `Ask` stays an `Ask`.
+pub(crate) async fn plan_one(
+    block: &ToolUseBlock,
+    tool: &Arc<RegisteredTool>,
+    permissions: &PermissionEngine,
+    hooks: &Hooks,
+    run: &RunIdentity,
+) -> PlannedCall {
+    let approvals = HashMap::new();
+    let planner = Planner {
+        permissions,
+        hooks,
+        run,
+        approvals: &approvals,
+    };
+    planner.call(block, Some(tool)).await
+}
+
 struct Planner<'a> {
     permissions: &'a PermissionEngine,
     hooks: &'a Hooks,

@@ -401,6 +401,8 @@ async fn a_crash_at_any_write_of_a_skip_loop_still_trips() {
 struct Ticker {
     name: &'static str,
     poll: bool,
+    /// Whether each answer says the polled thing is done.
+    done: bool,
     answer: fn(u32) -> String,
     calls: AtomicU32,
     schema: JsonObject,
@@ -411,7 +413,21 @@ impl Ticker {
         Arc::new(Self {
             name,
             poll,
+            done: false,
             answer,
+            calls: AtomicU32::new(0),
+            schema: object(json!({"type": "object"})),
+        })
+    }
+
+    /// A poll of a command that has ended: every read answers the same and
+    /// says so, as `BashOutput` does.
+    fn finished(name: &'static str) -> Arc<Self> {
+        Arc::new(Self {
+            name,
+            poll: true,
+            done: true,
+            answer: |_| "[exit code 0]".into(),
             calls: AtomicU32::new(0),
             schema: object(json!({"type": "object"})),
         })
@@ -441,7 +457,13 @@ impl Tool for Ticker {
     }
     async fn execute(&self, _input: JsonObject, _ctx: ToolContext) -> ToolResult {
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(ToolOutput::new(json!((self.answer)(n))))
+        let mut output = ToolOutput::new(json!((self.answer)(n)));
+        if self.done {
+            output
+                .metadata
+                .insert(linch_core::loop_guard::POLL_DONE.into(), true.into());
+        }
+        Ok(output)
     }
 }
 
@@ -494,7 +516,13 @@ async fn ten_calls(tool: Arc<Ticker>) -> (RunStatus, Vec<Envelope>) {
 async fn the_same_call_with_a_new_result_is_progress() {
     let changing = Ticker::new("Status", false, |n| format!("step {n}"));
     let (status, events) = ten_calls(changing.clone()).await;
-    assert_eq!(status, RunStatus::Completed, "{:?}", guards(&events));
+    // No result repeats, so the repeat count never trips; the tenth call of
+    // one input does (Python's rule, loosened), whatever the results.
+    assert_eq!(status, RunStatus::Failed);
+    let guard = guards(&events);
+    let detail = guard[0]["detail"].as_str().unwrap();
+    assert!(detail.contains("identical inputs 10 time(s)"), "{detail}");
+    assert!(!detail.contains("same result"), "{detail}");
     assert_eq!(changing.calls(), 10);
 
     let same = Ticker::new("Status", false, |_| "idle".into());
@@ -512,9 +540,10 @@ async fn the_same_call_with_a_new_result_is_progress() {
 }
 
 /// A tool that declares itself a poll (`BashOutput` reading a command that
-/// runs on) is never a repeat, whatever it answers.
+/// runs on) is waited on: ten identical answers are neither a repeat nor
+/// ten identical inputs, since the idle bound is 25.
 #[tokio::test]
-async fn a_poll_is_never_a_repeat() {
+async fn a_poll_is_waited_on_not_counted_as_a_repeat() {
     let poll = Ticker::new("Poll", true, |_| "still running".into());
     let (status, events) = ten_calls(poll.clone()).await;
     assert_eq!(status, RunStatus::Completed, "{:?}", guards(&events));
@@ -563,6 +592,48 @@ async fn a_crash_at_any_write_keys_repeats_on_the_durable_results() {
             for answer in before {
                 assert!(copies(answer, before) < 3, "{context}: {answers:?}");
             }
+        }
+    }
+}
+
+/// A poll that says its command is done is a repeat at the usual count, and
+/// the `tool_call_end` that says so is read back from the durable log: a
+/// crash at any write of such a run ends it on the third read, as a run
+/// without a crash does, and a poll that does not say it is done is waited
+/// on (`a_poll_is_waited_on_not_counted_as_a_repeat`).
+#[tokio::test]
+async fn a_crash_at_any_write_keeps_a_finished_poll_a_repeat() {
+    let finished = || Ticker::new("Wait", true, |_| "[exit code 0]".into());
+    let done = || Ticker::finished("Wait");
+    let (status, events) = ten_calls(finished()).await;
+    assert_eq!(status, RunStatus::Completed, "{:?}", guards(&events));
+
+    let (status, events) = ten_calls(done()).await;
+    assert_eq!(status, RunStatus::Failed);
+    assert_eq!(guards(&events)[0]["reason"], "repeated_tool_call");
+
+    let clean = Arc::new(Stores::default());
+    let provider = Arc::new(Replay::new(ten_turns("Wait")));
+    finish(ticking(done(), provider, clean.clone()).run("go", RunOptions::new("s1"))).await;
+    let writes = clean.log.lock().unwrap().len() as u64;
+    for n in 1..=writes {
+        for timing in [FaultTiming::Before, FaultTiming::After] {
+            let context = format!("write {n} failing {timing:?}");
+            let (stores, tool) = (Arc::new(Stores::default()), done());
+            let provider = Arc::new(Replay::new(ten_turns("Wait")));
+            let faulty = Arc::new(Faulty::new(stores.clone(), n, timing));
+            let crashed = ticking(tool.clone(), provider.clone(), faulty);
+            let stream = crashed.run("go", RunOptions::new("s1"));
+            let run_id = stream.run_id().clone();
+            assert!(drain(stream).await.1.is_some(), "{context}");
+            let agent = ticking(tool, provider, stores.clone());
+            let run_id = recover(&agent, &stores, run_id).await;
+
+            let (status, events) = ended(&stores, &run_id).await;
+            assert_eq!(status, RunStatus::Failed, "{context}");
+            let guard = guards(&events);
+            assert_eq!(guard.len(), 1, "{context}: {guard:?}");
+            assert_eq!(guard[0]["reason"], "repeated_tool_call", "{context}");
         }
     }
 }

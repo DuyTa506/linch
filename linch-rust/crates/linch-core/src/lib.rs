@@ -87,6 +87,7 @@ pub use provider::{
     ProviderRequest, ReasoningEffort, StreamError, Thinking, ToolChoice, ToolDefinition, assemble,
 };
 pub use provider::{DEFAULT_CONTEXT_WINDOW, Provider, ProviderError, ProviderStream};
+pub use provider::{ProviderGate, ProviderPermit, WeakProviderGate};
 pub use registration::Registration;
 pub use registry::{
     OutputContractError, RegisteredTool, RegistryError, SchemaKind, ToolRegistry, ToolSnapshot,

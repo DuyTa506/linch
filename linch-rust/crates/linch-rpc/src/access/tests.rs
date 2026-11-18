@@ -1,5 +1,8 @@
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+use linch::AgentConfig;
 
 use super::*;
 
@@ -151,4 +154,45 @@ fn an_mcp_entry_never_lets_a_client_choose_what_code_loads() {
         .mcp_commands(&[entry("LDAP_URL")])
         .unwrap();
     assert_eq!(allow.mcp_commands, [entry("LDAP_URL")]);
+}
+
+fn scripted_config(limit: Option<u32>) -> AgentConfig {
+    let mut value = serde_json::json!({
+        "namespace": "acme",
+        "spec": {"model": "m"},
+        "provider": {"id": "scripted", "turns": []},
+    });
+    if let Some(limit) = limit {
+        value["max_provider_concurrency"] = limit.into();
+    }
+    serde_json::from_value(value).unwrap()
+}
+
+/// A tenant may lower its provider concurrency below the operator's cap,
+/// not raise it above; one that asks for none gets the cap; with no cap
+/// the config is left as it is.
+#[tokio::test]
+async fn a_tenant_may_lower_the_provider_concurrency_not_raise_it() {
+    let allow = Allowlists::new()
+        .scripted_provider(true)
+        .max_provider_concurrency(NonZeroU32::new(4));
+    let capped = Tenant::new("acme", allow).unwrap();
+    for (asked, kept) in [(None, 4), (Some(4), 4), (Some(1), 1)] {
+        let mut config = scripted_config(asked);
+        capped.admit(&mut config).await.unwrap();
+        let admitted = config.max_provider_concurrency.map(NonZeroU32::get);
+        assert_eq!(admitted, Some(kept));
+    }
+    let mut raised = scripted_config(Some(5));
+    let refusal = capped.admit(&mut raised).await.unwrap_err();
+    assert_eq!(refusal.code, crate::error::code::NOT_ALLOWED);
+    let data = serde_json::json!({"kind": "provider_concurrency", "max": 4});
+    assert_eq!(refusal.data, Some(data));
+
+    let open = Tenant::new("acme", Allowlists::new().scripted_provider(true)).unwrap();
+    for asked in [None, Some(1000)] {
+        let mut config = scripted_config(asked);
+        open.admit(&mut config).await.unwrap();
+        assert_eq!(config.max_provider_concurrency.map(NonZeroU32::get), asked);
+    }
 }

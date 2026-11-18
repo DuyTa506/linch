@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 /// Who a run acts for. Permission rules can match on its roles.
@@ -59,6 +60,26 @@ impl Principal {
     /// Whether the principal holds `role`.
     pub fn has_role(&self, role: &str) -> bool {
         self.roles.contains(role)
+    }
+
+    /// A stable key of this principal that is safe in a file path: 32 hex
+    /// digits of the SHA-256 of its tenant, user and roles. Another tenant,
+    /// user or role set gives another key, and nothing of the names shows.
+    pub fn path_key(&self) -> String {
+        let mut hash = Sha256::new();
+        let roles: Vec<&str> = self.roles.iter().map(String::as_str).collect();
+        for part in [self.tenant.as_str(), self.user.as_str()]
+            .into_iter()
+            .chain(roles)
+        {
+            hash.update(part.len().to_le_bytes());
+            hash.update(part);
+        }
+        let digest = hash.finalize();
+        digest[..16]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
     }
 }
 

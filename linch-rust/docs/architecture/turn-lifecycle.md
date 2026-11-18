@@ -205,17 +205,18 @@ is not made and the run fails with `TurnLimitError` (`runner/end.rs:138-154`).
 
 ### The loop guard
 
-`spec.loop_guard` (`loop_guard.rs:66`) ends a run that is stuck, with
+`spec.loop_guard` (`loop_guard.rs:105`) ends a run that is stuck, with
 `max_turns` unset as well. It is on by default; the default is left off the
 wire, so it does not change the contract of a spec that does not set it.
 
 | Check | Default | Trips | Checked |
 |---|---|---|---|
-| `max_identical_tool_calls` | 3 | The same call with the same result this many times in the run: one tool, the same input and the same result content (both canonical JSON), not an error, and not a tool that polls | At `Step::Results`, after the batch's results are appended (`turn.rs:303`) |
+| `max_identical_tool_calls` | 3 | The same call with the same result this many times among the latest 20 results: one tool, the same input and the same result content (both canonical JSON, an offload file name removed), not an error. A tool that polls repeats only when a finished command is read again | At `Step::Results`, after the batch's results are appended (`turn.rs:326`) |
+| `max_identical_inputs` | 10 | One tool called with the same input this many times among the latest 50 calls, whatever the results and failures; a tool that polls is not counted. Off the wire at 10 | Same |
 | `max_consecutive_failures` | 3 | This many tool batches in a row whose every call failed; a batch with one success starts again | Same |
-| `max_idle_turns` | 25 | One turn more than this, in a row, without a provider call: a `before_provider_call` `force_continue` | In the `force_continue` branch of dispatch, before its feedback is staged (`turn.rs:415`) |
+| `max_idle_turns` | 25 | One turn more than this, in a row, without a provider call: a `before_provider_call` `force_continue` | In the `force_continue` branch of dispatch, before its feedback is staged (`turn.rs:454`) |
 
-0 turns one of the first two off; `max_idle_turns` is at least 1, so the
+0 turns one of the first three off; `max_idle_turns` is at least 1, so the
 idle bound is always on. Such a turn never reaches the budget and appends
 to the session every time, so without the bound a hook that always skips
 the call loops until the run is cancelled.
@@ -233,23 +234,39 @@ an edit, a status that moved on) and starts a count of its own; going back
 to an earlier result is a repeat of that result. An error result is never a
 repeat, because Linch itself asks the model to repeat some refused calls (a
 deferred tool: `call tool_search with select:X first`); calls that keep
-failing are the failure streak's. A tool whose `polls()` is true
-(`tool.rs:279`; `BashOutput`, which reads a background command until it
-ends) is never a repeat either; its failures still count toward the streak.
-Python counts identical inputs whatever the result, failed and refused
-calls included. Python's `force_final_answer` (one more turn with no tools)
-is not ported: a trip stops.
+failing are the failure streak's. The same call count looks at the latest
+20 results, so a status read now and then in a long run is no loop, and the
+second count, Python's rule (which counts a tool's identical inputs over the
+whole run, results and failures included, at its limit of 3) loosened to 10
+among the latest 50 inputs.
 
-Nothing is checkpointed for the guard. `Watch::of` (`loop_guard.rs:145`)
+A tool whose `polls()` is true (`tool.rs:279`; `BashOutput`, a host tool
+with `polls`, an MCP tool in the server's `polls`) waits on something that
+runs on. Its answers are counted apart: the same answer `max_idle_turns`
+times in a row (a new answer starts again) ends the run as
+`repeated_tool_call`, so a silent command is not polled for ever. A result
+whose `ToolCallEnd` metadata has `poll_done` (`BashOutput` of a command that
+exited or was killed) is a repeat of that result at the usual count, since
+a finished command answers the same to every read. Its failures still count
+toward the streak. The `ToolCallEnd` reaches the guard live through the
+journal sink and is read back from the log on a resume like the rest.
+
+Python's `force_final_answer` (one more turn with no tools) is not ported:
+a trip stops.
+
+Nothing is checkpointed for the guard. `Watch::of` (`loop_guard.rs:270`)
 folds the run's durable events: an `assistant` event names the calls of its
-response (less those of tools that poll, which the runner reads from the
-registry), the next `tool_result` user event counts those that did not fail
-by their result content and moves the failure streak, and a primary
-`model_call_delivery` records its turn. The live run folds the same events as it stages them
-(`Runner::stage_seen`, `turn.rs:350`), and a resume folds the stored ones
-(`start.rs:473`). Each is durable before the step that checks it (the
-results with the `ToolResults` checkpoint, a delivery before its call), and
-the turn comes from the checkpoint, so a crash at any write resumes with
+response, a `tool_call_end` event says whether a poll's command is done
+(`poll_done` in its metadata, for the tools that poll, which the runner reads
+from the registry), the next `tool_result` user event counts the calls by
+their result content (what a call returned, an offload file name removed)
+and moves the failure streak, and a primary `model_call_delivery` records its
+turn. The live run folds the same events as it stages them
+(`Runner::stage_seen`, `turn.rs:381`; the tools' `tool_call_end` events as
+the journal sink stages them, `runner/sink.rs`), and a resume folds the
+stored ones (`start.rs:508`). Each is durable before the step that checks it
+(the results with the `ToolResults` checkpoint, a delivery before its call),
+and the turn comes from the checkpoint, so a crash at any write resumes with
 the counts the run had and trips at the same point
 (`tests/e2e_loop_guard.rs`).
 
@@ -623,7 +640,15 @@ with the request's thinking (`Provider::tool_choice_refusal`).
 
 `received` hands a logged response that calls it to `final_call`
 (`runner/final_tool.rs`) instead of planning a batch, so no tool event is
-written. While the run decides, `Runner::unpaired` holds the response:
+written. `final_call` first hears waiting background children and peers
+(`Runner::hear_back_final`, `runner/inbox.rs`: the notes join the response's
+results in one `ToolResults` message), then decides the call with
+`scheduler::plan_one` (the tool's own validation, `pre_tool_use`, permission;
+`Ask` counts as allowed, a veto or deny draws on `structured_output_retries`
+through `retry_or_fail`). A made final tool is planned as a read-scope
+`MadeTool` (`structured.rs`), since it is not registered. A `stop` rewrite is
+parsed and checked again (`recheck`). While the run decides,
+`Runner::unpaired` holds the response:
 
 - Feedback (a schema failure, a verifier's or a `stop` hook's retry) goes
   through `send_back`, which turns it into the response's results (the

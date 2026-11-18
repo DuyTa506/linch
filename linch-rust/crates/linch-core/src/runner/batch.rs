@@ -251,6 +251,7 @@ impl Runner {
             run_id,
             self.run.session_id.clone(),
             hooks,
+            &mut self.watch,
         );
         Ok(scheduler::execute(plan, &sink, hooks, &self.run, &options).await?)
     }

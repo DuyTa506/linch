@@ -3,13 +3,14 @@
 //! refused request.
 
 use std::io::ErrorKind;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
 use linch::permissions::RuleDecision;
 use linch::verification::Check;
 use linch::{
     AgentConfig, AgentSpec, ExecutionConfig, McpTransportConfig, PermissionMode, PermissionPolicy,
-    Principal, ProviderConfig, StoreConfig,
+    Principal, ProviderConfig, StoreConfig, ToolChoice,
 };
 use serde_json::json;
 
@@ -43,6 +44,7 @@ impl Tenant {
         let allow = &self.allow;
         allow.admit_provider(&config.provider)?;
         admit_guardrails(&config.spec)?;
+        allow.admit_provider_concurrency(&mut config.max_provider_concurrency)?;
         let mode = (config.permissions.as_ref()).map_or(PermissionMode::default(), |p| p.mode);
         if !allow.permission_modes.contains(&mode) {
             // The config's spelling (`skip_dangerous`), not the variant's.
@@ -147,6 +149,16 @@ impl Tenant {
         Ok(())
     }
 
+    /// Refuse a run's own forced `tool_choice` that nothing would end (see
+    /// the check `agent.open` runs on the spec's).
+    pub(crate) fn admit_tool_choice(
+        &self,
+        choice: Option<&ToolChoice>,
+        spec: &AgentSpec,
+    ) -> Result<(), ErrorObject> {
+        admit_tool_choice(choice, spec)
+    }
+
     /// Refuse a principal that names another tenant; none is fine.
     pub(crate) fn admit_principal(&self, principal: Option<&Principal>) -> Result<(), ErrorObject> {
         match principal {
@@ -191,6 +203,33 @@ impl Allowlists {
             *chosen = None;
         }
         Ok(())
+    }
+
+    /// A config may lower the provider concurrency to below the tenant's
+    /// cap, not raise it past: one that asks for none gets the cap. The
+    /// cap is not part of the run contract, so the fill changes no digest.
+    fn admit_provider_concurrency(
+        &self,
+        asked: &mut Option<NonZeroU32>,
+    ) -> Result<(), ErrorObject> {
+        let Some(cap) = self.max_provider_concurrency else {
+            return Ok(());
+        };
+        match *asked {
+            Some(asked) if asked > cap => {
+                let message = format!(
+                    "max_provider_concurrency {asked} is above the tenant's \
+                     max_provider_concurrency {cap}"
+                );
+                let data = json!({"kind": "provider_concurrency", "max": cap});
+                Err(ErrorObject::new(code::NOT_ALLOWED, message).with_data(data))
+            }
+            Some(_) => Ok(()),
+            None => {
+                *asked = Some(cap);
+                Ok(())
+            }
+        }
     }
 
     fn admit_provider(&self, provider: &ProviderConfig) -> Result<(), ErrorObject> {
@@ -318,6 +357,7 @@ fn admit_guardrails(spec: &AgentSpec) -> Result<(), ErrorObject> {
         let message = format!("loop_guard.max_idle_turns may be at most {MAX_IDLE_TURNS}");
         return Err(refused("loop_guard", message));
     }
+    admit_tool_choice(spec.tool_choice.as_ref(), spec)?;
     let too_long = |pattern: &str| pattern.len() > MAX_PATTERN_BYTES;
     if let Some(redaction) = &spec.redaction
         && (redaction.rules.len() > MAX_GUARDRAILS
@@ -346,6 +386,33 @@ fn admit_guardrails(spec: &AgentSpec) -> Result<(), ErrorObject> {
             );
             return Err(refused("verification", message));
         }
+    }
+    Ok(())
+}
+
+/// Refuse a forced tool choice (`required`, or a named tool that is not the
+/// spec's final tool) for a run that nothing else ends: a model forced to
+/// call a tool every turn never answers, so with no `max_turns` and no
+/// `final_tool_name` the run goes on until a budget, which a tenant may not
+/// have, or the loop guard, which an input that keeps changing evades. Only
+/// the spec's named final tool counts, at `agent.open` and `run.start` alike:
+/// the one made from an output schema exists only on a provider that cannot
+/// take the schema natively, so a config that relies on it names the tool or
+/// sets `max_turns`.
+pub(crate) fn admit_tool_choice(
+    choice: Option<&ToolChoice>,
+    spec: &AgentSpec,
+) -> Result<(), ErrorObject> {
+    let final_tool = spec.final_tool_name.as_deref();
+    let forced = match choice {
+        Some(ToolChoice::Required {}) => true,
+        Some(ToolChoice::Tool { name }) => Some(name.as_str()) != final_tool,
+        _ => false,
+    };
+    if forced && spec.max_turns.is_none() && final_tool.is_none() {
+        let message = "a forced tool_choice (required, or a tool that is not the final tool) \
+                       needs spec.max_turns or spec.final_tool_name, or the run could never end";
+        return Err(refused("tool_choice", message.into()));
     }
     Ok(())
 }

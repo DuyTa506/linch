@@ -30,6 +30,10 @@ impl Server {
         let cancel = options.cancel.clone();
         let mut tables = lock(&self.0.tables);
         let agent = tables.agent(&params.agent)?;
+        if let Some(tenant) = &self.0.tenant {
+            let choice = options.tool_choice.as_ref();
+            tenant.admit_tool_choice(choice, agent.spec())?;
+        }
         // A fresh run id cannot be in use; a chosen one can.
         if let Some(run_id) = &options.run_id {
             tables.not_driven(run_id)?;

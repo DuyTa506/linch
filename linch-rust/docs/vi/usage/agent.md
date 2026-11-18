@@ -187,6 +187,7 @@ có, trừ `bash`.
 | `tasks` | `False` | Các tool task của session `TaskCreate`, `TaskList`, `TaskGet`, `TaskUpdate`, chạy không cần phê duyệt ở mọi mode ([Task](./tasks.md)) |
 | `deep_agent` | không có | Preset deep agent ([bên dưới](#deep_agent)) |
 | `profile` | không có | Một vai trò miền nghiệp vụ có phiên bản cho các run của agent ([bên dưới](#profile)) |
+| `max_provider_concurrency` | không có: không giới hạn | Số lời gọi provider tối đa mà các run của nó, và của các agent trên cùng key và endpoint provider, thực hiện cùng lúc; phần còn lại chờ đến lượt ([Provider](./providers.md#limit-concurrent-calls)). Không thuộc hợp đồng của run |
 
 ## `spec`
 
@@ -212,7 +213,7 @@ có, trừ `bash`.
 | `redaction` | không có | Các regex rule che response, kết quả tool và tùy chọn cả prompt trước khi bất cứ thứ gì ghi log, stream hay nhìn thấy chúng, `{"rules": [{"pattern", "replacement"?}], "response"?, "tool_results"?, "prompt"?}` ([Bảo mật](./security.md#redaction)) |
 | `verification` | không có | Các kiểm tra mà câu trả lời cuối cùng phải qua, và ngân sách retry mà chúng dùng chung với các callback `stop`, `{"max_retries"?, "verifiers"?}` ([Bảo mật](./security.md#verifiers)) |
 | `truncation_recovery` | không có: câu trả lời bị cắt là câu cuối | Tiếp tục một câu trả lời văn bản bị giới hạn đầu ra cắt, `{"max_attempts"?, "feedback"?}` ([Memory](./memory.md#cut-off-answers)) |
-| `loop_guard` | bật: 3 lời gọi giống nhau với cùng kết quả, 3 batch lỗi, 25 lượt không có lời gọi | Kết thúc một run bị kẹt, `{"max_identical_tool_calls"?, "max_consecutive_failures"?, "max_idle_turns"?}`, là `LoopGuard` của Python ([bên dưới](#loop_guard)) |
+| `loop_guard` | bật: 3 lời gọi giống nhau với cùng kết quả, 10 input giống nhau, 3 batch lỗi, 25 lượt không có lời gọi | Kết thúc một run bị kẹt, `{"max_identical_tool_calls"?, "max_identical_inputs"?, "max_consecutive_failures"?, "max_idle_turns"?}`, là `LoopGuard` của Python ([bên dưới](#loop_guard)) |
 
 ### System block
 
@@ -269,7 +270,8 @@ Loop guard kết thúc một run bị kẹt, trước lời gọi provider kế 
 
 | Trường | Mặc định | Run kết thúc khi |
 |---|---|---|
-| `max_identical_tool_calls` | `3` | Cùng một lời gọi nhận cùng kết quả chừng này lần: một tool, cùng input, cùng kết quả, không phải lỗi. Lời gọi chạm tới ngưỡng vẫn chạy trước. Một lời gọi có kết quả đã đổi (một file đọc lại sau khi sửa) là có tiến triển và không được đếm. `0` tắt kiểm tra này |
+| `max_identical_tool_calls` | `3` | Cùng một lời gọi nhận cùng kết quả chừng này lần trong 20 kết quả gần nhất: một tool, cùng input, cùng kết quả, không phải lỗi. Lời gọi chạm tới ngưỡng vẫn chạy trước. Một lời gọi có kết quả đã đổi (một file đọc lại sau khi sửa) là có tiến triển và không được đếm, và một lời gọi cách xa từ lâu trong một run dài khỏe mạnh cũng vậy. Một kết quả đã được chuyển sang filesystem (offload kết quả lớn) được tính theo nội dung của nó, bất kể tên file. `0` tắt kiểm tra này |
+| `max_identical_inputs` | `10` | Một tool được gọi với cùng input chừng này lần trong 50 lời gọi gần nhất, bất kể kết quả và bất kể có lỗi hay không: luật của Python đếm cái này trên toàn run với ngưỡng của `max_identical_tool_calls`; ở đây cách đếm nới hơn (10, trong một cửa sổ), nên một run dài khỏe mạnh không bị cắt. Nó chặn một vòng lặp mà kết quả đổi mỗi lần (một timestamp) hoặc luân phiên giữa vài lời gọi. Một tool poll không được đếm. `0` tắt kiểm tra này; không có trên wire khi bằng `10` |
 | `max_consecutive_failures` | `3` | Chừng này batch tool liên tiếp mà mọi lời gọi đều lỗi. Một batch có một lời gọi thành công thì đếm lại từ đầu. `0` tắt kiểm tra này |
 | `max_idle_turns` | `25` | Thêm một lượt liên tiếp nữa sẽ kết thúc mà không có lời gọi provider, điều mà chỉ một callback `before_provider_call` trả lời `force_continue` mới gây ra. Tối thiểu `1`: kiểm tra này luôn bật |
 
@@ -284,8 +286,14 @@ spec = {"model": "deepseek-flash", "loop_guard": {"max_identical_tool_calls": 5}
 
 Python Linch đếm các input giống nhau bất kể kết quả, kể cả lời gọi lỗi. Ở đây một
 lần lặp còn phải trả về cùng kết quả, một lời gọi lỗi thuộc về số lần lỗi (Linch bảo
-model lặp lại một số lời gọi bị từ chối, một tool bị hoãn), và một tool poll không bao
-giờ lặp: `BashOutput` có thể đọc một lệnh nền đang chạy bao nhiêu lần model cần.
+model lặp lại một số lời gọi bị từ chối, một tool bị hoãn). Một tool poll được chờ chứ không bị đếm là lần
+lặp: `BashOutput` có thể đọc một lệnh nền đang chạy bao nhiêu lần model cần, miễn là
+câu trả lời còn đổi; cùng một câu trả lời `max_idle_turns` lần liên tiếp thì run kết
+thúc (một lệnh không in gì và không bao giờ xong), và đọc lại một lệnh đã xong là một
+lần lặp ngay (`BashOutput` đánh dấu nó đã xong trong metadata của kết quả). Một [host
+tool](./tools.md#host-tools) khai báo `polls=True`, và một [MCP
+server](#mcp_servers) liệt kê các tool poll của nó trong `polls`; kết quả của chúng báo
+một lần poll đã xong bằng metadata `{"poll_done": true}`.
 `force_final_answer` của Python không có. Một tenant từ xa không được nâng
 `max_idle_turns` quá 25.
 
@@ -351,6 +359,7 @@ Các khoảng thời gian tính bằng mili giây.
 | `name` | bắt buộc | `<name>` trong `mcp__<name>__<tool>`: chữ cái ASCII, chữ số, `-`, và một dấu `_` đơn giữa chúng |
 | `transport` | bắt buộc | `{"type": "stdio", "command", "args": [], "env": {}}` hoặc `{"type": "http", "url", "headers": {}}` |
 | `trust_annotations` | `False` | Tool mà server đánh dấu chỉ đọc có nhận scope `read` thay vì `exec` hay không |
+| `polls` | `[]` | Các tool của server, theo tên server liệt kê, poll một thứ đang chạy: loop guard chờ các câu trả lời lặp lại của chúng, tối đa `max_idle_turns` câu giống nhau liên tiếp, thay vì kết thúc run ở lần thứ ba. Một kết quả MCP không có metadata để báo việc chờ đã xong |
 | `call_timeout_ms` | `300000` | Thời gian chờ dài nhất cho một lời gọi tool trước khi nó bị hủy |
 | `reconnect` | xem bên dưới | Cách thử lại khi mất kết nối |
 
@@ -371,6 +380,8 @@ prompt để dạy model cách dùng chúng.
 | Trường | Mặc định | Điều khiển gì |
 |---|---|---|
 | `offload_threshold_tokens` | không có | Chuyển một kết quả tool dạng văn bản được ước tính trên số token này (bốn byte mỗi token) vào hệ thống tệp, để lại vài dòng đầu và đường dẫn của nó cho model `read_file` |
+| `memory` | `False` | Cho model thấy chỉ dẫn lưu ký ức dưới `/memories/` và 200 dòng đầu (tối đa 16 KiB) của `MEMORY.md`, bao khung như dữ liệu không đáng tin, đọc lại cho mỗi request ([Memory](./memory.md#file-memory)). Deep agent luôn có |
+| `memory_scope` | `"principal"` | `/memories/` của ai mà model thấy: `"principal"` cho mỗi principal một thư mục riêng (`/memories/<key>/MEMORY.md`), `"namespace"` một tệp cho mọi run của namespace ([Memory](./memory.md#file-memory)) |
 | `offload_threshold_fraction` | không có | Offload khi vượt tỷ lệ này của [context window](./providers.md#context-window) của provider, tối thiểu 1000 token; Python Linch dùng 0.1. Chỉ dùng khi không có `offload_threshold_tokens`. Không có cả hai thì kết quả không bao giờ bị offload |
 
 Với kho memory, mỗi session có tệp riêng, mất cùng với server. Với kho Postgres,

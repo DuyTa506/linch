@@ -34,6 +34,27 @@ fn stdio_server() -> PathBuf {
     program
 }
 
+/// A tool the config names as polling says so, so the loop guard waits on
+/// its repeated answers; the server's other tools do not.
+#[tokio::test]
+async fn a_tool_the_config_names_as_polling_polls() {
+    let program = stdio_server();
+    let registry = Arc::new(ToolRegistry::new());
+    let mut config = McpServerConfig::new(
+        "stdio",
+        McpTransport::stdio(program.to_string_lossy(), Vec::new()),
+    );
+    config.polls.insert("echo".to_owned());
+    let server = McpServer::connect(config, Arc::clone(&registry))
+        .await
+        .expect("connect over stdio");
+    let snapshot = registry.snapshot();
+    let polls = |name: &str| snapshot.resolve(name).unwrap().tool().polls();
+    assert!(polls("mcp__stdio__echo"));
+    assert!(!polls("mcp__stdio__fail"));
+    server.disconnect().await;
+}
+
 #[tokio::test]
 async fn stdio_round_trip_and_clean_exit() {
     let program = stdio_server();

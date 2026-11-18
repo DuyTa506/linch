@@ -230,8 +230,11 @@ workspace.
 Before every model call the agent adds two text blocks to the end of the
 request: a short instruction (memories live under `/memories/`, one file per
 fact, with `MEMORY.md` as a one-line-per-file index), and the first 200 lines
-of `/memories/MEMORY.md` when it exists and is not empty. The index is read
-again for each request, so a change the model makes shows on its next turn.
+(at most 16 KiB) of that index when it exists and is not empty, fenced as
+untrusted data. The index is read again for each request, so a change the
+model makes shows on its next turn. A run with a principal keeps its memory in
+`/memories/<key>/` rather than `/memories/`; see
+[`memory_scope`](./memory.md#file-memory).
 
 These blocks are not logged and do not appear in the event stream; the model
 maintains the files with the virtual filesystem tools.

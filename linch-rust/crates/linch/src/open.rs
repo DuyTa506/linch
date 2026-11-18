@@ -116,6 +116,12 @@ impl AgentConfig {
             profile.validate()?;
             self.spec = profile.spec(self.spec);
         }
+        let gate = (self.max_provider_concurrency).map(|max| {
+            pools.gate(
+                crate::pools::GateKey::new(key_env(&self.provider), base_url(&self.provider)),
+                max,
+            )
+        });
         let provider = provider(self.provider)?;
         // A self-hosted server reports its context window here, before the
         // offload threshold and the skill listing are derived from it.
@@ -171,8 +177,11 @@ impl AgentConfig {
             &self.namespace,
             window,
         )?;
-        if deep.is_some() {
-            files.remember(&hooks);
+        if deep.is_some() || self.filesystem.as_ref().is_some_and(|files| files.memory) {
+            files.remember(
+                &hooks,
+                self.filesystem.as_ref().and_then(|f| f.memory_scope),
+            );
         }
         let mcp = connect_mcp(self.mcp_servers, &tools).await?;
         let config_dir = project::dir(self.config_dir, root.as_deref());
@@ -204,6 +213,9 @@ impl AgentConfig {
             // A compaction folds or clears what the model read: it reads a
             // file again before changing it (Python's `reset_read_tracker`).
             .on_compact(move |session| unread.forget(session));
+        if let Some(gate) = gate {
+            builder = builder.provider_gate(gate);
+        }
         if let Some(skills) = project.skills {
             builder = builder.skills(skills);
         }
@@ -516,6 +528,39 @@ fn provider(config: ProviderConfig) -> Result<Arc<dyn Provider>, OpenError> {
         } => server(Server::LlamaCpp, base_url, context_window, "LLAMA_API_KEY")?,
     };
     Ok(built)
+}
+
+/// The variable `config`'s provider reads its key from, which names the
+/// key a provider gate is shared by; empty for the scripted provider, which
+/// has none.
+fn key_env(config: &ProviderConfig) -> &'static str {
+    match config {
+        ProviderConfig::DeepSeek { .. } => deepseek::API_KEY_ENV,
+        ProviderConfig::OpenAiChat { .. } | ProviderConfig::OpenAiResponses { .. } => {
+            openai::API_KEY_ENV
+        }
+        ProviderConfig::Anthropic { .. } => anthropic::API_KEY_ENV,
+        ProviderConfig::Gemini { .. } => gemini::API_KEY_ENV,
+        ProviderConfig::Vllm { .. } => "VLLM_API_KEY",
+        ProviderConfig::SgLang { .. } => "SGLANG_API_KEY",
+        ProviderConfig::LlamaCpp { .. } => "LLAMA_API_KEY",
+        ProviderConfig::Scripted { .. } => "",
+    }
+}
+
+/// The endpoint `config` names; `None` for the provider's own.
+fn base_url(config: &ProviderConfig) -> Option<&str> {
+    match config {
+        ProviderConfig::DeepSeek { base_url, .. }
+        | ProviderConfig::OpenAiChat { base_url, .. }
+        | ProviderConfig::OpenAiResponses { base_url, .. }
+        | ProviderConfig::Anthropic { base_url, .. }
+        | ProviderConfig::Gemini { base_url } => base_url.as_deref(),
+        ProviderConfig::Vllm { base_url, .. }
+        | ProviderConfig::SgLang { base_url, .. }
+        | ProviderConfig::LlamaCpp { base_url, .. } => Some(base_url),
+        ProviderConfig::Scripted { .. } => None,
+    }
 }
 
 /// The key in `env`, or [`OpenError::MissingKey`].

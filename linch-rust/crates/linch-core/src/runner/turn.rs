@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use super::cancel::Unpaired;
 use super::end::cut_empty;
 use super::final_tool::Unanswered;
+use super::gate::Slot;
 use super::hooks::{AfterCall, BeforeCall, Stopping, add_context, retry_message};
 use super::inbox::HeldPeers;
 use super::progress::Progress;
@@ -433,8 +434,16 @@ impl Runner {
         if model.is_some() || self.standing.fallbacks > 0 {
             request.model = self.call_model(model);
         }
+        let mut metadata = context.metadata;
         let request = match self.before_provider_call(request, self.turn).await {
-            BeforeCall::Send(request) => *request,
+            BeforeCall::Send(request) => {
+                let mut request = *request;
+                // After the hooks: one may have changed the tools.
+                if let Some(name) = Self::drop_unoffered_choice(&mut request) {
+                    metadata.insert("tool_choice_dropped".into(), name.into());
+                }
+                request
+            }
             // Python's `_gate_retry_tail`: the turn ends without a call, its
             // feedback durable before the next turn's. The view ends with a
             // user message here (a resumed response goes to `received`,
@@ -458,7 +467,16 @@ impl Runner {
                 return Ok(None);
             }
         };
-        self.stage_context(&request, context.metadata);
+        // Before anything of the call is staged: a run that waits for its
+        // place has dispatched nothing.
+        let slot = match self.slot().await? {
+            Slot::Cancelled => {
+                self.abort().await?;
+                return Ok(None);
+            }
+            held => held,
+        };
+        self.stage_context(&request, metadata);
         let call = ModelCall::prepare(&self.run.run_id, self.turn, attempt, &request.model);
         self.stage_seen(Event::ModelCallDelivery(call.delivery().clone()));
         self.save(Phase::ProviderPending { attempt }).await?;
@@ -485,6 +503,7 @@ impl Runner {
             };
             call.drive(provider, request, &self.cancel, on_delta).await
         };
+        drop(slot);
         let mut receipt = outcome.receipt;
         self.settle(&mut receipt);
         let (usage, cost) = (receipt.usage, receipt.cost_usd);

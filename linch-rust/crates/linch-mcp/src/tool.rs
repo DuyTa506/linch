@@ -141,6 +141,10 @@ pub(crate) struct ToolSpec {
     pub(crate) description: String,
     pub(crate) input_schema: JsonObject,
     pub(crate) scope: ToolScope,
+    /// Whether the tool polls (see [`McpServerConfig::polls`]).
+    ///
+    /// [`McpServerConfig::polls`]: crate::McpServerConfig::polls
+    pub(crate) polls: bool,
 }
 
 impl ToolSpec {
@@ -170,6 +174,7 @@ impl ToolSpec {
             } else {
                 ToolScope::Exec
             },
+            polls: false,
         }
     }
 }
@@ -202,6 +207,10 @@ impl Tool for McpTool {
 
     fn scope(&self) -> ToolScope {
         self.spec.scope
+    }
+
+    fn polls(&self) -> bool {
+        self.spec.polls
     }
 
     fn summarize(&self, input: &JsonObject) -> String {

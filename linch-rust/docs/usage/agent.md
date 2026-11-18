@@ -183,6 +183,7 @@ absent, except `bash`.
 | `tasks` | `False` | The session task tools `TaskCreate`, `TaskList`, `TaskGet`, `TaskUpdate`, which run without approval in every mode ([Tasks](./tasks.md)) |
 | `deep_agent` | none | The deep agent preset ([below](#deep_agent)) |
 | `profile` | none | A versioned domain role for the agent's runs ([below](#profile)) |
+| `max_provider_concurrency` | none: no limit | The most provider calls its runs, and those of agents on the same provider key and endpoint, make at once; the rest wait their turn ([Providers](./providers.md#limit-concurrent-calls)). Not part of the run contract |
 
 ## `spec`
 
@@ -208,7 +209,7 @@ absent, except `bash`.
 | `redaction` | none | Regex rules that scrub responses, tool results and optionally the prompt before anything logs, streams or sees them, `{"rules": [{"pattern", "replacement"?}], "response"?, "tool_results"?, "prompt"?}` ([Security](./security.md#redaction)) |
 | `verification` | none | Checks the final answer must pass and the retry budget they share with `stop` callbacks, `{"max_retries"?, "verifiers"?}` ([Security](./security.md#verifiers)) |
 | `truncation_recovery` | none: a cut answer is final | Continue a text answer the output limit cut off, `{"max_attempts"?, "feedback"?}` ([Memory](./memory.md#cut-off-answers)) |
-| `loop_guard` | on: 3 identical calls with the same result, 3 failed batches, 25 turns without a call | End a stuck run, `{"max_identical_tool_calls"?, "max_consecutive_failures"?, "max_idle_turns"?}`, Python's `LoopGuard` ([below](#loop_guard)) |
+| `loop_guard` | on: 3 identical calls with the same result, 10 identical inputs, 3 failed batches, 25 turns without a call | End a stuck run, `{"max_identical_tool_calls"?, "max_identical_inputs"?, "max_consecutive_failures"?, "max_idle_turns"?}`, Python's `LoopGuard` ([below](#loop_guard)) |
 
 ### System blocks
 
@@ -268,7 +269,8 @@ fields to change.
 
 | Field | Default | The run ends when |
 |---|---|---|
-| `max_identical_tool_calls` | `3` | The same call got the same result this many times: one tool, the same input, the same result, not an error. The call that reaches it runs first. A call whose result changed (a file read again after an edit) is progress and does not count. `0` turns this check off |
+| `max_identical_tool_calls` | `3` | The same call got the same result this many times among the latest 20 results: one tool, the same input, the same result, not an error. The call that reaches it runs first. A call whose result changed (a file read again after an edit) is progress and does not count, and so is one that came long ago in a long healthy run. A result moved to a file to the filesystem (large-result offload) counts as its content, whatever the file's name. `0` turns this check off |
+| `max_identical_inputs` | `10` | One tool was called with the same input this many times among the latest 50 calls, whatever the results and whether they failed. Python's rule counts these over the whole run with the limit of `max_identical_tool_calls`; here the count is looser (10, in a window), so a long healthy run is not cut. It ends a loop whose result changes every time (a timestamp) or that alternates between a few calls. A tool that polls is not counted. `0` turns this check off; absent from the wire at `10` |
 | `max_consecutive_failures` | `3` | This many tool batches in a row had every call fail. A batch with one success starts the count again. `0` turns this check off |
 | `max_idle_turns` | `25` | One more turn in a row would end without a provider call, which only a `before_provider_call` callback answering `force_continue` does. At least `1`: this check is always on |
 
@@ -285,8 +287,15 @@ spec = {"model": "deepseek-flash", "loop_guard": {"max_identical_tool_calls": 5}
 Python Linch counts identical inputs whatever the result, failed calls
 included. Here a repeat must also return the same result, a failed call is
 the failure count's (Linch tells the model to repeat some refused calls, a
-deferred tool), and a tool that polls never repeats: `BashOutput` can read
-a running background command as often as the model needs. Python's
+deferred tool). A tool that polls is waited on, not counted as a repeat:
+`BashOutput` can read a running background command as often as the model
+needs, as long as the answer changes; the same answer `max_idle_turns`
+times in a row ends the run (a command that prints nothing and never
+ends), and reading a command that has finished again is a repeat at once
+(`BashOutput` marks it done in the result's metadata). A [host
+tool](./tools.md#host-tools) declares `polls=True`, and an [MCP
+server](#mcp_servers) lists its polling tools in `polls`; their results
+say a poll is done with the metadata `{"poll_done": true}`. Python's
 `force_final_answer` is not available. A remote tenant may not raise
 `max_idle_turns` above 25.
 
@@ -351,6 +360,7 @@ Durations are in milliseconds.
 | `name` | required | The `<name>` in `mcp__<name>__<tool>`: ASCII letters, digits, `-`, and single `_` between them |
 | `transport` | required | `{"type": "stdio", "command", "args": [], "env": {}}` or `{"type": "http", "url", "headers": {}}` |
 | `trust_annotations` | `False` | Whether a tool the server marks read-only gets the `read` scope instead of `exec` |
+| `polls` | `[]` | The server's tools, by the names it lists them under, that poll something that runs on: the loop guard waits on their repeated answers, up to `max_idle_turns` identical ones in a row, instead of ending the run at the third. An MCP result has no metadata to say the wait is over |
 | `call_timeout_ms` | `300000` | Longest wait for one tool call before it is cancelled |
 | `reconnect` | see below | How a lost connection is retried |
 
@@ -371,6 +381,8 @@ after the system prompt that teaches the model to use them.
 | Field | Default | What it controls |
 |---|---|---|
 | `offload_threshold_tokens` | none | Move a text tool result estimated above this many tokens (four bytes per token) into the filesystem, leaving its first lines and its path for the model to `read_file` |
+| `memory` | `False` | Show the model the instruction to keep memories under `/memories/` and the first 200 lines (at most 16 KiB) of its `MEMORY.md`, fenced as untrusted data and read for each request ([Memory](./memory.md#file-memory)). A deep agent always has it |
+| `memory_scope` | `"principal"` | Whose `/memories/` the model sees: `"principal"` gives each principal a directory of its own (`/memories/<key>/MEMORY.md`), `"namespace"` one file for every run of the namespace ([Memory](./memory.md#file-memory)) |
 | `offload_threshold_fraction` | none | Offload above this fraction of the provider's [context window](./providers.md#context-window), at least 1000 tokens; Python Linch uses 0.1. Used only without `offload_threshold_tokens`. With neither, results are never offloaded |
 
 With memory stores each session has its own files, gone with the server. With

@@ -68,19 +68,34 @@ impl Runner {
         error: String,
     ) -> Result<Checked, RunError> {
         let allowed = self.agent.spec.structured_output_retries;
-        if self.schema_retries < allowed {
-            self.schema_retries += 1;
-            self.stage_verification(VERIFIER, VerificationAction::Retry, &error);
-            let tool = self.final_tool.as_ref().map(|tool| tool.name.clone());
-            let feedback = feedback(&error, tool.as_deref());
-            return Ok(Checked::Retry(self.send_back(&feedback).await?));
-        }
+        let tool = self.final_tool.as_ref().map(|tool| tool.name.clone());
+        let feedback = feedback(&error, tool.as_deref());
         let why = match allowed {
             0 => "the final answer does not satisfy the output schema".to_owned(),
             n => format!(
                 "the final answer still does not satisfy the output schema after {n} retries"
             ),
         };
+        self.retry_or_fail(text, error, feedback, why).await
+    }
+
+    /// Send `feedback` back to the model as a retry of the schema gate's
+    /// budget (`structured_output_retries`, counted from the durable
+    /// `verification` events), or end the run failed for `why` once it is
+    /// spent. A refused final tool call uses it too, so a hook or a rule
+    /// that always refuses cannot keep the run going.
+    pub(super) async fn retry_or_fail(
+        &mut self,
+        text: &str,
+        error: String,
+        feedback: String,
+        why: String,
+    ) -> Result<Checked, RunError> {
+        if self.schema_retries < self.agent.spec.structured_output_retries {
+            self.schema_retries += 1;
+            self.stage_verification(VERIFIER, VerificationAction::Retry, &error);
+            return Ok(Checked::Retry(self.send_back(&feedback).await?));
+        }
         self.schema_failed(text, why, error).await?;
         Ok(Checked::Ended)
     }
@@ -129,7 +144,7 @@ impl Runner {
     /// The terminal for an answer the schema gate gave up on: the
     /// `verification` stop, the `StructuredOutputError` and the failed
     /// `Result`, in one write.
-    async fn schema_failed(
+    pub(super) async fn schema_failed(
         &mut self,
         text: &str,
         why: String,

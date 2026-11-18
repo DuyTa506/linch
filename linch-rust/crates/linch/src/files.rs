@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use linch_core::{AgentSpec, Hooks, Registration, SessionId, ToolRegistry};
-use linch_ext::deep_agent::FileMemoryContext;
+use linch_ext::deep_agent::{FileMemoryContext, MemoryScope};
 use linch_postgres::{PgFileBackend, PgPool};
 use linch_tools::vfs::{
     MemorySessions, OffloadConfig, PROMPT, ResultOffload, SessionFiles, SharedFiles, vfs_tools,
@@ -81,13 +81,14 @@ impl Files {
     }
 
     /// Register the deep agent's file memory hook over these files on
-    /// `hooks.context_build`, undone like the other registrations. Nothing
-    /// when the filesystem is off.
-    pub(crate) fn remember(&mut self, hooks: &Hooks) {
+    /// `hooks.context_build`, of `scope` (per principal when `None`), undone
+    /// like the other registrations. Nothing when the filesystem is off.
+    pub(crate) fn remember(&mut self, hooks: &Hooks, scope: Option<MemoryScope>) {
         let Some(files) = self.files.clone() else {
             return;
         };
-        let hook = FileMemoryContext::new(move |session| files.backend(session));
+        let hook = FileMemoryContext::new(move |session| files.backend(session))
+            .scope(scope.unwrap_or_default());
         let registration = (hooks.context_build.register(Arc::new(hook)))
             .expect("the file memory hook has a policy id, no matcher and fails open");
         self.registrations.push(registration);

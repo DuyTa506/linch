@@ -241,6 +241,37 @@ hoặc 529 thì nó không tốn gì, như một lần từ chối `Status`. Khi
 ([khôi phục theo độ dài ngữ cảnh](./compaction.md#context-length-recovery)); lời gọi đó là
 lần thử kế tiếp của lượt, không phải một retry.
 
+<a id="the-concurrency-gate"></a>
+
+### Cổng đồng thời
+
+`max_provider_concurrency` dựng một `ProviderGate`
+(`crates/linch-core/src/provider/gate.rs`): một semaphore FIFO mà các bản clone
+chia sẻ một ngân sách, gắn bằng `AgentBuilder::provider_gate` và được clone vào
+agent của subagent. Nó không nằm trong spec nên không vào digest hợp đồng, và khi
+không đặt cũng không có trong JSON của cấu hình (được ghim bởi
+`the_cap_is_off_the_wire_when_unset_and_out_of_the_contract`).
+
+Runner lấy một chỗ trong `dispatch` sau `before_provider_call` và trước khi staging
+delivery của lời gọi, và trong compaction trước delivery của bản tóm tắt
+(`runner/gate.rs`). Một run phải chờ chưa staging delivery nào, nên hủy ở đó là
+`abort` của một run chưa từng gọi; chờ là `cancel.run_until_cancelled`, và một
+người chờ bị hủy rời hàng đợi (được ghim bởi
+`cancelling_a_run_that_waits_leaves_no_call_and_no_receipt`). Khi còn chỗ, đường đi
+không ghi gì. Khi hết chỗ, mọi thứ run đã staging (một receipt thất bại cùng usage
+của nó, một `model_fallback`, các event của run con) được flush trước khi chờ, vì
+một receipt đã trả tiền không được nằm trong bộ nhớ sau lời gọi của run khác. Chỗ
+được giữ qua lần ghi delivery, `provider_call_start` và `drive`, rồi thả trước khi
+receipt được xử lý, nên backoff, `overflow` và các hook không bao giờ giữ nó.
+
+`PgPools` (trạng thái dùng chung theo phạm vi của facade: server giữ một cái cho mỗi
+tenant và một cho các kết nối cục bộ) giữ các gate dạng `Weak` theo biến key provider
+và endpoint, không theo kích thước, nên giới hạn của hai agent không cộng dồn. Một
+gate có kích thước của lần mở đã tạo ra nó, như pool, và mất cùng agent cuối cùng giữ
+nó. Không gì chia sẻ gate giữa các tiến trình; limiter dựa trên Postgres chưa được
+xây, và giao thức `Limiter` cắm thêm được của Python Linch (host tự cung cấp `acquire`
+và `release`) không có phần tương ứng.
+
 <a id="context-length-refusals"></a>
 
 ### Các lần từ chối vì độ dài ngữ cảnh

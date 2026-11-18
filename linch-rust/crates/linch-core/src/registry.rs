@@ -151,6 +151,11 @@ impl ToolRegistry {
     }
 }
 
+/// `tool` compiled as a registration compiles it, without registering it.
+pub(crate) fn compiled(tool: Arc<dyn Tool>) -> Result<Arc<RegisteredTool>, RegistryError> {
+    RegisteredTool::compile(tool).map(Arc::new)
+}
+
 /// The tools one turn uses, fixed when the snapshot was taken.
 pub struct ToolSnapshot {
     generation: u64,

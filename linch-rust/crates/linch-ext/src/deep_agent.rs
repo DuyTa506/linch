@@ -22,7 +22,7 @@
 //!   definitions, for
 //!   [`AgentBuilder::subagents`](linch_core::AgentBuilder::subagents);
 //! - [`FileMemoryContext`]: the `context_build` hook that shows the model
-//!   `/memories/MEMORY.md`.
+//!   its `MEMORY.md` under `/memories/` (per principal, see [`MemoryScope`]).
 //!
 //! The agent also needs the session task tools, the virtual filesystem
 //! tools and the `Skill` tool (`linch_tools::task_tools`,
@@ -47,7 +47,10 @@ mod tests;
 
 use linch_core::{AgentSpec, SubagentDefinition, Workers};
 
-pub use memory::{FileMemoryContext, MEMORY_INDEX, MEMORY_INDEX_LINES, MEMORY_INSTRUCTION};
+pub use memory::{
+    FileMemoryContext, MEMORY_INDEX, MEMORY_INDEX_BYTES, MEMORY_INDEX_LINES, MEMORY_INSTRUCTION,
+    MemoryScope,
+};
 pub use profile::{DeepAgentError, DeepAgentProfile, PROFILE_NAMES};
 pub use prompts::{COORDINATOR_SYSTEM_PROMPT, DEEP_AGENT_SYSTEM_PROMPT};
 pub use subagents::deep_agent_subagents;

@@ -675,3 +675,32 @@ async fn micro_compaction_runs_before_a_due_summary() {
 async fn a_crash_at_any_write_of_a_turn_start_micro_compaction_recovers() {
     crash_everywhere(proactive_micro(), || Window::new(never)).await;
 }
+
+/// A gate of one place is given back before the forced summary call, which
+/// takes its own: the refused call, the summary and the call again all
+/// complete instead of waiting on a place their own run holds.
+#[tokio::test]
+async fn a_gate_of_one_does_not_block_the_forced_summary() {
+    let stores = Arc::new(Stores::default());
+    let provider = Window::new(two_big);
+    let gate = linch_core::ProviderGate::new(std::num::NonZeroU32::new(1).unwrap());
+    let mut spec = spec();
+    spec.compaction = summarizing();
+    let tools = registry(vec![Echo::new("Read", ToolScope::Read, &Runs::default())]);
+    let agent = linch_core::AgentBuilder::new(spec)
+        .provider(provider.clone())
+        .tools(tools)
+        .permissions(policy(PermissionMode::SkipDangerous))
+        .run_store(stores.clone())
+        .session_store(stores.clone())
+        .namespace(NS)
+        .provider_gate(gate.clone())
+        .build()
+        .unwrap();
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(10), run(&agent, &stores))
+        .await
+        .expect("the run waited on a place it holds itself");
+    assert_eq!(status(&stores, &ended.0).await, RunStatus::Completed);
+    assert_eq!(provider.calls("summary"), 2);
+    assert_eq!(gate.in_flight(), 0);
+}

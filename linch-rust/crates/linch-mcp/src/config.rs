@@ -1,6 +1,6 @@
 //! Server configuration: transport, timeouts and the reconnect policy.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -150,6 +150,13 @@ pub struct McpServerConfig {
     /// Whether to believe the server's `readOnlyHint`: a read-only tool gets
     /// the `read` scope (auto-approved, may run in parallel) instead of `exec`.
     pub trust_annotations: bool,
+    /// The server's tools (by the names it lists them under) that poll: they
+    /// ask after something that runs on, so the loop guard waits on their
+    /// repeated answers instead of counting them as a loop (see
+    /// [`linch_core::Tool::polls`]). An MCP result has no metadata to say the
+    /// wait is over, so a poll that never changes ends the run at the
+    /// guard's `max_idle_turns`.
+    pub polls: BTreeSet<String>,
     /// Longest wait for one tool call before it is cancelled.
     pub call_timeout: Duration,
     /// How a lost connection is retried.
@@ -164,6 +171,7 @@ impl McpServerConfig {
             name: name.into(),
             transport,
             trust_annotations: false,
+            polls: BTreeSet::new(),
             call_timeout: Duration::from_secs(300),
             reconnect: ReconnectPolicy::default(),
         }

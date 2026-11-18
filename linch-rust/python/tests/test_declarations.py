@@ -66,6 +66,19 @@ def test_an_explicit_schema_name_and_timeout_are_used_as_given() -> None:
     }
 
 
+def test_a_polling_tool_says_so_in_its_declaration_and_others_say_nothing() -> None:
+    @tool(scope="read", polls=True)
+    async def status(job: str) -> str:
+        return job
+
+    @tool(scope="read")
+    async def other(job: str) -> str:
+        return job
+
+    assert status.spec()["polls"] is True
+    assert "polls" not in other.spec()
+
+
 def test_a_context_parameter_is_left_out_of_the_schema() -> None:
     @tool(scope="read")
     async def lookup(email: str, ctx: ToolContext) -> str:

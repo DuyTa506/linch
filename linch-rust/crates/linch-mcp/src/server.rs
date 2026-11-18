@@ -1,5 +1,6 @@
 //! A connected MCP server: its supervisor task, relist and reconnect.
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use linch_core::ToolRegistry;
@@ -100,6 +101,7 @@ impl McpServer {
             link: Arc::clone(&link),
             catalog: Arc::clone(&catalog),
             trust_annotations: config.trust_annotations,
+            polls: config.polls,
             policy: config.reconnect,
             close: close.clone(),
         };
@@ -188,6 +190,8 @@ struct Supervisor {
     link: Arc<Link>,
     catalog: Arc<Mutex<Catalog>>,
     trust_annotations: bool,
+    /// The tools, by their names on the server, that poll.
+    polls: BTreeSet<String>,
     policy: ReconnectPolicy,
     /// Cancelled by the handle on disconnect or drop.
     close: CancellationToken,
@@ -327,7 +331,11 @@ impl Supervisor {
     fn sync(&self, tools: Vec<rmcp::model::Tool>) {
         let specs = tools
             .iter()
-            .map(|tool| ToolSpec::new(&self.link.server, tool, self.trust_annotations))
+            .map(|tool| {
+                let mut spec = ToolSpec::new(&self.link.server, tool, self.trust_annotations);
+                spec.polls = self.polls.contains(tool.name.as_ref());
+                spec
+            })
             .collect();
         let mut catalog = lock(&self.catalog);
         // Checked under the lock the handle clears with, so nothing is

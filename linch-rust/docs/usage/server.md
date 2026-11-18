@@ -114,6 +114,7 @@ token twice is refused. A tenant only a worker serves needs no token.
 | `max_agents` | 16 | Agents the tenant keeps open at once, across all its connections |
 | `max_connections` | 8 | Connections acting for the tenant at once |
 | `max_pool_connections` | The server's default pool size: the number of cores, between 10 and 32 | The largest `stores.max_connections` a config may ask for; the tenant's pool on each target has at most this many connections |
+| `max_provider_concurrency` | none: no cap | The most provider calls the tenant's runs make at once on each provider key and endpoint; a config may ask for less ([Providers](./providers.md#limit-concurrent-calls)) |
 | `provider_base_urls` | none | Endpoints a provider `base_url` may name, matched on scheme, host and port |
 | `permission_modes` | `default`, `accept_edits` | The modes a config may choose |
 | `workspace_roots` | none | Directories a `workspace`, a `project_root` or a `config_dir` may be or lie under |
@@ -306,6 +307,7 @@ curl -i -H "Authorization: Bearer $LINCH_TOKEN_ACME" \
 | One message | 16 MiB | The request gets `-32600` |
 | A Postgres pool | One per tenant and target, `stores.max_connections` connections (the number of cores, between 10 and 32, unless set) | Queries wait for a connection; the tenant's open that connects its pool sets the size and its later opens share it ([Stores](./stores.md#connections-and-pools)) |
 | `max_pool_connections` | The default pool size per tenant unless set | `agent.open` asking for a larger `stores.max_connections` gets `-32004`, `data: {"kind": "pool_connections", "max": ...}`; nothing connects |
+| `max_provider_concurrency` | No cap unless set | `agent.open` asking for more gets `-32004`, `data: {"kind": "provider_concurrency", "max": ...}`; one that asks for none gets the cap. All the tenant's agents on one provider key and endpoint share that many provider calls; a worker process or a second server counts its own |
 | Requests in flight per connection | 64 | Reading waits until one is answered |
 | Background subagents per run | The agent config's `workers.max_background`, 4 unless set | The `Subagent` call gets a tool error and starts nothing ([Subagents](./subagents.md#background-workers)) |
 
@@ -350,10 +352,12 @@ is read, no MCP process starts and no database is connected. A refusal is
 | `execution` | An `execution` that equals no `allow.execution` entry, or none when that list is empty | The backend decides what `Bash` can reach; its policy is the operator's |
 | `redaction` | More than 32 `spec.redaction` rules, or a pattern over 1024 bytes | The server compiles each pattern and runs it on every response and tool result |
 | `verification` | More than 32 `spec.verification` verifiers, a pattern over 1024 bytes, or more than 32 keywords in one | The same, for every final answer |
+| `provider_concurrency` | `max_provider_concurrency` above the tenant's | The tenant's runs would make more calls at once on the server's key than the operator allows; `data.max` is the cap |
 | `loop_guard` | `spec.loop_guard.max_idle_turns` above 25 | Each turn without a provider call is a write and a session append on the server that no budget counts |
+| `tool_choice` | A forced `tool_choice` (`required`, or a tool that is not the final tool), in the spec or in `run.start`, on an agent with no `max_turns` and no `final_tool_name` (an output schema alone does not end the run on every provider) | A model forced to call a tool every turn never answers, and no budget ends the run |
 
 A path that does not exist is refused like one outside the roots, so a
-client cannot probe the server's file system. Four changes are made
+client cannot probe the server's file system. Five changes are made
 silently instead:
 
 - Without `exec_tools`, the config's `bash` is turned off and the agent opens
@@ -365,6 +369,7 @@ silently instead:
   entry, which holds the tenant to a sandbox when that is the first.
 - A Postgres store without `max_connections` gets the default pool size or
   the tenant's `max_pool_connections`, whichever is smaller.
+- A config without `max_provider_concurrency` gets the tenant's, when it has one.
 
 ---
 
