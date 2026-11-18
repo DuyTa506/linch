@@ -100,6 +100,7 @@ impl Runner {
             .stage(Event::ModelCallDelivery(call.delivery().clone()));
         self.save(Phase::CompactionPending { attempt }).await?;
         let ready = self.journal.flush().await?;
+        self.event_emit(&ready).await;
         self.outbox.deliver(ready).await;
         // The summary is not the assistant's answer: no deltas.
         let outcome = (call.drive(&*agent.provider, request, &self.cancel, None)).await;
@@ -122,6 +123,7 @@ impl Runner {
         if text.is_empty() {
             self.save(Phase::CompactionPending { attempt }).await?;
             let ready = self.journal.flush().await?;
+            self.event_emit(&ready).await;
             self.outbox.deliver(ready).await;
             return Ok(Some(DISPATCH));
         }

@@ -11,6 +11,95 @@ fn ids() -> (SessionId, RunId) {
     (SessionId::from("s1"), RunId::from("r1"))
 }
 
+fn minimal_request(model: &str) -> linch::ProviderRequest {
+    linch::ProviderRequest {
+        model: model.into(),
+        system: vec![],
+        tools: vec![],
+        appended_tools: vec![],
+        messages: vec![Message::user_text("hi")],
+        max_output_tokens: None,
+        temperature: None,
+        stop_sequences: vec![],
+        effort: None,
+        thinking: None,
+        cache_control: None,
+        output_schema: None,
+        tool_choice: None,
+    }
+}
+
+#[test]
+fn before_provider_call_carries_the_request_and_reads_each_action() {
+    let (session_id, run_id) = ids();
+    let request = BeforeProviderCallRequest {
+        session_id,
+        run_id,
+        turn: 2,
+        request: minimal_request("m"),
+    };
+    let wire = BeforeProviderCall::encode(&request);
+    assert_eq!(wire["turn"], 2);
+    assert_eq!(wire["request"]["model"], "m");
+    assert_eq!(
+        BeforeProviderCall::decode(json!({"action": "continue"})).unwrap(),
+        BeforeProviderCallResponse::Continue
+    );
+    let rewrite = json!({"action": "rewrite", "request": serde_json::to_value(minimal_request("m2")).unwrap()});
+    assert_eq!(
+        BeforeProviderCall::decode(rewrite).unwrap(),
+        BeforeProviderCallResponse::Rewrite {
+            request: Box::new(minimal_request("m2"))
+        }
+    );
+    let block = json!({"action": "block", "reason": "no budget"});
+    assert!(matches!(
+        BeforeProviderCall::decode(block).unwrap(),
+        BeforeProviderCallResponse::Block { reason } if reason == "no budget"
+    ));
+    assert!(BeforeProviderCall::decode(json!({"action": "continue", "x": 1})).is_err());
+}
+
+fn minimal_assembly(text: &str) -> linch::AssistantAssembly {
+    linch::AssistantAssembly {
+        message: Message::assistant_text(text),
+        stop_reason: StopReason::EndTurn,
+        usage: None,
+        model: "m".into(),
+    }
+}
+
+#[test]
+fn after_provider_call_carries_the_assembly_and_reads_each_action() {
+    let (session_id, run_id) = ids();
+    let request = AfterProviderCallRequest {
+        session_id,
+        run_id,
+        turn: 2,
+        assembly: minimal_assembly("hi"),
+    };
+    let wire = AfterProviderCall::encode(&request);
+    assert_eq!(wire["turn"], 2);
+    assert_eq!(wire["assembly"]["model"], "m");
+    assert_eq!(
+        AfterProviderCall::decode(json!({"action": "continue"})).unwrap(),
+        AfterProviderCallResponse::Continue
+    );
+    let rewrite = json!({"action": "rewrite", "assembly": serde_json::to_value(minimal_assembly("bye")).unwrap()});
+    assert_eq!(
+        AfterProviderCall::decode(rewrite).unwrap(),
+        AfterProviderCallResponse::Rewrite {
+            assembly: Box::new(minimal_assembly("bye"))
+        }
+    );
+    let block = json!({"action": "block", "reason": "unsafe content"});
+    assert!(matches!(
+        AfterProviderCall::decode(block).unwrap(),
+        AfterProviderCallResponse::Block { reason } if reason == "unsafe content"
+    ));
+    assert!(AfterProviderCall::decode(json!({"action": "continue", "x": 1})).is_err());
+}
+
 #[test]
 fn user_prompt_submit_carries_content_and_reads_each_action() {
     let (session_id, run_id) = ids();
@@ -98,6 +187,20 @@ fn stop_and_post_turn_read_their_answers() {
             feedback: "check the tests".into()
         }
     );
+    let rewrite = json!({"action": "rewrite", "text": "Done!"});
+    assert_eq!(
+        Stop::decode(rewrite).unwrap(),
+        StopResponse::Rewrite {
+            text: "Done!".into()
+        }
+    );
+    let block = json!({"action": "block", "reason": "unsafe content"});
+    assert_eq!(
+        Stop::decode(block).unwrap(),
+        StopResponse::Block {
+            reason: "unsafe content".into()
+        }
+    );
 
     let turn = PostTurnRequest {
         session_id,
@@ -111,4 +214,30 @@ fn stop_and_post_turn_read_their_answers() {
     );
     PostTurn::decode(json!({})).unwrap();
     assert!(PostTurn::decode(json!({"verdict": "ok"})).is_err());
+}
+
+/// `event_emit` carries the event about to be delivered, under its own
+/// `type`-tagged wire shape, and answers like every other observe-only
+/// point.
+#[test]
+fn event_emit_carries_the_event_and_answers_like_an_observe_only_point() {
+    let (session_id, run_id) = ids();
+    let request = EventEmitRequest {
+        session_id,
+        run_id,
+        event: linch::Event::User(linch::events::kinds::UserEvent {
+            message: Message::user_text("hi"),
+            subtype: linch::events::kinds::UserEventSubtype::Prompt,
+        }),
+    };
+    assert_eq!(
+        EventEmit::encode(&request),
+        json!({"session_id": "s1", "run_id": "r1", "event": {
+            "type": "user",
+            "message": Message::user_text("hi"),
+            "subtype": "prompt",
+        }})
+    );
+    EventEmit::decode(json!({})).unwrap();
+    assert!(EventEmit::decode(json!({"verdict": "ok"})).is_err());
 }

@@ -428,13 +428,15 @@ request has `session_id` and `run_id`:
 | `post_tool_use` | `tool_use_id`, `tool_name`, `input`, `result` | `{"action": "continue"}`, `{"action": "replace", "result"}` |
 | `user_prompt_submit` | `content` (content blocks) | `{"action": "continue"}`, `{"action": "rewrite", "content"}`, `{"action": "block", "reason"}` |
 | `context_build` | `messages` (the conversation the model will see) | `{"blocks"?: [{"text"}], "metadata"?: {...}}`; `metadata` is for observers and evals: it lands on the call's `ContextBuildEvent`, a later callback's key winning, and the model never sees it |
-| `stop` | `text` | `{"action": "allow"}`, `{"action": "continue", "feedback"}` |
+| `before_provider_call` | `turn`, `request` (the full provider request about to be sent) | `{"action": "continue"}`, `{"action": "rewrite", "request"}`, `{"action": "block", "reason"}`; a rewrite is what is sent and what `context_build` records, and a block ends the run before the provider is called |
+| `after_provider_call` | `turn`, `assembly` (`message`, `stop_reason`, `usage?`, `model`: what the provider call just assembled) | `{"action": "continue"}`, `{"action": "rewrite", "assembly"}`, `{"action": "block", "reason"}`; a rewrite is what gets staged and appended to the session, and a block ends the run before the response is staged. Python's `retry`/`force_continue` actions here are not available: use `{"action": "continue"}` to accept the response unchanged |
+| `stop` | `text` (the final-answer text so far, the model's or a prior rewrite) | `{"action": "allow"}`, `{"action": "continue", "feedback"}`, `{"action": "rewrite", "text"}`, `{"action": "block", "reason"}`; a rewrite replaces the run's final-answer text (not the assistant message, already appended to the session by the time `stop` runs), and a block ends the run failed. This is also where Python's `before_final_answer` lives: there is no separate point |
 | `post_turn` | `turn`, `stop_reason` | `{}` |
 
 A tool result in a request or an answer is `{"output": {"value",
 "metadata"?}}` or `{"error": {"message", "code"?, "details"?}}`.
 
-Twelve more points only observe: the callback cannot change anything they
+Thirteen more points only observe: the callback cannot change anything they
 report, so the answer is always `{}` and none of them can fail closed.
 
 | `point` | The request also has |
@@ -451,15 +453,19 @@ report, so the answer is always `{}` and none of them can fail closed.
 | `post_compact` | `turn`, `messages_before`, `messages_after`, `tokens_before`, `tokens_after`, `strategy` |
 | `subagent_start` | `child_session_id`, `subagent_run_id`, `subagent_type`, `display_name`, `prompt` |
 | `subagent_stop` | `child_session_id`, `subagent_run_id`, `subagent_type`, `display_name`, `subtype`, `text`, `error?` |
+| `event_emit` | `event` (the event about to be delivered to the caller) |
 
 `tool_use_start`/`tool_use_stop` bracket a call that actually runs (not one
 served or blocked by `pre_tool_use`); `post_tool_use_failure` fires beside
 `post_tool_use` when the result is an error. `subagent_start`/`subagent_stop`
-fire on the parent's callbacks, not the child's.
+fire on the parent's callbacks, not the child's. `event_emit` fires once per
+event, in delivery order, but only for an event that is both streamed and
+durably logged: never for a hook's own record (it would otherwise recurse)
+and never for a stream-only delta or tool-progress event.
 
 | Argument | Default | What it controls |
 |---|---|---|
-| `point` | required | One of the nineteen points above |
+| `point` | required | One of the twenty-two points above |
 | `policy_id`, `policy_version` | required | Enter the run contract. Bump the version whenever the behaviour, matcher, timeout or fail mode changes |
 | `matcher` | every tool | Tool-name globs (`*`, `?`), only at the three tool points; a miss never reaches this process |
 | `timeout` | none | How long the server waits for an answer; absent, it waits until the callback answers, the run is cancelled or the connection ends |

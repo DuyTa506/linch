@@ -169,6 +169,147 @@ fn prompt(text: &str) -> UserPromptRequest {
     }
 }
 
+fn minimal_request(model: &str) -> crate::provider::ProviderRequest {
+    crate::provider::ProviderRequest {
+        model: model.into(),
+        system: vec![],
+        tools: vec![],
+        appended_tools: vec![],
+        messages: vec![],
+        max_output_tokens: None,
+        temperature: None,
+        stop_sequences: vec![],
+        effort: None,
+        thinking: None,
+        cache_control: None,
+        output_schema: None,
+        tool_choice: None,
+    }
+}
+
+fn before_call(model: &str) -> BeforeProviderCallRequest {
+    BeforeProviderCallRequest {
+        session_id: SessionId::from("s"),
+        run_id: RunId::from("r"),
+        turn: 0,
+        request: minimal_request(model),
+    }
+}
+
+#[tokio::test]
+async fn before_provider_call_rewrites_chain_and_a_block_stops() {
+    let hooks = Hooks::default();
+    let log = new_log();
+    let _ = register(
+        &hooks.before_provider_call,
+        Scripted::new("downgrade", &log, |req: &BeforeProviderCallRequest| {
+            let mut request = req.request.clone();
+            request.model = "cheaper".into();
+            Act::Answer(BeforeProviderCallResponse::Rewrite {
+                request: Box::new(request),
+            })
+        }),
+    );
+    let mut records = Vec::new();
+    let sent = hooks
+        .before_provider_call
+        .run_into(before_call("gpt"), &mut records)
+        .await;
+    assert_eq!(
+        sent,
+        BeforeProviderCallOutcome::Send {
+            request: Box::new(minimal_request("cheaper"))
+        }
+    );
+
+    let _ = register(
+        &hooks.before_provider_call,
+        Scripted::new("budget", &log, |_| {
+            Act::Answer(BeforeProviderCallResponse::Block {
+                reason: "over budget".into(),
+            })
+        }),
+    );
+    let mut records = Vec::new();
+    let blocked = hooks
+        .before_provider_call
+        .run_into(before_call("gpt"), &mut records)
+        .await;
+    assert_eq!(
+        blocked,
+        BeforeProviderCallOutcome::Blocked {
+            reason: "over budget".into()
+        }
+    );
+    assert_eq!(calls(&log), ["downgrade", "downgrade", "budget"]);
+}
+
+fn minimal_assembly(text: &str) -> crate::provider::AssistantAssembly {
+    crate::provider::AssistantAssembly {
+        message: crate::message::Message::assistant_text(text),
+        stop_reason: StopReason::EndTurn,
+        usage: None,
+        model: "m".into(),
+    }
+}
+
+fn after_call(text: &str) -> AfterProviderCallRequest {
+    AfterProviderCallRequest {
+        session_id: SessionId::from("s"),
+        run_id: RunId::from("r"),
+        turn: 0,
+        assembly: minimal_assembly(text),
+    }
+}
+
+#[tokio::test]
+async fn after_provider_call_rewrites_chain_and_a_block_stops() {
+    let hooks = Hooks::default();
+    let log = new_log();
+    let _ = register(
+        &hooks.after_provider_call,
+        Scripted::new("redact", &log, |req: &AfterProviderCallRequest| {
+            let mut assembly = req.assembly.clone();
+            assembly.message = crate::message::Message::assistant_text("[redacted]");
+            Act::Answer(AfterProviderCallResponse::Rewrite {
+                assembly: Box::new(assembly),
+            })
+        }),
+    );
+    let mut records = Vec::new();
+    let sent = hooks
+        .after_provider_call
+        .run_into(after_call("the secret is 42"), &mut records)
+        .await;
+    assert_eq!(
+        sent,
+        AfterProviderCallOutcome::Send {
+            assembly: Box::new(minimal_assembly("[redacted]"))
+        }
+    );
+
+    let _ = register(
+        &hooks.after_provider_call,
+        Scripted::new("moderate", &log, |_| {
+            Act::Answer(AfterProviderCallResponse::Block {
+                reason: "unsafe content".into(),
+            })
+        }),
+    );
+    let mut records = Vec::new();
+    let blocked = hooks
+        .after_provider_call
+        .run_into(after_call("the secret is 42"), &mut records)
+        .await;
+    assert_eq!(
+        blocked,
+        AfterProviderCallOutcome::Blocked {
+            reason: "unsafe content".into()
+        }
+    );
+    assert_eq!(calls(&log), ["redact", "redact", "moderate"]);
+}
+
 #[tokio::test]
 async fn user_prompt_rewrites_chain_and_a_block_stops() {
     let hooks = Hooks::default();
@@ -251,7 +392,12 @@ async fn stop_continues_on_the_first_feedback_and_fails_closed() {
         &hooks.stop,
         Scripted::new("ok", &log, |_| Act::Answer(StopResponse::Allow)),
     );
-    assert_eq!(hooks.stop.run(&request).await.outcome, StopOutcome::Stop);
+    assert_eq!(
+        hooks.stop.run(request.clone()).await.outcome,
+        StopOutcome::Stop {
+            text: "done".into()
+        }
+    );
     let _ = register(
         &hooks.stop,
         Scripted::new("cite", &log, |_| {
@@ -264,7 +410,7 @@ async fn stop_continues_on_the_first_feedback_and_fails_closed() {
         &hooks.stop,
         Scripted::new("never", &log, |_| Act::Answer(StopResponse::Allow)),
     );
-    let done = hooks.stop.run(&request).await;
+    let done = hooks.stop.run(request.clone()).await;
     assert_eq!(
         done.outcome,
         StopOutcome::Continue {
@@ -276,18 +422,64 @@ async fn stop_continues_on_the_first_feedback_and_fails_closed() {
     // Open by default; closed fails the run.
     let hooks = Hooks::default();
     let _ = register(&hooks.stop, Scripted::new("v", &log, |_| Act::Fail));
-    assert_eq!(hooks.stop.run(&request).await.outcome, StopOutcome::Stop);
+    assert_eq!(
+        hooks.stop.run(request.clone()).await.outcome,
+        StopOutcome::Stop {
+            text: "done".into()
+        }
+    );
     let hooks = Hooks::default();
     let _ = register(
         &hooks.stop,
         Scripted::new("v", &log, |_| Act::Fail).fail_mode(FailMode::Closed),
     );
     assert_eq!(
-        hooks.stop.run(&request).await.outcome,
+        hooks.stop.run(request.clone()).await.outcome,
         StopOutcome::Failed {
             reason: "hook `v` failed".into()
         }
     );
+}
+
+#[tokio::test]
+async fn stop_rewrites_the_final_text_and_a_block_fails_the_run() {
+    let request = StopRequest {
+        session_id: SessionId::from("s"),
+        run_id: RunId::from("r"),
+        text: "done".into(),
+    };
+    let hooks = Hooks::default();
+    let log = new_log();
+    let _ = register(
+        &hooks.stop,
+        Scripted::new("polish", &log, |_| {
+            Act::Answer(StopResponse::Rewrite {
+                text: "Done!".into(),
+            })
+        }),
+    );
+    assert_eq!(
+        hooks.stop.run(request.clone()).await.outcome,
+        StopOutcome::Stop {
+            text: "Done!".into()
+        }
+    );
+
+    let _ = register(
+        &hooks.stop,
+        Scripted::new("moderate", &log, |_| {
+            Act::Answer(StopResponse::Block {
+                reason: "unsafe content".into(),
+            })
+        }),
+    );
+    assert_eq!(
+        hooks.stop.run(request).await.outcome,
+        StopOutcome::Failed {
+            reason: "unsafe content".into()
+        }
+    );
+    assert_eq!(calls(&log), ["polish", "polish", "moderate"]);
 }
 
 #[tokio::test]
@@ -494,6 +686,19 @@ observe_point_test!(
     }
 );
 
+observe_point_test!(
+    event_emit_observes_every_hook_and_records_failures,
+    event_emit,
+    EventEmitRequest {
+        session_id: SessionId::from("s"),
+        run_id: RunId::from("r"),
+        event: crate::events::Event::User(crate::events::kinds::UserEvent {
+            message: crate::message::Message::user_text("hi"),
+            subtype: crate::events::kinds::UserEventSubtype::Prompt,
+        }),
+    }
+);
+
 #[test]
 fn registration_rejects_bad_settings() {
     let hooks = Hooks::default();
@@ -523,7 +728,7 @@ fn registration_rejects_bad_settings() {
     assert!(hooks.context_build.is_empty() && hooks.post_turn.is_empty());
 }
 
-/// None of the twelve observe-only points has a blocking verdict, so a
+/// None of the thirteen observe-only points has a blocking verdict, so a
 /// closed fail mode is refused at every one of them, the same way it is at
 /// `post_turn`.
 #[test]
@@ -555,6 +760,7 @@ fn every_observe_only_point_rejects_a_closed_fail_mode() {
     assert_rejects_closed!(post_compact);
     assert_rejects_closed!(subagent_start);
     assert_rejects_closed!(subagent_stop);
+    assert_rejects_closed!(event_emit);
 }
 
 #[test]
@@ -602,9 +808,9 @@ fn the_digest_covers_each_points_chain_in_order_and_pins_its_encoding() {
     );
 }
 
-/// The digest's fixed point order was extended for the twelve observe-only
+/// The digest's fixed point order was extended for the thirteen observe-only
 /// points, each contributing its own `(point, id, version)` triples after
-/// `post_turn`.
+/// `post_turn`, `event_emit` last.
 #[test]
 fn the_digest_covers_the_observe_only_points_too() {
     let log = new_log();
@@ -625,16 +831,24 @@ fn the_digest_covers_the_observe_only_points_too() {
         &hooks.subagent_stop,
         Scripted::new("notify", &log, |_| Act::Answer(())),
     );
-    let with_both = hooks.policy_digest();
-    assert_ne!(with_both, with_agent_start);
-    let expected = json!([["agent_start", "audit", 1], ["subagent_stop", "notify", 1]]);
+    let _ = register(
+        &hooks.event_emit,
+        Scripted::new("mirror", &log, |_| Act::Answer(())),
+    );
+    let with_all = hooks.policy_digest();
+    assert_ne!(with_all, with_agent_start);
+    let expected = json!([
+        ["agent_start", "audit", 1],
+        ["subagent_stop", "notify", 1],
+        ["event_emit", "mirror", 1]
+    ]);
     assert_eq!(
-        with_both,
+        with_all,
         digest_with_domain(POLICY_DOMAIN, &expected).unwrap()
     );
 
     registration.dispose();
-    let expected = json!([["subagent_stop", "notify", 1]]);
+    let expected = json!([["subagent_stop", "notify", 1], ["event_emit", "mirror", 1]]);
     assert_eq!(
         hooks.policy_digest(),
         digest_with_domain(POLICY_DOMAIN, &expected).unwrap()

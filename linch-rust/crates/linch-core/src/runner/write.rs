@@ -95,6 +95,7 @@ impl Runner {
     /// session in one write.
     async fn write_session(&mut self, entries: Vec<LogEntry>) -> Result<(), RunError> {
         let ready = self.journal.flush_checkpoint().await?;
+        self.event_emit(&ready).await;
         self.outbox.deliver(ready).await;
         let (sessions, namespace) = (&self.agent.sessions, &self.agent.namespace);
         let session = &self.run.session_id;
@@ -114,6 +115,7 @@ impl Runner {
             phase,
         };
         let ready = self.journal.save(checkpoint).await?;
+        self.event_emit(&ready).await;
         self.outbox.deliver(ready).await;
         Ok(())
     }

@@ -128,10 +128,15 @@ pub enum HookPoint {
     AgentStop,
     /// A turn is about to start.
     TurnStart,
+    /// The provider request for a turn is about to be sent.
+    BeforeProviderCall,
     /// A provider call is about to be dispatched.
     ProviderCallStart,
     /// A provider call returned, however it ended.
     ProviderCallStop,
+    /// A provider call succeeded; the assembled response is about to be
+    /// staged and appended to the session.
+    AfterProviderCall,
     /// A tool call is about to run.
     ToolUseStart,
     /// A tool call finished running.
@@ -146,6 +151,8 @@ pub enum HookPoint {
     SubagentStart,
     /// A subagent's child run reached a terminal result.
     SubagentStop,
+    /// An event is about to be delivered to the caller.
+    EventEmit,
 }
 
 /// What happens when a callback errors or times out.
@@ -174,15 +181,18 @@ impl HookPoint {
             | Self::AgentStart
             | Self::AgentStop
             | Self::TurnStart
+            | Self::BeforeProviderCall
             | Self::ProviderCallStart
             | Self::ProviderCallStop
+            | Self::AfterProviderCall
             | Self::ToolUseStart
             | Self::ToolUseStop
             | Self::PostToolUseFailure
             | Self::PreCompact
             | Self::PostCompact
             | Self::SubagentStart
-            | Self::SubagentStop => FailMode::Open,
+            | Self::SubagentStop
+            | Self::EventEmit => FailMode::Open,
         }
     }
 }
@@ -246,5 +256,13 @@ mod tests {
         );
         assert_eq!(HookPoint::ContextBuild.default_fail_mode(), FailMode::Open);
         assert_eq!(HookPoint::Stop.default_fail_mode(), FailMode::Open);
+        assert_eq!(
+            HookPoint::BeforeProviderCall.default_fail_mode(),
+            FailMode::Open
+        );
+        assert_eq!(
+            HookPoint::AfterProviderCall.default_fail_mode(),
+            FailMode::Open
+        );
     }
 }

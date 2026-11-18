@@ -81,6 +81,63 @@ async fn a_stop_hook_keeps_the_run_going_with_feedback() {
     assert_eq!(stores.sessions.writes().append, 4);
 }
 
+/// A rewrite replaces the run's reported final answer, not the assistant
+/// message already appended to the session: that message was logged by
+/// `accept` before `stop` ever ran.
+#[tokio::test]
+async fn a_stop_rewrite_changes_the_final_text_but_not_the_logged_message() {
+    let hooks = Hooks::default();
+    let polish = hook::<Stop>("polish", |_| {
+        Ok(StopResponse::Rewrite {
+            text: "Done!".into(),
+        })
+    });
+    let _ = hooks.stop.register(polish.arc()).unwrap();
+    let stores = Arc::new(Stores::default());
+    let provider = Arc::new(Replay::new(vec![text_turn("first")]));
+    let agent = hooked(spec(), provider, hooks, stores.clone());
+    let envelopes = finish(agent.run("go", RunOptions::new("s1"))).await;
+    let want = [Message::user_text("go"), Message::assistant_text("first")];
+    assert_eq!(
+        messages(&*stores, "s1").await,
+        want,
+        "the rewrite does not change the logged assistant message"
+    );
+    let Some(Event::Result(result)) = envelopes.last().map(|e| &e.event) else {
+        panic!("no result");
+    };
+    assert_eq!(result.subtype, ResultSubtype::Success);
+    assert_eq!(result.final_text.as_deref(), Some("Done!"));
+}
+
+/// A block ends the run failed, like a closed failure, but by an explicit
+/// policy decision rather than an unchecked error.
+#[tokio::test]
+async fn a_stop_block_ends_the_run_failed() {
+    let hooks = Hooks::default();
+    let moderate = hook::<Stop>("moderate", |_| {
+        Ok(StopResponse::Block {
+            reason: "unsafe content".into(),
+        })
+    });
+    let _ = hooks.stop.register(moderate.arc()).unwrap();
+    let stores = Arc::new(Stores::default());
+    let provider = Arc::new(Replay::new(vec![text_turn("first")]));
+    let agent = hooked(spec(), provider, hooks, stores.clone());
+    let envelopes = finish(agent.run("go", RunOptions::new("s1"))).await;
+    let error = (envelopes.iter())
+        .find_map(|e| match &e.event {
+            Event::Error(error) => Some(error.error.clone()),
+            _ => None,
+        })
+        .expect("an error event");
+    assert_eq!(error["message"], "unsafe content");
+    let Some(Event::Result(result)) = envelopes.last().map(|e| &e.event) else {
+        panic!("no result");
+    };
+    assert_eq!(result.subtype, ResultSubtype::Error);
+}
+
 /// R1-rpc 3: a stop hook that fails closed ends the run failed, instead of
 /// sending the failure back as feedback and paying for one more answer per
 /// turn, without end when no turn limit is set.

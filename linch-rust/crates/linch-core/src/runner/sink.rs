@@ -21,7 +21,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use async_trait::async_trait;
 
 use super::Outbox;
-use super::hooks::push_records;
+use super::hooks::{event_emit, push_records};
 use crate::events::kinds::{
     SkillCompletedEvent, SkillInvokedEvent, ToolCallEndEvent, ToolCallStartEvent, ToolProgressEvent,
 };
@@ -144,6 +144,16 @@ impl<'a> JournalSink<'a> {
             self.durable.store(journal.durable_seq(), Ordering::SeqCst);
             ready
         };
+        let seq = self.durable.load(Ordering::SeqCst);
+        event_emit(
+            self.hooks,
+            self.outbox,
+            &self.session_id,
+            &self.run_id,
+            seq,
+            &ready,
+        )
+        .await;
         self.outbox.deliver(ready).await;
         Ok(())
     }

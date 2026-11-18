@@ -20,9 +20,17 @@ What differs in Rust:
   the run where it stands, like a crash (`runner.rs:83-87`).
 - Python's loop guard (repeated calls, repeated failures) is not in the
   runner. It emits `loop_guard` only for `max_turns` (`runner/end.rs:93-108`).
-- Hook points are the nineteen in the [kernel](./kernel.md#hook-chains),
-  twelve of which only observe. Python's `AfterProviderCall` is gone
-  (`hooks.rs:19-21`).
+- Hook points are the twenty-two in the [kernel](./kernel.md#hook-chains),
+  thirteen of which only observe. `before_provider_call` can rewrite or
+  block the request about to be sent, and `after_provider_call` can rewrite
+  or block the response a call just assembled, before it is staged; Python's
+  `retry`/`force_continue` actions at that point are not ported (`hooks.rs`).
+  Python's `before_final_answer` is not a separate point: `stop` can rewrite
+  the run's final-answer text (not the assistant message, already appended
+  by the time `stop` runs) or block the stop outright. `event_emit`, one of
+  the observe-only points, fires once per event about to be delivered to the
+  caller, but only for an event that is both streamed and durably logged —
+  never for a hook's own record or a stream-only delta.
 - A subagent's run cannot suspend: a call that needs approval is denied
   (`runner/batch.rs:73-75`).
 
@@ -38,6 +46,9 @@ What differs in Rust:
 3. **Build the request** from the session's provider view. The
    `context_build` hooks add blocks to the tail of the request only
    (`turn.rs:285-295`, `runner/hooks.rs:117-129`). They are never logged.
+   `before_provider_call` then runs on the built request: a rewrite replaces
+   it before anything downstream sees it; a block ends the run as failed and
+   the provider is never called (`hooks/call.rs`, `runner/hooks.rs`).
 4. **Stage and flush the delivery.** The `context_build` event and the
    model-call delivery are staged. The `ProviderPending` checkpoint is held,
    then `flush` writes the events and the checkpoint in one commit
@@ -45,9 +56,12 @@ What differs in Rust:
 5. **Drive the call.** Stream deltas go to the caller at once as stream-only
    events (`turn.rs:306-317`). The call settles with one receipt, whether it
    was accepted, failed or cancelled (`provider/call.rs:1-9`, `43-55`).
-6. **Write the response through.** On success the run stages the `Assistant`
-   and `Usage` events and saves `AssistantReceived`, which writes through
-   with the receipt (`turn.rs:353-380`, `journal.rs:192-193`). The caller sees
+6. **Write the response through.** `after_provider_call` runs on the
+   assembled response first: a rewrite replaces it before it is staged; a
+   block ends the run as failed and nothing is staged (`hooks/assembly.rs`,
+   `runner/hooks.rs`). On success the run then stages the `Assistant` and
+   `Usage` events and saves `AssistantReceived`, which writes through with
+   the receipt (`turn.rs:353-380`, `journal.rs:192-193`). The caller sees
    those events only after this commit (`journal.rs:25-28`).
 7. **Append the response to the session** (`turn.rs:395-397`).
 8. **Branch on the tool calls** of the response (below).
@@ -82,12 +96,14 @@ run ends the same way (`turn.rs:322-333`, `runner/end.rs:76-90, 130-139`).
   Then `Step::Results` appends the results and starts the next turn. The
   provider's `stop_reason` does not decide this; the blocks do.
 - **Without**, the run first waits for any background subagent it has, which
-  can add a notification and another turn (`turn.rs:398-401`,
+  can add a notification and another turn (`turn.rs:433-435`,
   `runner/inbox.rs:137-168`). Then the `stop` hook chain runs: a hook can keep
   the run going with feedback, which is appended as a user message and starts
-  another turn (`turn.rs:402-406`, `runner/hooks.rs:176-219`). When every hook
-  lets it stop, `post_turn` runs and the run ends `completed`
-  (`turn.rs:407-414`).
+  another turn, or rewrite the final-answer text (the value `post_turn` and
+  the terminal `Result` see next), or block the stop outright, ending the run
+  failed (`turn.rs:436-440`, `runner/hooks.rs`). When every hook lets it stop,
+  `post_turn` runs and the run ends `completed` with that text
+  (`turn.rs:441-448`).
 
 `max_turns` is the stop condition for the loop: the call that would exceed it
 is not made and the run fails with `TurnLimitError` (`runner/end.rs:93-108`).
@@ -159,6 +175,12 @@ envelopes a commit made durable and yields once, so the stream hands them over
 before the run goes on (`runner.rs:278-298`). Deltas and tool progress skip
 this: they go out at once and carry the last durable seq (`runner.rs:74-80`,
 `runner/sink.rs:184-199`).
+
+The `event_emit` hook point fires right before each of these `deliver` calls,
+once per envelope in that batch, in order (`runner/hooks.rs`). Since the
+caller never sees a delta, tool progress, or a hook's own record this way
+either, `event_emit` never sees them: it fires only for an event that was
+both staged for the caller and just made durable.
 
 ## Tool batch
 

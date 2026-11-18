@@ -203,22 +203,43 @@ pub enum StopResponse {
         /// Shown to the model as the reason to keep going.
         feedback: String,
     },
+    /// Use this text as the run's final answer instead; later hooks see it.
+    /// This is Python's `before_final_answer` mutate action, folded into
+    /// `stop`: it replaces the text the run reports as its result, not the
+    /// assistant message already appended to the session (that message is
+    /// logged before `stop` runs; see
+    /// [`AfterProviderCall`](super::AfterProviderCall) to change it instead).
+    Rewrite {
+        /// The new final-answer text.
+        text: String,
+    },
+    /// Do not let the run stop like this; end it with this reason. This is
+    /// Python's `before_final_answer`/`stop` block action.
+    Block {
+        /// Why the stop was blocked.
+        reason: String,
+    },
 }
 
 /// What the `stop` chain decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StopOutcome {
-    /// Every hook allowed the stop.
-    Stop,
+    /// Every hook allowed the stop; this is the final-answer text, the
+    /// original or the last rewrite.
+    Stop {
+        /// The final-answer text.
+        text: String,
+    },
     /// A hook kept the run going.
     Continue {
         /// Shown to the model.
         feedback: String,
     },
-    /// A hook failed closed: the answer cannot be checked, so the run ends
-    /// failed.
+    /// A hook blocked the stop, or failed closed: the answer is not
+    /// accepted unchecked, and sending the failure back as feedback would
+    /// pay for one more answer per turn, so the run ends failed either way.
     Failed {
-        /// Which hook failed and how.
+        /// Which hook failed, or blocked, and how.
         reason: String,
     },
 }
@@ -238,16 +259,17 @@ impl Point for Stop {
         match response {
             StopResponse::Allow => "allow",
             StopResponse::Continue { .. } => "continue",
+            StopResponse::Rewrite { .. } => "rewrite",
+            StopResponse::Block { .. } => "block",
         }
     }
 }
 
 impl HookChain<Stop> {
-    /// Run the hooks in order. The first hook that keeps the run going
-    /// stops the chain. A closed failure stops it too, and fails the run:
-    /// the answer is not accepted unchecked, and sending the failure back
-    /// as feedback would pay for one more answer per turn.
-    pub async fn run(&self, request: &StopRequest) -> ChainResult<StopOutcome> {
+    /// Run the hooks in order. A rewrite feeds the next hook. The first
+    /// hook that keeps the run going stops the chain. A block or a closed
+    /// failure stops it too, and fails the run.
+    pub async fn run(&self, request: StopRequest) -> ChainResult<StopOutcome> {
         let mut records = Vec::new();
         let outcome = self.run_into(request, &mut records).await;
         ChainResult { outcome, records }
@@ -257,19 +279,24 @@ impl HookChain<Stop> {
     /// returns, so a dropped chain keeps the records of the hooks that did.
     pub(crate) async fn run_into(
         &self,
-        request: &StopRequest,
+        mut request: StopRequest,
         records: &mut Vec<HookRecord>,
     ) -> StopOutcome {
         for entry in self.entries().iter() {
-            return match entry.invoke(request, records).await {
-                Step::Skip | Step::Answer(StopResponse::Allow) => continue,
-                Step::Answer(StopResponse::Continue { feedback }) => {
-                    StopOutcome::Continue { feedback }
+            match entry.invoke(&request, records).await {
+                Step::Skip | Step::Answer(StopResponse::Allow) => {}
+                Step::Answer(StopResponse::Rewrite { text }) => {
+                    request.text = text;
                 }
-                Step::Closed(reason) => StopOutcome::Failed { reason },
-            };
+                Step::Answer(StopResponse::Continue { feedback }) => {
+                    return StopOutcome::Continue { feedback };
+                }
+                Step::Answer(StopResponse::Block { reason }) | Step::Closed(reason) => {
+                    return StopOutcome::Failed { reason };
+                }
+            }
         }
-        StopOutcome::Stop
+        StopOutcome::Stop { text: request.text }
     }
 }
 

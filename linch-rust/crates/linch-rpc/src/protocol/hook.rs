@@ -4,8 +4,8 @@
 use std::num::NonZeroU64;
 
 use linch::{
-    ContentBlock, FailMode, HookPoint, JsonObject, JsonValue, TextBlock, ToolOutput,
-    ToolOutputError, ToolResult,
+    AssistantAssembly, ContentBlock, FailMode, HookPoint, JsonObject, JsonValue, ProviderRequest,
+    TextBlock, ToolOutput, ToolOutputError, ToolResult,
 };
 use serde::{Deserialize, Serialize};
 
@@ -121,6 +121,44 @@ pub enum UserPromptAnswer {
     },
 }
 
+/// A `before_provider_call` answer, by `action`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BeforeProviderCallAnswer {
+    /// No change.
+    Continue {},
+    /// Send this request instead; later callbacks see it, and it is what
+    /// the run's `context_build` event records.
+    Rewrite {
+        /// The new request.
+        request: Box<ProviderRequest>,
+    },
+    /// Do not send the call; end the run with this reason.
+    Block {
+        /// Why the call was blocked.
+        reason: String,
+    },
+}
+
+/// An `after_provider_call` answer, by `action`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AfterProviderCallAnswer {
+    /// No change.
+    Continue {},
+    /// Use this response instead; it is what gets staged and appended to
+    /// the session.
+    Rewrite {
+        /// The new response.
+        assembly: Box<AssistantAssembly>,
+    },
+    /// Do not accept the response; end the run with this reason.
+    Block {
+        /// Why the response was blocked.
+        reason: String,
+    },
+}
+
 /// A `context_build` answer: text to add to this provider request only.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -145,6 +183,17 @@ pub enum StopAnswer {
         /// Why to keep going.
         feedback: String,
     },
+    /// Use this text as the run's final answer instead; later callbacks
+    /// see it.
+    Rewrite {
+        /// The new final-answer text.
+        text: String,
+    },
+    /// Do not let the run stop like this; end it with this reason.
+    Block {
+        /// Why the stop was blocked.
+        reason: String,
+    },
 }
 
 /// A `post_turn` answer: `{}`. The point only observes.
@@ -156,8 +205,8 @@ pub struct PostTurnAnswer {}
 /// Python's lifecycle hooks (`agent_start`, `agent_stop`, `turn_start`,
 /// `provider_call_start`, `provider_call_stop`, `tool_use_start`,
 /// `tool_use_stop`, `post_tool_use_failure`, `pre_compact`, `post_compact`,
-/// `subagent_start`, `subagent_stop`): `{}`. None of these can fail closed,
-/// so the shape never carries a verdict.
+/// `subagent_start`, `subagent_stop`, `event_emit`): `{}`. None of these can
+/// fail closed, so the shape never carries a verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObserveAnswer {}

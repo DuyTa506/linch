@@ -19,26 +19,50 @@ use crate::events::kinds::{
 use crate::events::model_call::CallDisposition;
 use crate::events::{Envelope, Event, WIRE_VERSION, now_ms};
 use crate::hooks::{
-    AgentStartRequest, AgentStopRequest, ContextBuildRequest, ContextBuildResponse, HookRecord,
-    HookStatus, PostCompactRequest, PostTurnRequest, PreCompactRequest, ProviderCallStartRequest,
-    ProviderCallStopRequest, StopOutcome, StopRequest, TurnStartRequest, UserPromptOutcome,
-    UserPromptRequest,
+    AfterProviderCallOutcome, AfterProviderCallRequest, AgentStartRequest, AgentStopRequest,
+    BeforeProviderCallOutcome, BeforeProviderCallRequest, ContextBuildRequest,
+    ContextBuildResponse, EventEmitRequest, HookRecord, HookStatus, Hooks, PostCompactRequest,
+    PostTurnRequest, PreCompactRequest, ProviderCallStartRequest, ProviderCallStopRequest,
+    StopOutcome, StopRequest, TurnStartRequest, UserPromptOutcome, UserPromptRequest,
 };
 use crate::ids::{RunId, SessionId};
 use crate::json::JsonObject;
 use crate::message::{ContentBlock, Message, Role, TextBlock};
-use crate::provider::ProviderRequest;
+use crate::provider::{AssistantAssembly, ProviderRequest};
 use crate::run::{Phase, RunStatus, StopReason};
 use crate::usage::Usage;
 
+/// What a `before_provider_call` hook decided for the request about to be
+/// sent.
+pub(super) enum BeforeCall {
+    /// Send this request: the original, or the last rewrite.
+    Send(Box<ProviderRequest>),
+    /// A hook blocked the call, or failed closed.
+    Blocked(String),
+    /// The run already ended: the run cancel interrupted the chain.
+    Ended,
+}
+
+/// What an `after_provider_call` hook decided for the response a provider
+/// call just assembled.
+pub(super) enum AfterCall {
+    /// Accept this response: the provider's, or the last rewrite.
+    Send(Box<AssistantAssembly>),
+    /// A hook blocked the response, or failed closed.
+    Blocked(String),
+    /// The run already ended: the run cancel interrupted the chain.
+    Ended,
+}
+
 /// What a text-only response leads to, after the `stop` chain.
 pub(super) enum Stopping {
-    /// Every hook let the run stop.
-    Stop,
+    /// Every hook let the run stop; this is the final-answer text, the
+    /// original or the last rewrite.
+    Stop { text: String },
     /// A hook kept the run going: this feedback step is next.
     Continue(Step),
-    /// The run already ended: a hook failed closed, or the run cancel
-    /// interrupted the chain.
+    /// The run already ended: a hook blocked the stop, failed closed, or
+    /// the run cancel interrupted the chain.
     Ended,
 }
 
@@ -145,6 +169,37 @@ pub(super) async fn agent_start(
     push_records(outbox, run_id, 0, records, None);
 }
 
+/// Run `event_emit` for each of `ready`'s envelopes, in that order, before
+/// they are delivered to the caller. `ready` only ever holds envelopes that
+/// are both streamed and durably logged ([`crate::events::Persistence::Both`]):
+/// a stream-only delta, tool-progress event or hook record never reaches
+/// here, so firing this point cannot recurse into itself. Every hook's
+/// records are pushed once, after the whole batch ran, as their own
+/// stream-only envelopes at `seq` — not fed back into the chain.
+pub(super) async fn event_emit(
+    hooks: &Hooks,
+    outbox: &Outbox,
+    session_id: &SessionId,
+    run_id: &RunId,
+    seq: u64,
+    ready: &[Envelope],
+) {
+    let chain = &hooks.event_emit;
+    if chain.is_empty() || ready.is_empty() {
+        return;
+    }
+    let mut records = Vec::new();
+    for envelope in ready {
+        let request = EventEmitRequest {
+            session_id: session_id.clone(),
+            run_id: run_id.clone(),
+            event: envelope.event.clone(),
+        };
+        chain.run_into(&request, &mut records).await;
+    }
+    push_records(outbox, run_id, seq, records, None);
+}
+
 /// Add request-only context to the tail of `messages`: after the blocks
 /// of the last user message, or as a new user message. The cached prefix
 /// (system, tools, every earlier message) stays byte-identical.
@@ -164,6 +219,20 @@ impl Runner {
     pub(super) fn push_records(&self, records: Vec<HookRecord>, tool_use_id: Option<&str>) {
         let seq = self.journal.durable_seq();
         push_records(&self.outbox, &self.run.run_id, seq, records, tool_use_id);
+    }
+
+    /// [`event_emit`] for `ready`, about to be delivered to the caller.
+    pub(super) async fn event_emit(&self, ready: &[Envelope]) {
+        let seq = self.journal.durable_seq();
+        event_emit(
+            &self.agent.hooks,
+            &self.outbox,
+            &self.run.session_id,
+            &self.run.run_id,
+            seq,
+            ready,
+        )
+        .await;
     }
 
     /// The `context_build` blocks for a request over `messages`; `None`
@@ -208,7 +277,9 @@ impl Runner {
     pub(super) async fn stop(&mut self, text: &str) -> Result<Stopping, RunError> {
         let chain = &self.agent.hooks.stop;
         if chain.is_empty() {
-            return Ok(Stopping::Stop);
+            return Ok(Stopping::Stop {
+                text: text.to_owned(),
+            });
         }
         let request = StopRequest {
             session_id: self.run.session_id.clone(),
@@ -216,7 +287,7 @@ impl Runner {
             text: text.to_owned(),
         };
         let mut records = Vec::new();
-        let run = chain.run_into(&request, &mut records);
+        let run = chain.run_into(request, &mut records);
         let outcome = self.cancel.run_until_cancelled(run).await;
         self.push_records(records, None);
         let Some(outcome) = outcome else {
@@ -224,7 +295,7 @@ impl Runner {
             return Ok(Stopping::Ended);
         };
         let feedback = match outcome {
-            StopOutcome::Stop => return Ok(Stopping::Stop),
+            StopOutcome::Stop { text } => return Ok(Stopping::Stop { text }),
             StopOutcome::Continue { feedback } => feedback,
             StopOutcome::Failed { reason } => {
                 self.hook_failed(reason).await?;
@@ -305,6 +376,36 @@ impl Runner {
         self.push_records(records, None);
     }
 
+    /// Run `before_provider_call` on the request about to be sent for
+    /// `turn`. The request `stage_context` and the delivery record is built
+    /// from is whatever this returns, so a rewrite is what the audit trail
+    /// and a resumed run both see.
+    pub(super) async fn before_provider_call(
+        &self,
+        request: ProviderRequest,
+        turn: u32,
+    ) -> BeforeCall {
+        let chain = &self.agent.hooks.before_provider_call;
+        if chain.is_empty() {
+            return BeforeCall::Send(Box::new(request));
+        }
+        let request = BeforeProviderCallRequest {
+            session_id: self.run.session_id.clone(),
+            run_id: self.run.run_id.clone(),
+            turn,
+            request,
+        };
+        let mut records = Vec::new();
+        let run = chain.run_into(request, &mut records);
+        let outcome = self.cancel.run_until_cancelled(run).await;
+        self.push_records(records, None);
+        match outcome {
+            None => BeforeCall::Ended,
+            Some(BeforeProviderCallOutcome::Send { request }) => BeforeCall::Send(request),
+            Some(BeforeProviderCallOutcome::Blocked { reason }) => BeforeCall::Blocked(reason),
+        }
+    }
+
     /// Run `provider_call_start` before dispatching one provider call.
     pub(super) async fn provider_call_start(&self, turn: u32, model: &str) {
         let chain = &self.agent.hooks.provider_call_start;
@@ -348,6 +449,36 @@ impl Runner {
         let mut records = Vec::new();
         chain.run_into(&request, &mut records).await;
         self.push_records(records, None);
+    }
+
+    /// Run `after_provider_call` on the response a provider call just
+    /// assembled for `turn`. Whatever this returns is what `accept` stages
+    /// as the `Assistant` event and appends to the session, so a rewrite is
+    /// what the audit trail and a resumed run both see.
+    pub(super) async fn after_provider_call(
+        &self,
+        assembly: AssistantAssembly,
+        turn: u32,
+    ) -> AfterCall {
+        let chain = &self.agent.hooks.after_provider_call;
+        if chain.is_empty() {
+            return AfterCall::Send(Box::new(assembly));
+        }
+        let request = AfterProviderCallRequest {
+            session_id: self.run.session_id.clone(),
+            run_id: self.run.run_id.clone(),
+            turn,
+            assembly,
+        };
+        let mut records = Vec::new();
+        let run = chain.run_into(request, &mut records);
+        let outcome = self.cancel.run_until_cancelled(run).await;
+        self.push_records(records, None);
+        match outcome {
+            None => AfterCall::Ended,
+            Some(AfterProviderCallOutcome::Send { assembly }) => AfterCall::Send(assembly),
+            Some(AfterProviderCallOutcome::Blocked { reason }) => AfterCall::Blocked(reason),
+        }
     }
 
     /// Run `pre_compact` once compaction's due checks passed, before the

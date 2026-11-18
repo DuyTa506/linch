@@ -333,6 +333,193 @@ async fn turn_point_callbacks_cross_the_connection() {
     assert_eq!(error.data.unwrap()["reason"], "no prompts today");
 }
 
+/// `stop` can replace the run's final-answer text; the replacement is what
+/// the result reports, not the model's original text.
+#[tokio::test]
+async fn stop_rewrites_the_final_text() {
+    let (mut rpc, _log) = client(json!({
+        "stop": {"action": "rewrite", "text": "Done!"},
+    }));
+    let extra = json!({"callbacks": [
+        {"point": "stop", "policy_id": "polish", "policy_version": 1},
+    ]});
+    let ended = run(&mut rpc, vec![text_turn("done")], extra).await;
+    assert!(finished(&ended));
+    assert!(matches!(
+        ended.last(),
+        Event::Result(r) if r.final_text.as_deref() == Some("Done!")
+    ));
+}
+
+/// A block ends the run with a failed result instead of letting it stop.
+#[tokio::test]
+async fn stop_can_block_the_run() {
+    let (mut rpc, _log) = client(json!({
+        "stop": {"action": "block", "reason": "unsafe content"},
+    }));
+    let extra = json!({"callbacks": [
+        {"point": "stop", "policy_id": "moderate", "policy_version": 1},
+    ]});
+    let agent = rpc
+        .open(hosted(vec![text_turn("done")], "default", extra))
+        .await;
+    let run_id = rpc.start(&agent, "s1", "Go.").await;
+    let ended = rpc.until_end(&run_id).await;
+    assert!(
+        ended.error.is_none(),
+        "a block is a failed result, not a protocol error"
+    );
+    assert!(matches!(ended.last(), Event::Result(r) if r.subtype == ResultSubtype::Error));
+}
+
+/// `event_emit` fires once per durable event delivered to the caller, in
+/// delivery order, carrying the event under its own `type` tag.
+#[tokio::test]
+async fn event_emit_fires_once_per_durable_event() {
+    let (mut rpc, log) = client(json!({
+        "event_emit": {},
+    }));
+    let extra = json!({"callbacks": [
+        {"point": "event_emit", "policy_id": "mirror", "policy_version": 1},
+    ]});
+    let ended = run(&mut rpc, vec![text_turn("done")], extra).await;
+    assert!(finished(&ended));
+    let kinds: Vec<String> = (log.methods().iter().enumerate())
+        .filter(|(_, m)| m.as_str() == "hook.call:event_emit")
+        .map(|(i, _)| {
+            (log.params(i)["request"]["event"]["type"].as_str())
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "init",
+            "user",
+            "context_build",
+            "assistant",
+            "usage",
+            "result"
+        ]
+    );
+}
+
+/// `before_provider_call` sees the exact request about to be sent and can
+/// replace it; the replacement is what the provider gets and what the run's
+/// `context_build` event records, not the original.
+#[tokio::test]
+async fn before_provider_call_rewrites_the_request() {
+    let seen: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&seen);
+    let rpc = Rpc::with_handler(handler(move |_method, params, _cancel| {
+        let log = log.clone();
+        async move {
+            let params = Value::Object(params);
+            log.lock().unwrap().push(params.clone());
+            // `params["request"]` is the occurrence (`HookCallParams`); its
+            // own `request` field is the `ProviderRequest` to rewrite.
+            let mut request = params["request"]["request"].clone();
+            request["model"] = json!("cheaper-model");
+            Ok(json!({"action": "rewrite", "request": request}))
+        }
+    }));
+    let mut rpc = rpc;
+    let extra = json!({"callbacks": [
+        {"point": "before_provider_call", "policy_id": "downgrade", "policy_version": 1},
+    ]});
+    let ended = run(&mut rpc, vec![text_turn("Done.")], extra).await;
+    assert!(finished(&ended));
+    assert_eq!(
+        seen.lock().unwrap()[0]["request"]["request"]["model"],
+        MODEL
+    );
+    let build_model = (ended.envelopes.iter())
+        .find_map(|envelope| match &envelope.event {
+            Event::ContextBuild(build) => Some(build.model.clone()),
+            _ => None,
+        })
+        .expect("a context_build event");
+    assert_eq!(build_model, "cheaper-model");
+}
+
+/// A block ends the run with a failed result instead of sending the call.
+#[tokio::test]
+async fn before_provider_call_can_block_the_call() {
+    let (mut rpc, _log) = client(json!({
+        "before_provider_call": {"action": "block", "reason": "over budget"},
+    }));
+    let extra = json!({"callbacks": [
+        {"point": "before_provider_call", "policy_id": "budget", "policy_version": 1},
+    ]});
+    let agent = rpc
+        .open(hosted(vec![text_turn("Done.")], "default", extra))
+        .await;
+    let run_id = rpc.start(&agent, "s1", "Go.").await;
+    let ended = rpc.until_end(&run_id).await;
+    assert!(
+        ended.error.is_none(),
+        "a block is a failed result, not a protocol error"
+    );
+    assert!(matches!(ended.last(), Event::Result(r) if r.subtype == ResultSubtype::Error));
+}
+
+/// `after_provider_call` sees the assembled response and can replace it;
+/// the replacement is what gets staged and appended to the session.
+#[tokio::test]
+async fn after_provider_call_rewrites_the_response() {
+    let rpc = Rpc::with_handler(handler(move |_method, params, _cancel| async move {
+        let params = Value::Object(params);
+        let mut assembly = params["request"]["assembly"].clone();
+        assembly["message"]["content"][0]["text"] = json!("Redacted.");
+        Ok(json!({"action": "rewrite", "assembly": assembly}))
+    }));
+    let mut rpc = rpc;
+    let extra = json!({"callbacks": [
+        {"point": "after_provider_call", "policy_id": "redact", "policy_version": 1},
+    ]});
+    let ended = run(&mut rpc, vec![text_turn("The secret is 42.")], extra).await;
+    assert!(finished(&ended));
+    let text = (ended.envelopes.iter())
+        .find_map(|envelope| match &envelope.event {
+            Event::Assistant(assistant) => Some(serde_json::to_string(&assistant.message).unwrap()),
+            _ => None,
+        })
+        .expect("an assistant event");
+    assert!(text.contains("Redacted."), "{text}");
+    assert!(!text.contains("secret"), "{text}");
+}
+
+/// A block ends the run with a failed result; the response is never staged.
+#[tokio::test]
+async fn after_provider_call_can_block_the_response() {
+    let (mut rpc, _log) = client(json!({
+        "after_provider_call": {"action": "block", "reason": "unsafe content"},
+    }));
+    let extra = json!({"callbacks": [
+        {"point": "after_provider_call", "policy_id": "moderate", "policy_version": 1},
+    ]});
+    let agent = rpc
+        .open(hosted(
+            vec![text_turn("The secret is 42.")],
+            "default",
+            extra,
+        ))
+        .await;
+    let run_id = rpc.start(&agent, "s1", "Go.").await;
+    let ended = rpc.until_end(&run_id).await;
+    assert!(
+        ended.error.is_none(),
+        "a block is a failed result, not a protocol error"
+    );
+    assert!(matches!(ended.last(), Event::Result(r) if r.subtype == ResultSubtype::Error));
+    assert!(
+        !ended.kinds().contains(&"assistant".to_owned()),
+        "{:?}",
+        ended.kinds()
+    );
+}
+
 /// The observe-only points added for parity with Python's lifecycle hooks
 /// cross the connection like any other callback: `agent_start`/`agent_stop`
 /// bracket the run, `turn_start` fires before each turn's dispatch, and

@@ -16,16 +16,29 @@
 //! [`PreToolUseOutcome::Run`] only comes from a chain that ran every
 //! matching hook.
 //!
-//! Twelve further points observe only (`observe`): `agent_start`,
+//! Thirteen further points observe only (`observe`): `agent_start`,
 //! `agent_stop`, `turn_start`, `provider_call_start`, `provider_call_stop`,
 //! `tool_use_start`, `tool_use_stop`, `post_tool_use_failure`, `pre_compact`,
-//! `post_compact`, `subagent_start`, `subagent_stop`. A hook there answers
-//! `()` and cannot fail closed; Python's `AfterProviderCall` is gone
-//! (provider retries live in the reliability policy), and
-//! `before_provider_call`, `before_final_answer` and `event_emit` have no
-//! Rust hook point yet. Script hooks and RPC callbacks implement [`Hook`]
-//! later; they are not part of this module.
+//! `post_compact`, `subagent_start`, `subagent_stop`, `event_emit`. A hook
+//! there answers `()` and cannot fail closed. `event_emit` fires once per
+//! event about to be delivered to the caller, but only for events that are
+//! both streamed and durably logged: never for a hook's own record, and
+//! never for a stream-only delta or tool-progress event (see `observe`).
+//! [`BeforeProviderCall`] (`call`) lets a hook replace the provider
+//! request about to be sent, or block the call; [`AfterProviderCall`]
+//! (`assembly`) lets a hook replace the assembled response a provider call
+//! just produced, or block it, before it is staged and appended to the
+//! session — this is Rust's equivalent of Python's `AfterProviderCall`, as a
+//! mutate/block point only: Python's `retry` and `force_continue` actions
+//! there are not ported (see `assembly`). Unlike the observe-only points,
+//! both points' blocking verdicts can fail closed. `before_final_answer` has
+//! no Rust hook point of its own: [`Stop`] (`turn`) can rewrite the run's
+//! final-answer text or block the stop outright, folding that point in.
+//! Script hooks and RPC callbacks implement [`Hook`] later; they are not
+//! part of this module.
 
+mod assembly;
+mod call;
 mod chain;
 mod hook;
 mod observe;
@@ -41,14 +54,23 @@ use crate::canonical::{Digest, digest_with_domain};
 use crate::json::JsonValue;
 use crate::policy::HookPoint;
 
+pub use assembly::{
+    AfterProviderCall, AfterProviderCallOutcome, AfterProviderCallRequest,
+    AfterProviderCallResponse,
+};
+pub use call::{
+    BeforeProviderCall, BeforeProviderCallOutcome, BeforeProviderCallRequest,
+    BeforeProviderCallResponse,
+};
 pub use chain::{ChainResult, HookChain, HookRecord, HookStatus};
 pub use hook::{CallbackError, Hook, HookError, Point, ToolMatcher};
 pub use observe::{
-    AgentStart, AgentStartRequest, AgentStop, AgentStopRequest, PostCompact, PostCompactRequest,
-    PostToolUseFailure, PostToolUseFailureRequest, PreCompact, PreCompactRequest,
-    ProviderCallStart, ProviderCallStartRequest, ProviderCallStop, ProviderCallStopRequest,
-    SubagentStart, SubagentStartRequest, SubagentStop, SubagentStopRequest, ToolUseStart,
-    ToolUseStartRequest, ToolUseStop, ToolUseStopRequest, TurnStart, TurnStartRequest,
+    AgentStart, AgentStartRequest, AgentStop, AgentStopRequest, EventEmit, EventEmitRequest,
+    PostCompact, PostCompactRequest, PostToolUseFailure, PostToolUseFailureRequest, PreCompact,
+    PreCompactRequest, ProviderCallStart, ProviderCallStartRequest, ProviderCallStop,
+    ProviderCallStopRequest, SubagentStart, SubagentStartRequest, SubagentStop,
+    SubagentStopRequest, ToolUseStart, ToolUseStartRequest, ToolUseStop, ToolUseStopRequest,
+    TurnStart, TurnStartRequest,
 };
 pub use tool::{
     ApprovalRequest, ApprovalResponse, PermissionRequest, PostToolUse, PostToolUseRequest,
@@ -86,10 +108,14 @@ pub struct Hooks {
     pub agent_stop: HookChain<AgentStop>,
     /// Hooks at [`HookPoint::TurnStart`].
     pub turn_start: HookChain<TurnStart>,
+    /// Hooks at [`HookPoint::BeforeProviderCall`].
+    pub before_provider_call: HookChain<BeforeProviderCall>,
     /// Hooks at [`HookPoint::ProviderCallStart`].
     pub provider_call_start: HookChain<ProviderCallStart>,
     /// Hooks at [`HookPoint::ProviderCallStop`].
     pub provider_call_stop: HookChain<ProviderCallStop>,
+    /// Hooks at [`HookPoint::AfterProviderCall`].
+    pub after_provider_call: HookChain<AfterProviderCall>,
     /// Hooks at [`HookPoint::ToolUseStart`].
     pub tool_use_start: HookChain<ToolUseStart>,
     /// Hooks at [`HookPoint::ToolUseStop`].
@@ -104,6 +130,8 @@ pub struct Hooks {
     pub subagent_start: HookChain<SubagentStart>,
     /// Hooks at [`HookPoint::SubagentStop`].
     pub subagent_stop: HookChain<SubagentStop>,
+    /// Hooks at [`HookPoint::EventEmit`].
+    pub event_emit: HookChain<EventEmit>,
 }
 
 impl Hooks {
@@ -113,9 +141,10 @@ impl Hooks {
     /// point in a fixed order (`user_prompt_submit`, `context_build`,
     /// `pre_tool_use`, `permission_request`, `post_tool_use`, `stop`,
     /// `post_turn`, `agent_start`, `agent_stop`, `turn_start`,
-    /// `provider_call_start`, `provider_call_stop`, `tool_use_start`,
-    /// `tool_use_stop`, `post_tool_use_failure`, `pre_compact`,
-    /// `post_compact`, `subagent_start`, `subagent_stop`) and in chain order
+    /// `before_provider_call`, `provider_call_start`, `provider_call_stop`,
+    /// `after_provider_call`, `tool_use_start`, `tool_use_stop`,
+    /// `post_tool_use_failure`, `pre_compact`, `post_compact`,
+    /// `subagent_start`, `subagent_stop`, `event_emit`) and in chain order
     /// within a point, duplicates kept. The order of a point's hooks decides
     /// what its chain does (a rewrite feeds the next hook, a block stops
     /// it), so reordering them, or registering one twice, changes the
@@ -133,8 +162,10 @@ impl Hooks {
             self.agent_start.policies(),
             self.agent_stop.policies(),
             self.turn_start.policies(),
+            self.before_provider_call.policies(),
             self.provider_call_start.policies(),
             self.provider_call_stop.policies(),
+            self.after_provider_call.policies(),
             self.tool_use_start.policies(),
             self.tool_use_stop.policies(),
             self.post_tool_use_failure.policies(),
@@ -142,6 +173,7 @@ impl Hooks {
             self.post_compact.policies(),
             self.subagent_start.policies(),
             self.subagent_stop.policies(),
+            self.event_emit.policies(),
         ]
         .into_iter()
         .flatten()

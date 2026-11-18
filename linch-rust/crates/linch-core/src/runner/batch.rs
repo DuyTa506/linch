@@ -215,6 +215,7 @@ impl Runner {
         })
         .await?;
         let ready = self.journal.flush().await?;
+        self.event_emit(&ready).await;
         self.outbox.deliver(ready).await;
         Ok(())
     }

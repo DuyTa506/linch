@@ -7,7 +7,7 @@ use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::end::cut_empty;
-use super::hooks::{Stopping, add_context};
+use super::hooks::{AfterCall, BeforeCall, Stopping, add_context};
 use super::inbox::HeldPeers;
 use super::progress::Progress;
 use super::write::session_log;
@@ -298,12 +298,24 @@ impl Runner {
         if let Some(model) = model {
             request.model = skills::model_override(&model, &request.model);
         }
+        let request = match self.before_provider_call(request, self.turn).await {
+            BeforeCall::Send(request) => *request,
+            BeforeCall::Blocked(reason) => {
+                self.hook_failed(reason).await?;
+                return Ok(None);
+            }
+            BeforeCall::Ended => {
+                self.abort().await?;
+                return Ok(None);
+            }
+        };
         self.stage_context(&request, context.metadata);
         let call = ModelCall::prepare(&self.run.run_id, self.turn, attempt, &request.model);
         self.journal
             .stage(Event::ModelCallDelivery(call.delivery().clone()));
         self.save(Phase::ProviderPending { attempt }).await?;
         let ready = self.journal.flush().await?;
+        self.event_emit(&ready).await;
         self.outbox.deliver(ready).await;
         let call_model = request.model.clone();
         self.provider_call_start(self.turn, &call_model).await;
@@ -343,7 +355,7 @@ impl Runner {
                 self.output_limit().await?;
                 return Ok(None);
             }
-            Ok(assembly) => return self.accept(assembly, cost, served).await.map(Some),
+            Ok(assembly) => return self.accept(assembly, cost, served).await,
             Err(failure) => failure,
         };
         // A call that failed or was cancelled may still have been paid.
@@ -359,15 +371,26 @@ impl Runner {
         Ok(None)
     }
 
-    /// Stage the response and its `Usage` (with the call's `cost` and the
-    /// model that `served` it), and write them through with
-    /// `AssistantReceived`.
+    /// Run `after_provider_call`, then stage the response and its `Usage`
+    /// (with the call's `cost` and the model that `served` it), and write
+    /// them through with `AssistantReceived`.
     async fn accept(
         &mut self,
         assembly: AssistantAssembly,
         cost: Option<f64>,
         served: Option<String>,
-    ) -> Result<Step, RunError> {
+    ) -> Result<Option<Step>, RunError> {
+        let assembly = match self.after_provider_call(assembly, self.turn).await {
+            AfterCall::Send(assembly) => *assembly,
+            AfterCall::Blocked(reason) => {
+                self.hook_failed(reason).await?;
+                return Ok(None);
+            }
+            AfterCall::Ended => {
+                self.abort().await?;
+                return Ok(None);
+            }
+        };
         let AssistantAssembly {
             message,
             stop_reason,
@@ -384,11 +407,11 @@ impl Runner {
             stop_reason,
         };
         self.save(phase).await?;
-        Ok(Step::Received {
+        Ok(Some(Step::Received {
             message,
             stop_reason,
             appended: false,
-        })
+        }))
     }
 
     async fn received(
@@ -411,11 +434,11 @@ impl Runner {
             if let Some(next) = self.hear_back().await? {
                 return Ok(next);
             }
-            match self.stop(&text).await? {
-                Stopping::Stop => {}
+            let text = match self.stop(&text).await? {
+                Stopping::Stop { text } => text,
                 Stopping::Continue(feedback) => return Ok(Some(feedback)),
                 Stopping::Ended => return Ok(None),
-            }
+            };
             if !self.post_turn(stop_reason).await {
                 self.abort().await?;
                 return Ok(None);

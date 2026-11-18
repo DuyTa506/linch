@@ -16,6 +16,35 @@ package `linch` has its own [changelog](../CHANGELOG.md).
   closed, and costs nothing when no hook is registered on it. Available to
   `@callback` in `linch_rust` and to `Hook<P>` implementations in
   `linch-core`.
+- `before_provider_call`: a hook point for the full provider request about to
+  be sent. A hook may rewrite it (the rewrite is what is sent and what
+  `context_build` records) or block the call, ending the run before the
+  provider is ever reached. Defaults open, but unlike the observe-only
+  points its blocking answer can fail closed. Available to `@callback` in
+  `linch_rust` and to `Hook<BeforeProviderCall>` in `linch-core`.
+- `after_provider_call`: a hook point for the response a provider call just
+  assembled, before it is staged and appended to the session. A hook may
+  rewrite it (the rewrite is what gets staged and appended) or block it,
+  ending the run before anything is staged. Defaults open, but like
+  `before_provider_call` its blocking answer can fail closed. Available to
+  `@callback` in `linch_rust` and to `Hook<AfterProviderCall>` in
+  `linch-core`. Python's `retry`/`force_continue` actions at this point are
+  not ported: Rust has only `Continue`/`Rewrite`/`Block`.
+- `stop` can now rewrite the run's final-answer text, or block the stop
+  outright. This is Python's `before_final_answer` hook point, folded into
+  `stop` rather than added as a separate point: the rewrite replaces only the
+  text the run reports as its result, not the assistant message already
+  appended to the session (that message is logged before `stop` ever runs).
+  Available as `{"action": "rewrite", "text"}` / `{"action": "block",
+  "reason"}` to `@callback` in `linch_rust` and as `StopResponse::Rewrite`/
+  `StopResponse::Block` to `Hook<Stop>` in `linch-core`.
+- `event_emit`: a thirteenth observe-only hook point, for parity with
+  Python's `EVENT_EMIT`. It fires once per event, in delivery order, but
+  only for an event that is both streamed to the caller and durably logged:
+  never for a hook's own record (it would otherwise recurse into itself)
+  and never for a stream-only delta or tool-progress event. Answers `()`
+  (`{}` on the wire) and can never fail closed. Available to `@callback` in
+  `linch_rust` and to `Hook<EventEmit>` in `linch-core`.
 
 ### Changed
 

@@ -186,6 +186,7 @@ pub(super) fn can_fail_closed(point: HookPoint) -> bool {
             | HookPoint::PostCompact
             | HookPoint::SubagentStart
             | HookPoint::SubagentStop
+            | HookPoint::EventEmit
     )
 }
 

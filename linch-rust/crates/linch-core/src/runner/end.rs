@@ -53,6 +53,7 @@ impl Runner {
             trace_id: self.run.trace_id.clone(),
         };
         let ready = self.journal.finish(status, result).await?;
+        self.event_emit(&ready).await;
         self.outbox.deliver(ready).await;
         self.agent_stop(status, stop_reason).await;
         Ok(())
