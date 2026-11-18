@@ -271,6 +271,7 @@ mod tests {
 
     /// Run `program` on one syscall, as the kernel would: `args` are the
     /// low 32 bits of the first three arguments.
+    #[allow(clippy::panic)]
     fn eval(program: &[sock_filter], arch: u32, nr: u32, args: [u32; 3]) -> u32 {
         let (mut at, mut acc) = (0, 0);
         loop {

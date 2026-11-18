@@ -113,6 +113,15 @@
 //! wrapped, with the child's own `ts_ms` and the parent's `tool_use_id`, but
 //! the observer does not trace them yet.
 
+#![deny(
+    clippy::todo,
+    clippy::unimplemented,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::expect_used,
+    clippy::let_underscore_must_use
+)]
+
 pub mod keys;
 mod observer;
 mod span;
