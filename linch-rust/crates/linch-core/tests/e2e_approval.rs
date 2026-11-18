@@ -13,7 +13,8 @@ use linch_core::permissions::{Rule, RuleDecision, ToolRule};
 use linch_core::store::faulty::{FaultTiming, Faulty};
 use linch_core::{
     Agent, Envelope, Event, PermissionEngine, PermissionLayer, PermissionMode, PermissionPolicy,
-    Phase, RunError, RunId, RunOptions, RunStatus, RunStore, ScriptedProvider, ToolScope,
+    Phase, Principal, RunError, RunId, RunOptions, RunStatus, RunStore, ScriptedProvider,
+    ToolScope,
 };
 
 struct Fixture {
@@ -127,15 +128,21 @@ async fn denying_gives_the_model_a_denied_result() {
 #[tokio::test]
 async fn a_recorded_allow_never_beats_a_fresh_deny() {
     let fixture = Fixture::new(1);
-    let (run_id, _) = fixture.suspend().await;
-    // The approving agent's policy now denies the tool outright. The
-    // permission policy is not part of the run contract.
+    // The policy is part of the run contract, so the fresh deny comes from
+    // the same policy: a rule that denies the approving principal's role.
     let mut strict = PermissionPolicy::new(PermissionMode::Default, "/");
-    let rule = ToolRule::new("Write", RuleDecision::Deny);
+    let mut rule = ToolRule::new("Write", RuleDecision::Deny);
+    rule.role = Some("intern".into());
     strict.layers = vec![PermissionLayer::new("runtime", [Rule::Tool(rule)])];
     let agent = fixture.agent(PermissionEngine::new(strict).unwrap());
+    let stream = agent.run("go", RunOptions::new("s1"));
+    let run_id = stream.run_id().clone();
+    let envelopes = finish(stream).await;
+    assert_eq!(pending(&envelopes), ["call_0_0"]);
     let allow = answers(&[("call_0_0", ApprovalResponse::Allow)]);
-    finish(agent.approve(run_id, allow, RunOptions::new("s1"))).await;
+    let mut options = RunOptions::new("s1");
+    options.principal = Some(Principal::new("acme", "bob", ["intern"]).unwrap());
+    finish(agent.approve(run_id, allow, options)).await;
     let results = fixture.results().await;
     assert!(results[0].starts_with("Tool call denied"), "{results:?}");
     assert!(fixture.runs.lock().unwrap().is_empty());

@@ -4,11 +4,13 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
+use tokio_util::sync::CancellationToken;
+
 use super::batch::{answer_decision, approvals, turn_events, upsert};
 use super::lease::Held;
 use super::progress::Progress;
 use super::turn::{Batch, Runner, Step};
-use super::{Driving, Family, Shared, hooks, inbox};
+use super::{Driving, Family, Shared, cancel, hooks, inbox};
 use crate::agent::{AgentInner, RunError, RunOptions};
 use crate::ask_user::{self, AskUserAnswer};
 use crate::budget::{Meter, Spent};
@@ -195,6 +197,8 @@ pub(crate) enum Reply {
     Approvals(HashMap<String, ApprovalResponse>),
     /// The user's answer per pending input `request_id`.
     Answers(HashMap<String, AskUserAnswer>),
+    /// End the run `aborted` (see [`crate::Agent::cancel`]).
+    Cancel,
 }
 
 /// Claim an existing run, check it may continue, reconcile its durable
@@ -219,6 +223,7 @@ pub(super) async fn continue_run(
     if options.cancel.is_cancelled() {
         return Ok(());
     }
+    let cancelling = matches!(reply, Some(Reply::Cancel));
     let (runs, namespace) = (&agent.runs, agent.namespace.as_str());
     // Check before claiming, so a mistaken call does not fence a live owner
     // (and a wrong answer leaves the run suspended); check again after,
@@ -248,7 +253,18 @@ pub(super) async fn continue_run(
     // From here on, a return that leaves the run `running` releases it.
     let mut held = Held::new(&agent, &lease);
     let record = runs.load(namespace, &run_id).await?;
-    check(&record, &agent, reply.as_ref())?;
+    // A cancel goes on from whatever state its claim found, unless the run
+    // ended since: the claim fenced out whoever drove it since the check.
+    match cancelling {
+        true if record.status.is_terminal() => {
+            return Err(RunError::Terminal {
+                run_id,
+                status: record.status,
+            });
+        }
+        true => {}
+        false => check(&record, &agent, reply.as_ref())?,
+    }
     // A family this process still holds (the run suspended here) is taken
     // over as it is; its children never went through a crash.
     let family = drive_family(&agent, &driving, &run_id, &record.session_id);
@@ -258,7 +274,11 @@ pub(super) async fn continue_run(
     let (assistant_seq, turn) = turn_events(&events);
     let mut commit = None;
     let mut answered = Vec::new();
-    let step = match reconcile(checkpoint, &events, &entries)? {
+    let recovery = reconcile(checkpoint, &events, &entries)?;
+    let step = match recovery {
+        recovery if cancelling => cancel::step(recovery, || {
+            batch_calls(checkpoint, assistant_seq, &events, &entries)
+        })?,
         Recovery::Started { prompt, appended } => Step::Prompt {
             prompt,
             appended,
@@ -294,19 +314,7 @@ pub(super) async fn continue_run(
                 _ => HashMap::new(),
             };
             let (decisions, changed) = decided(decisions, &pending, given);
-            // A batch can suspend after some of its calls ran (a re-plan on
-            // resume): read every call's state from the events after the
-            // response, so nothing runs twice.
-            let batch = Checkpoint {
-                phase: Phase::ToolBatch {
-                    decisions: decisions.clone(),
-                    after_seq: assistant_seq,
-                },
-                ..checkpoint.clone()
-            };
-            let Recovery::ToolBatch { calls, .. } = reconcile(&batch, &events, &entries)? else {
-                unreachable!("a tool batch checkpoint reconciles to a tool batch");
-            };
+            let calls = batch_calls(checkpoint, assistant_seq, &events, &entries)?;
             if changed {
                 commit = Some(decisions.clone());
             }
@@ -325,17 +333,7 @@ pub(super) async fn continue_run(
                 }
                 _ => HashMap::new(),
             };
-            let batch = Checkpoint {
-                phase: Phase::ToolBatch {
-                    decisions: decisions.clone(),
-                    after_seq: assistant_seq,
-                },
-                ..checkpoint.clone()
-            };
-            let Recovery::ToolBatch { mut calls, .. } = reconcile(&batch, &events, &entries)?
-            else {
-                unreachable!("a tool batch checkpoint reconciles to a tool batch");
-            };
+            let mut calls = batch_calls(checkpoint, assistant_seq, &events, &entries)?;
             // Each answer is its call's start and end, committed before the
             // run goes on: the model reads the durable result.
             for call in &mut calls {
@@ -406,6 +404,10 @@ pub(super) async fn continue_run(
             appended,
         },
         Recovery::Unshortened => Step::Unshortened,
+        // A cancel's intent is durable: every continuation finishes it.
+        Recovery::Aborting { message, appended } => {
+            Step::Abort(cancel::Unpaired::Saved { message, appended })
+        }
     };
     let mut journal = Journal::new(Arc::clone(&agent.runs), lease, record.last_seq);
     held.watch(&journal);
@@ -451,15 +453,17 @@ pub(super) async fn continue_run(
     if let Some(family) = &family {
         crate::subagents::reattach(&agent, family, &run, &events).await;
     }
-    let mut runner = Runner::new(
-        agent,
-        journal,
-        outbox,
-        run,
-        options.cancel,
-        entries,
-        progress,
-    );
+    // A cancel's run sees its token cancelled from the start, so a step
+    // that would call a provider ends the run instead.
+    let token = match cancelling {
+        true => {
+            let token = CancellationToken::new();
+            token.cancel();
+            token
+        }
+        false => options.cancel,
+    };
+    let mut runner = Runner::new(agent, journal, outbox, run, token, entries, progress);
     runner.family = family;
     runner.budget = budget;
     runner.schema_retries = structured::retries_spent(&events);
@@ -485,6 +489,28 @@ pub(super) async fn continue_run(
         runner.drive(step).await
     })
     .await
+}
+
+/// Every call of the batch of the response at `assistant_seq` (a batch
+/// can suspend after some of its calls ran: a re-plan on resume), read
+/// from the events after it, so nothing runs twice.
+fn batch_calls(
+    checkpoint: &Checkpoint,
+    assistant_seq: u64,
+    events: &[Envelope],
+    entries: &[crate::session_log::LogEntry],
+) -> Result<Vec<ToolRecovery>, RunError> {
+    let batch = Checkpoint {
+        phase: Phase::ToolBatch {
+            decisions: Vec::new(),
+            after_seq: assistant_seq,
+        },
+        ..checkpoint.clone()
+    };
+    let Recovery::ToolBatch { calls, .. } = reconcile(&batch, events, entries)? else {
+        unreachable!("a tool batch checkpoint reconciles to a tool batch");
+    };
+    Ok(calls)
 }
 
 /// The family of `run_id` this run's stream drives from now on, when the
@@ -585,7 +611,9 @@ fn last_stop(events: &[Envelope]) -> StopReason {
 /// that is not awaiting approval, and an answer on one not awaiting input.
 /// A run whose approve or answer committed is in its tool batch and may
 /// still have a live owner, so a second one (a retry, or a second click) is
-/// refused too: the host resumes it.
+/// refused too: the host resumes it. A cancel takes a run awaiting
+/// either, or one a cancel left half done, under any contract: it runs
+/// nothing of the agent's.
 fn check(record: &RunRecord, agent: &AgentInner, reply: Option<&Reply>) -> Result<(), RunError> {
     if record.status.is_terminal() {
         return Err(RunError::Terminal {
@@ -593,7 +621,8 @@ fn check(record: &RunRecord, agent: &AgentInner, reply: Option<&Reply>) -> Resul
             status: record.status,
         });
     }
-    if record.contract != agent.contract {
+    let cancelling = matches!(reply, Some(Reply::Cancel));
+    if !cancelling && record.contract != agent.contract {
         return Err(RunError::ContractMismatch {
             run_id: record.run_id.clone(),
             expected: agent.contract,
@@ -605,6 +634,10 @@ fn check(record: &RunRecord, agent: &AgentInner, reply: Option<&Reply>) -> Resul
         None => true,
         Some(Reply::Approvals(_)) => matches!(phase, Phase::AwaitingApproval { .. }),
         Some(Reply::Answers(_)) => matches!(phase, Phase::AwaitingInput { .. }),
+        Some(Reply::Cancel) => matches!(
+            phase,
+            Phase::AwaitingApproval { .. } | Phase::AwaitingInput { .. } | Phase::Aborting { .. }
+        ),
     };
     if !suspended {
         return Err(RunError::NotSuspended {

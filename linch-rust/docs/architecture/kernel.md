@@ -76,9 +76,17 @@ bounds them with its `max_retries` instead, a setting in the digest with the
 rest of the spec, counted from durable `verification` events so a resume
 keeps it. The spec's `redaction` and `verification` are left off the wire
 when unset, so an agent without them keeps its digest
-(`tests/e2e_guardrails_off.rs` pins it). The permission policy is not in the
-digest, unlike Python's run contract: `resume` and `approve` take the
-policy the agent has now. The spec's `provider_retry` and
+(`tests/e2e_guardrails_off.rs` pins it). The permission policy is a
+feature (`permissions`) when it is not the default one
+(`PermissionPolicy::is_default`: mode `default` and no layers, `auto_allow`,
+path or command fields), so a run is never resumed or approved under a
+policy that allows more or less than its own, as Python's contract
+(`src/linch/loop/contracts.py:441`) holds it. The default policy decides
+nothing by its `project_root`, so it is left out whatever the root, and the
+digests of default-policy agents stay as they were
+(`tests/e2e_policy_contract.rs` pins one, taken before the policy counted);
+a non-default policy goes in whole, root included. `Agent::cancel` does not
+check the contract. The spec's `provider_retry` and
 `fallback_models` are in the digest with the rest of the spec, so a resumed
 run's fallback, read back from its `model_fallback` events by its place in
 the list, names the same model. Retries are on by default, but the default

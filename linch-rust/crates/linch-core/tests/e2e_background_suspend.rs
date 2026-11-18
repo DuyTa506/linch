@@ -352,3 +352,37 @@ async fn dropping_the_agent_of_a_suspended_parent_aborts_its_children() {
     let calls = provider.calls.lock().unwrap().clone();
     assert_eq!(calls.get(&("a".into(), 0)), Some(&1), "{calls:?}");
 }
+
+/// A cancel of a suspended parent takes its family over, stops its
+/// background children (each writes its abort), records their ends in the
+/// parent's terminal write, and frees the run's place.
+#[tokio::test]
+async fn cancelling_a_suspended_parent_aborts_its_children() {
+    let fixture = Fixture::new();
+    let run_id = fixture.suspend().await;
+    assert!(fixture.agent.parked_children(&run_id).is_some());
+    let cancel = fixture.agent.cancel(run_id.clone(), RunOptions::new("s1"));
+    let cancelled = tokio::time::timeout(Duration::from_secs(5), cancel).await;
+    assert!(cancelled.expect("the children stop").unwrap());
+
+    assert_eq!(fixture.status("r1").await, RunStatus::Aborted);
+    for child in ["r1:sub_0", "r1:sub_1"] {
+        assert_eq!(fixture.status(child).await, RunStatus::Aborted, "{child}");
+    }
+    assert!(fixture.agent.parked_children(&run_id).is_none());
+    let events = fixture.stores.runs.events(NS, &run_id, 0).await.unwrap();
+    // The children stop concurrently, so their ends land in either order.
+    let mut ended: Vec<_> = (events.iter())
+        .filter_map(|envelope| match &envelope.event {
+            Event::ChildRunStatus(end) if end.status == RunStatus::Aborted => {
+                Some(end.child_run_id.to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    ended.sort();
+    assert_eq!(ended, ["r1:sub_0", "r1:sub_1"], "{ended:?}");
+    assert_eq!(*fixture.write_runs.lock().unwrap(), HashMap::new());
+    let calls = fixture.provider.calls.lock().unwrap().clone();
+    assert_eq!(calls.get(&("a".into(), 0)), Some(&1), "{calls:?}");
+}

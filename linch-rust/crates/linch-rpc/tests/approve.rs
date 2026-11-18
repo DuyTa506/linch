@@ -122,3 +122,52 @@ async fn approving_a_finished_run_ends_with_terminal() {
         .expect("terminal");
     assert_eq!(error.code, code::TERMINAL);
 }
+
+/// `run.cancel` with the agent handle ends a run suspended for approval
+/// that the connection no longer drives: its call gets an aborted result,
+/// the run ends `aborted`, and a late approve ends with `Terminal`.
+#[tokio::test]
+async fn cancel_ends_a_suspended_run_through_the_stores() {
+    let mut run = suspended().await;
+    let bare = json!({"run_id": run.run_id});
+    let cancelled = run.rpc.call(method::RUN_CANCEL, bare).await.unwrap();
+    assert_eq!(cancelled, json!({"cancelled": false}), "not driven here");
+
+    let params = json!({"agent": run.agent, "run_id": run.run_id});
+    let cancelled = run.rpc.call(method::RUN_CANCEL, params.clone()).await;
+    assert_eq!(cancelled.unwrap(), json!({"cancelled": true}));
+    let replay = json!({"agent": run.agent, "run_id": run.run_id});
+    let events = run.rpc.call(method::RUN_EVENTS, replay).await.unwrap();
+    let events: Vec<linch::Envelope> = serde_json::from_value(events["events"].clone()).unwrap();
+    let events: Vec<Event> = events.into_iter().map(|e| e.event).collect();
+    assert_eq!(result_subtype(&events), ResultSubtype::Aborted);
+    let aborted = events.iter().any(|event| {
+        matches!(event, Event::ToolCallEnd(end) if end.tool_use_id() == "call_1" && end.result.is_error)
+    });
+    assert!(aborted, "{events:?}");
+    assert!(!run.dir.path().join("new.txt").exists());
+
+    let again = run.rpc.call(method::RUN_CANCEL, params).await.unwrap();
+    assert_eq!(again, json!({"cancelled": false}));
+    let late = json!({"agent": run.agent, "run_id": run.run_id, "decisions": {}});
+    run.rpc.accepted(method::RUN_APPROVE, late).await;
+    let error = run
+        .rpc
+        .until_end(&run.run_id)
+        .await
+        .error
+        .expect("terminal");
+    assert_eq!(error.code, code::TERMINAL);
+}
+
+/// A store cancel names an open agent and an existing run.
+#[tokio::test]
+async fn a_store_cancel_needs_an_open_agent_and_a_known_run() {
+    let run = suspended().await;
+    let params = json!({"agent": "agent-99", "run_id": run.run_id});
+    let error = run.rpc.call(method::RUN_CANCEL, params).await.unwrap_err();
+    assert_eq!(code_of(error), code::AGENT_NOT_FOUND);
+    let params = json!({"agent": run.agent, "run_id": "nope"});
+    let error = run.rpc.call(method::RUN_CANCEL, params).await.unwrap_err();
+    assert_eq!(code_of(error), code::NOT_FOUND);
+}

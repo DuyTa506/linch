@@ -372,6 +372,63 @@ impl Agent {
         runner::resume(Arc::clone(&self.inner), run_id, Some(reply), options)
     }
 
+    /// Cancel `run_id` through the run store: end a run that waits for an
+    /// approval or an answer, here or in another process, with a `Result`
+    /// of subtype `aborted`.
+    ///
+    /// A run this host drives is cancelled with the token it was given
+    /// ([`RunOptions::cancel`]); this call is for a run no stream drives.
+    /// It claims the run like an approve, which fences out any earlier
+    /// holder, and commits an `aborted` result for each call of the last
+    /// response that has none (the interrupted placeholder for one that
+    /// started), with the cancel's intent, before anything else. Then the
+    /// results go into the session, so a later run there sees every call
+    /// answered, and the run ends with status `aborted`. A crash in
+    /// between leaves the intent durable: [`Agent::resume`] or another
+    /// cancel finishes the abort, and an approve or an answer gets
+    /// `NotSuspended`. Background subagents the run kept here are
+    /// cancelled and write their aborts. The contract is not checked: a
+    /// run started under another contract can still be cancelled.
+    ///
+    /// A cancel and an approve (or an answer) that race both pass their
+    /// checks; the later claim fences out the earlier one, so exactly one
+    /// ends the run's suspension. When the approve claims last, the cancel
+    /// ends with `LeaseLost` (or, if the approve already ended the run,
+    /// returns `false`); when the cancel claims last, the approve's next
+    /// write fails with `LeaseLost`, or its check finds the run aborted
+    /// (`Terminal`). On a store whose claims expire, a cancel of a run
+    /// another process drives is refused with `RunLeased`.
+    ///
+    /// Args:
+    ///     run_id: The run to cancel.
+    ///     options: The owner name for the claim; the principal reaches the
+    ///         hooks of the abort. A cancel token already cancelled makes
+    ///         the call do nothing.
+    ///
+    /// Returns:
+    ///     `true` when this call ended the run; `false` when there was
+    ///     nothing to cancel: the run is already terminal, or it is not
+    ///     suspended (a run in flight is cancelled by its driver's token).
+    ///
+    /// Raises:
+    ///     RunError: `Store` if the run does not exist, a store call fails,
+    ///         or another process holds its lease (`RunLeased`); `Journal`
+    ///         if a write fails, for example because a racing approve
+    ///         claimed the run since.
+    pub async fn cancel(&self, run_id: RunId, options: RunOptions) -> Result<bool, RunError> {
+        let reply = Some(runner::Reply::Cancel);
+        let mut stream = runner::resume(Arc::clone(&self.inner), run_id, reply, options);
+        let mut ended = false;
+        while let Some(item) = futures::StreamExt::next(&mut stream).await {
+            match item {
+                Ok(envelope) => ended |= matches!(envelope.event, crate::Event::Result(_)),
+                Err(RunError::Terminal { .. } | RunError::NotSuspended { .. }) => return Ok(false),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(ended)
+    }
+
     /// Mark `run_id` failed for good, when it can never continue (its
     /// durable state does not reconcile, or no agent has its contract).
     ///

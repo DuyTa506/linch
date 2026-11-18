@@ -122,13 +122,13 @@ These end a run's stream: iterating the `Run`, or `run.result()`, raises them.
 | `SessionBusy` (-32030) | `session <id> is busy with run <run id>` | The session has a run that is running or waiting for an approval or an answer | Resume, approve, answer or cancel `busy.run_id` first, or queue the prompt ([Runs](./runs.md#one-live-run-per-session)) |
 | `RunError` (-32023) | `conflict: run <id> already exists in <namespace>` | `agent.run(..., run_id=...)` reused an id | Use a fresh id, or `resume` the existing run |
 | `RunNotFound` (-32021) | `run <id> not found in namespace <namespace>` | No such run in the agent's stores; with memory stores, a different `Agent` handle started it, or the server restarted | With memory stores use the handle that started the run; with Postgres check the namespace and DSN |
-| `RunTerminal` (-32026) | `run <id> is Completed and cannot continue` | `resume`, `approve` or `answer` of a finished run; `data["status"]` is its status | Start a new run in the session |
-| `ContractMismatch` (-32025) | `run <id> has contract <expected>, this agent has <found>` (the names of `data`'s keys) | The agent's spec, tools or callbacks differ from the ones the run started with | Reopen with the original config, or let the run finish first ([The run contract](./agent.md#the-run-contract)) |
+| `RunTerminal` (-32026) | `run <id> is Completed and cannot continue` | `resume`, `approve` or `answer` of a finished run, a cancelled one included (`data["status"]` is `aborted`); `data["status"]` is its status | Start a new run in the session |
+| `ContractMismatch` (-32025) | `run <id> has contract <expected>, this agent has <found>` (the names of `data`'s keys) | The agent's spec, tools, callbacks or (when it is not the default) permission policy differ from the ones the run started with; after an upgrade, a run started by an older binary under a non-default policy | Reopen with the original config, or let the run finish first; a suspended run can still be ended with `agent.cancel` ([The run contract](./agent.md#the-run-contract)) |
 | `NotSuspended` (-32027) | `run <id> is not awaiting this approval or answer; if an approve or answer already committed, continue the run with resume` | An approve or answer sent again after it was committed (your process or the connection died), or an answer to a run waiting for an approval | Call `agent.resume(run_id)` ([Runs](./runs.md#approve)) |
 | `PromptBlocked` (-32029) | the callback's reason, in `.reason` | A `user_prompt_submit` callback blocked the prompt | Nothing was written; change the prompt or the callback |
 | `InvalidOutputSchema` (-32031) | `run <id> was not started: its output schema is unusable: <reason>` | `agent.run(..., output_schema=...)` got a schema that does not compile, or whose root is not `{"type": "object"}` | Nothing was written; fix the schema ([Structured output](./structured-output.md)) |
-| `RunLeased` (-32033) | `run <id> is held by "<owner>" for up to <duration> more` | Another server (another agent handle) drives the run on Postgres, or crashed less than a lease ago | Wait for that run to stop, or retry after `.expires_in` seconds ([Stores](./stores.md#run-leases)) |
-| `LeaseLost` (-32022) | `lease on run <id> lost (epoch <n>)` | Another server took the run over (this one stalled past its lease) or failed it | Nothing to fix here: the run's new driver has it. If this server was paused, check for long GC or network pauses, or raise `stores.lease_ttl_ms` |
+| `RunLeased` (-32033) | `run <id> is held by "<owner>" for up to <duration> more` | Another server (another agent handle) drives the run on Postgres, or crashed less than a lease ago; from `agent.cancel`, an approve elsewhere has just claimed the suspended run | Wait for that run to stop, or retry after `.expires_in` seconds ([Stores](./stores.md#run-leases)) |
+| `LeaseLost` (-32022) | `lease on run <id> lost (epoch <n>)` | Another server took the run over (this one stalled past its lease) or failed it; from `agent.cancel`, an approve or answer claimed the run after the cancel did, and it goes on | Nothing to fix here: the run's new driver has it. If this server was paused, check for long GC or network pauses, or raise `stores.lease_ttl_ms` |
 | `InvalidAnswer` (-32032) | `run <id> cannot take this answer: <reason>` (the reason in `.reason`) | `agent.answer` named a request that is not pending, left a question unanswered, or gave a list to a single-select question | Nothing was written and the run still waits; answer again ([Tools](./tools.md#ask-the-user)) |
 
 Raised by the call itself:
@@ -137,6 +137,11 @@ Raised by the call itself:
 |---|---|---|
 | `RunBusy` (-32002) | This server already drives that run, for example a `resume` while you still stream it | Wait for the stream to end, or `cancel()` it |
 | `ConnectionClosed` | The `Agent` belongs to a server that has exited; a handle works only on the server that opened it | Open the agent again on a new `Server` |
+
+`agent.cancel` and `run.cancel()` of a suspended run raise `RunNotFound`,
+`RunLeased` and `LeaseLost` themselves, with the causes above. `False` from
+them is not an error: the run had already finished, or it is running and
+this connection does not drive it ([Runs](./runs.md#cancel-a-suspended-run)).
 
 A run that fails inside, without an exception, ends with an `error` event and a
 `result` of subtype `error`:

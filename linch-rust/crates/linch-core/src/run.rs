@@ -162,6 +162,15 @@ pub enum Phase {
         /// Delivery attempt of the primary call that follows, from 1.
         attempt: u32,
     },
+    /// The run was cancelled (see [`crate::Agent::cancel`]): `message`,
+    /// the results that pair the last response's tool calls, goes into
+    /// the session, then the run ends `aborted`. It may not be in the
+    /// session yet. Every continuation of the run finishes the abort; an
+    /// approve or an answer gets `NotSuspended`.
+    Aborting {
+        /// The user message to append.
+        message: Message,
+    },
 }
 
 /// Durable progress of a running run.

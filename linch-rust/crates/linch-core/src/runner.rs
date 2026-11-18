@@ -64,6 +64,7 @@ pub(crate) use start::Reply;
 pub(crate) use write::session_log;
 
 mod batch;
+mod cancel;
 mod catalog;
 mod compact;
 mod end;

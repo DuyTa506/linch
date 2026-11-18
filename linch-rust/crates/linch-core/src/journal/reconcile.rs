@@ -133,6 +133,14 @@ pub enum Recovery {
     /// refusal forced, and that settled without a summary: the prompt still
     /// does not fit, so the run ends failed.
     Unshortened,
+    /// `Aborting`: append the message unless `appended`, then end the run
+    /// `aborted`.
+    Aborting {
+        /// The results that pair the last response's tool calls.
+        message: Message,
+        /// Whether the message is already in the session.
+        appended: bool,
+    },
 }
 
 /// How one call of a tool batch recovers.
@@ -281,6 +289,10 @@ pub fn reconcile(
             appended: cleared(checkpoint, session)?,
             before: *before,
             attempt: *attempt,
+        }),
+        Phase::Aborting { message } => Ok(Recovery::Aborting {
+            appended: appended(checkpoint, session, message)?,
+            message: message.clone(),
         }),
     }
 }

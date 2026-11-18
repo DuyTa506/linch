@@ -262,3 +262,30 @@ async def test_a_server_that_exits_frees_its_runs_at_once(pg_dsn: str) -> None:
         result = await (await agent.resume(run.id)).result()
 
     assert isinstance(result, ResultEvent) and result.final_text == "Recovered."
+
+
+async def test_a_suspended_run_is_cancelled_by_another_server(pg_dsn: str) -> None:
+    stores = leased_stores(pg_dsn)
+    wait, started = blocking_tool(scope="write")
+    first = config([tool_turn("call_1", "wait", {"q": "x"})], stores=stores)
+    async with Server() as server:
+        agent = await server.open_agent(first, tools=[wait])
+        run = await agent.run("s1", "Wait for x")
+        assert isinstance(await run.result(), SuspendedEvent)
+
+    # Another config, so another contract: a cancel does not check it.
+    second = config([text_turn("Next.")], mode="skip_dangerous", stores=stores)
+    async with Server() as server:
+        agent = await server.open_agent(second, tools=[wait])
+        assert await agent.cancel(run.id)
+        events = [e.event for e in await agent.events(run.id)]
+        late = await agent.approve(run.id, {"call_1": Allow()})
+        with pytest.raises(RunTerminal):
+            await late.result()
+        assert not await agent.cancel(run.id)
+
+    assert not started.is_set()
+    [end] = [e for e in events if isinstance(e, ToolCallEndEvent)]
+    assert end.is_error and end.result["content"][0]["text"] == "Tool call aborted"
+    result = events[-1]
+    assert isinstance(result, ResultEvent) and result.subtype == "aborted"

@@ -51,9 +51,13 @@ class Run:
         run_id: str,
         queue: RunQueue,
         observer: Observer | None = None,
+        agent: str | None = None,
     ) -> None:
         self.id = run_id
         self._conn = conn
+        # The handle of the agent that started it, for a cancel through
+        # its stores once the server no longer drives it.
+        self._agent = agent
         self._queue = queue
         self._observer = observer
         # Envelopes received and not yet yielded, still raw.
@@ -102,14 +106,25 @@ class Run:
     async def cancel(self) -> bool:
         """Abort the run; it ends with a `result` of subtype `aborted`.
 
-        The run's envelopes that arrive meanwhile are kept for iteration,
-        so the answer never waits behind a full queue.
+        A run the server drives is aborted where it stands. A run that
+        waits for an approval or an answer (its stream ended with
+        `suspended`) is ended through the agent's stores, as
+        `Agent.cancel` does. The run's envelopes that arrive meanwhile are
+        kept for iteration, so the answer never waits behind a full queue.
 
         Returns:
-            Whether the server was driving the run; `False` when it had
-            already ended.
+            Whether the run was cancelled; `False` when there was nothing to
+            cancel: it had already finished.
+
+        Raises:
+            RunLeased: A suspended run is driven by another server now.
+            LeaseLost: An approve or answer took the suspended run over
+                while it was being cancelled.
         """
-        answer = asyncio.ensure_future(self._conn.request("run.cancel", {"run_id": self.id}))
+        params: dict[str, str] = {"run_id": self.id}
+        if self._agent is not None:
+            params["agent"] = self._agent
+        answer = asyncio.ensure_future(self._conn.request("run.cancel", params))
         while not answer.done() and self._end is None:
             item = asyncio.ensure_future(self._queue.get())
             try:

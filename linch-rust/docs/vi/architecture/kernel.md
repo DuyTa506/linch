@@ -77,9 +77,17 @@ giới hạn chúng bằng `max_retries` của spec đó, một thiết lập n�
 phần còn lại của spec, được đếm từ các event `verification` bền vững nên một lần resume
 giữ nguyên nó. `redaction` và `verification` của spec bị bỏ khỏi wire khi không đặt,
 nên một agent không có chúng giữ nguyên digest của mình
-(`tests/e2e_guardrails_off.rs` ghim điều này). Chính sách permission không nằm trong
-digest, khác với hợp đồng run của Python: `resume` và `approve` dùng chính sách mà
-agent có lúc đó. `provider_retry` và
+(`tests/e2e_guardrails_off.rs` ghim điều này). Chính sách permission là một
+feature (`permissions`) khi nó không phải chính sách mặc định
+(`PermissionPolicy::is_default`: mode `default` và không có layer, trường
+`auto_allow`, path hay command), nên một run không bao giờ được resume hay approve
+dưới một chính sách cho phép nhiều hơn hoặc ít hơn chính sách của nó, như hợp đồng
+của Python (`src/linch/loop/contracts.py:441`) giữ. Chính sách mặc định không quyết
+định gì bằng `project_root` của nó, nên nó bị bỏ ra dù root là gì, và digest của các
+agent dùng chính sách mặc định giữ nguyên như cũ
+(`tests/e2e_policy_contract.rs` ghim một cái, lấy trước khi chính sách được tính);
+một chính sách không mặc định được đưa vào đầy đủ, cả root. `Agent::cancel` không
+kiểm tra contract. `provider_retry` và
 `fallback_models` của spec nằm trong digest cùng phần còn lại của spec, nên model
 fallback của một run được resume, đọc lại từ các event `model_fallback` của nó theo
 vị trí trong danh sách, trỏ tới cùng một model. Retry được bật mặc định, nhưng chính

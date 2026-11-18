@@ -110,6 +110,19 @@ async def test_an_answer_that_does_not_fit_leaves_the_run_waiting(asked: Asked) 
     assert isinstance(await run.result(), ResultEvent)
 
 
+async def test_cancelling_a_run_awaiting_input_ends_it(asked: Asked) -> None:
+    assert await asked.agent.cancel(asked.run_id)
+
+    events = [e.event for e in await asked.agent.events(asked.run_id)]
+    [end] = [e for e in events if isinstance(e, ToolCallEndEvent)]
+    assert end.is_error and end.result["content"][0]["text"] == "Tool call aborted"
+    result = events[-1]
+    assert isinstance(result, ResultEvent) and result.subtype == "aborted"
+    late = await asked.agent.answer(asked.run_id, {"ask_1": Answer({"db": "Postgres"})})
+    with pytest.raises(RunTerminal):
+        await late.result()
+
+
 def test_invalid_answer_has_its_code_and_reason() -> None:
     error = error_from({"code": -32032, "message": "no", "data": {"reason": "q1 has no answer"}})
 

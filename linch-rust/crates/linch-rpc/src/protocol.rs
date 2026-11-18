@@ -248,13 +248,20 @@ pub struct RunAccepted {
 pub struct CancelParams {
     /// The run to cancel.
     pub run_id: RunId,
+    /// Agent handle from `agent.open`. With it, a run this connection does
+    /// not drive is cancelled through the agent's stores when it waits for
+    /// an approval or an answer ([`linch::Agent::cancel`]); without it,
+    /// only a driven run is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 /// Result of `run.cancel`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Cancelled {
-    /// Whether the server was driving the run; `false` is not an error.
+    /// Whether the run was cancelled: the server was driving it, or the
+    /// cancel ended it through the stores; `false` is not an error.
     pub cancelled: bool,
 }
 

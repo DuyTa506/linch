@@ -27,7 +27,7 @@ use super::RunIdentity;
 use super::plan::{BatchPlan, PlannedAction, PlannedCall};
 
 /// Model-facing text of a call the run abort stopped or never started.
-const ABORTED: &str = "Tool call aborted";
+pub(crate) const ABORTED: &str = "Tool call aborted";
 
 /// Receives what [`execute`] does, so the run loop can make it durable and
 /// emit events.

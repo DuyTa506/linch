@@ -63,7 +63,7 @@ tới handler của nó. Các kiểu params từ chối trường không biết;
 | `run.resume` | `ResumeParams` (`protocol.rs:178`) | `run.rs:45-50`, qua `claim` | như trên |
 | `run.approve` | `ApproveParams` (`protocol.rs:191`) | `run.rs:52-58`, qua `claim` | như trên |
 | `run.answer` | `AnswerParams` (`protocol.rs:219`) `{agent, run_id, answers, principal?}`, `answers` được khóa theo `request_id` | `run.rs:61-67`, qua `claim` | như trên |
-| `run.cancel` | `CancelParams` | `run.rs:60-69`: hủy một run mà kết nối này điều khiển | `{cancelled}` |
+| `run.cancel` | `CancelParams` `{run_id, agent?}` | `Server::cancel` (`run.rs`): hủy một run mà kết nối này điều khiển bằng token của nó; nếu không, khi có `agent`, kết thúc một run bị tạm dừng bằng `Agent::cancel`, run được tính là đang được điều khiển trong lúc đó nên một approve ở đây nhận `-32002` | `{cancelled}` |
 | `run.events` | `EventsParams` | `agents.rs:87-94`: `Agent::events` | `{events}`, các envelope bền vững sau `after_seq` |
 | `eval.run` | `EvalRunParams` `{agent, cases, scorers?, include_events?}` (`protocol/monitor.rs`) | `server/monitor.rs`: `run_eval` trên agent; chiếm một chỗ run của tenant và đánh dấu agent bận (`agent.close` trả `-32002`) cho đến khi xong; dừng cùng kết nối | kết quả eval dạng JSON (`total`, `passed`, `pass_rate`, `total_cost_usd`, `usage`, `duration_ms`, `cases`) và `markdown`; case hoặc scorer sai là `-32602` |
 | `run.report` | `ReportParams` `{agent, run_id, timeline?}` | `server/monitor.rs`: `build_run_report` trên `Agent::run_record` và `Agent::events` | `{report, markdown}`; run không tồn tại là `-32021` |

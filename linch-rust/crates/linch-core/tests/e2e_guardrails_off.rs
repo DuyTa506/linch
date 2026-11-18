@@ -82,7 +82,9 @@ async fn without_guardrails_requests_checkpoints_and_events_are_unchanged() {
     let agent = AgentBuilder::new(spec())
         .provider(provider.clone())
         .tools(registry(vec![Echo::new("Read", ToolScope::Read, &runs)]))
-        .permissions(policy(PermissionMode::SkipDangerous))
+        // Read calls run in every mode; the default policy keeps the
+        // contract the digests were taken with.
+        .permissions(policy(PermissionMode::Default))
         .run_store(kept.clone())
         .session_store(stores)
         .namespace(NS)
