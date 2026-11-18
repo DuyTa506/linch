@@ -18,6 +18,7 @@ use crate::provider::{ContextSource, Provider, ProviderGate};
 use crate::redaction::Redactor;
 use crate::registration::Registration;
 use crate::registry::ToolRegistry;
+use crate::result_cap::reader::ReadToolResultTool;
 use crate::skills::{Skill, SkillSet, SkillTool};
 use crate::store::{RunStore, SessionStore};
 use crate::structured::{FINAL_TOOL_FEATURE, FinalTool, OutputContract};
@@ -286,6 +287,9 @@ impl AgentBuilder {
         if let Some(problem) = truncation.and_then(|t| t.problem()) {
             return Err(BuildError::Invalid(problem.into()));
         }
+        if let Some(problem) = self.spec.tool_result_cap.as_ref().and_then(|c| c.problem()) {
+            return Err(BuildError::Invalid(problem));
+        }
         if let Some(problem) = self.spec.budget.as_ref().and_then(|b| b.problem()) {
             return Err(BuildError::Invalid(problem.into()));
         }
@@ -367,6 +371,10 @@ impl AgentBuilder {
             let tool = SkillTool::new(Arc::clone(&versions));
             built_ins.register(&self.tools, Arc::new(tool))?;
             skill_versions = Some(versions);
+        }
+        if let Some(cap) = &self.spec.tool_result_cap {
+            let tool = ReadToolResultTool::new(Arc::clone(&sessions), namespace.clone(), cap);
+            built_ins.register(&self.tools, Arc::new(tool))?;
         }
         if let Some(mailbox) = &self.mailbox {
             let tool = SendMessageTool::new(Arc::clone(mailbox));

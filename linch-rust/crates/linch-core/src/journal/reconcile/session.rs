@@ -45,6 +45,26 @@ pub(super) fn appended(
     }
 }
 
+/// Whether a tool batch's results message `pending` was already appended:
+/// like [`appended()`], or as the two entries that `spec.tool_result_cap`
+/// writes in one append, the whole message for the audit projection only and
+/// the cut one for the provider view only, which lands whole or not at all.
+pub(super) fn results_appended(
+    checkpoint: &Checkpoint,
+    session: &[LogEntry],
+    pending: &Message,
+) -> Result<bool, ReconcileError> {
+    let start = usize::try_from(checkpoint.session_len).unwrap_or(usize::MAX);
+    if let Some([LogEntry::Message(whole), LogEntry::Message(shown)]) = session.get(start..)
+        && *whole.message == *pending
+        && (!whole.visible && whole.historical)
+        && (shown.visible && !shown.historical)
+    {
+        return Ok(true);
+    }
+    appended(checkpoint, session, pending)
+}
+
 /// Whether a `Started` run's `prompt` was already appended: like
 /// [`appended()`], except that a session that grew by other entries is not
 /// a conflict. The store admits one live run per session, so those entries

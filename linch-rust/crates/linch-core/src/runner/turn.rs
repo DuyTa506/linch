@@ -33,6 +33,7 @@ use crate::provider::call::ModelCall;
 use crate::provider::{AssistantAssembly, ProviderError};
 use crate::registry::ToolSnapshot;
 use crate::reliability::Standing;
+use crate::result_cap::READ_TOOL;
 use crate::run::{Ending, Phase, RunStatus, StopReason, ToolDecisionRecord};
 use crate::scheduler::{RecordedApproval, RunIdentity};
 use crate::session_log::{LogEntry, SessionLog};
@@ -304,7 +305,8 @@ impl Runner {
         let view = self.log.provider_view();
         let overlay = skills::overlay(&view, &set.overlays)?;
         if let Some(allowed) = &overlay.allowed_tools {
-            let keep = |name: &str| allowed.iter().any(|tool| tool == name);
+            // `ReadToolResult` stays: the markers of a cut result name it.
+            let keep = |name: &str| name == READ_TOOL || allowed.iter().any(|tool| tool == name);
             self.snapshot = Arc::new(self.snapshot.filtered(keep));
             self.narrowed = true;
         }
@@ -368,7 +370,7 @@ impl Runner {
                 Step::Batch(batch) => self.batch(batch).await?,
                 Step::Results { message, appended } => {
                     if !appended {
-                        self.append(message).await?;
+                        self.append_results(message).await?;
                     }
                     // The batch's results are logged, so the session stays
                     // paired when the guard ends the run here.

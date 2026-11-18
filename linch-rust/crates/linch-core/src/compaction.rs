@@ -109,6 +109,9 @@ pub const CLEARED_RESULT: &str = "[tool result elided to save context]";
 /// Leads the summary message, so the model reads it as a recap.
 const SUMMARY_HEADER: &str = "<summary of earlier conversation>\n\n";
 
+/// Bytes the estimate counts as one token.
+pub(crate) const BYTES_PER_TOKEN: u64 = 4;
+
 /// Rough per-image token cost, as in the Python estimator.
 const IMAGE_TOKENS: u64 = 1000;
 
@@ -277,7 +280,7 @@ pub(crate) fn estimate_tokens(messages: &[Arc<Message>]) -> u64 {
             }
         }
     }
-    chars as u64 / 4 + images * IMAGE_TOKENS
+    chars as u64 / BYTES_PER_TOKEN + images * IMAGE_TOKENS
 }
 
 /// Whether a provider view measured at `tokens` (see `Anchor::measure`) is
@@ -838,7 +841,7 @@ pub(crate) fn replacement(
 
 mod clip;
 pub(crate) use clip::{
-    CLIP_REASON, CLIP_STRATEGY, SIZE_REFUSED, Scope, clip, clip_from, folded_budget,
+    CLIP_REASON, CLIP_STRATEGY, SIZE_REFUSED, Scope, clip, clip_from, folded_budget, head_tail,
     last_turn_budget, summary_requests,
 };
 

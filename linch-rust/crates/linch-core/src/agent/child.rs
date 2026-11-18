@@ -8,6 +8,7 @@ use crate::gates::Rules;
 use crate::ids::RunId;
 use crate::message::SystemBlock;
 use crate::registry::ToolSnapshot;
+use crate::result_cap::READ_TOOL;
 use crate::runner::{self, RunStream};
 use crate::skills::SKILL_TOOL;
 use crate::structured::FINAL_TOOL_FEATURE;
@@ -17,7 +18,8 @@ use crate::tool_search::TOOL_SEARCH_TOOL;
 /// Which of the parent's tools a child run sees: never `Subagent` (a child
 /// cannot spawn), the worker tools (it has no workers) nor `tool_search`
 /// (it is offered every tool), and only the named ones when the
-/// definition names any.
+/// definition names any, but always `ReadToolResult`, which the markers of
+/// a cut result name.
 #[derive(Debug, Clone)]
 pub(crate) struct ChildTools {
     only: Option<Vec<String>>,
@@ -33,7 +35,8 @@ impl ChildTools {
 
     fn keeps(&self, name: &str) -> bool {
         ![SUBAGENT_TOOL, CONTINUE_TOOL, STOP_TOOL, TOOL_SEARCH_TOOL].contains(&name)
-            && (self.only.as_ref()).is_none_or(|only| only.iter().any(|n| n == name))
+            && (self.only.as_ref())
+                .is_none_or(|only| name == READ_TOOL || only.iter().any(|n| n == name))
     }
 
     pub(crate) fn apply(&self, snapshot: &ToolSnapshot) -> ToolSnapshot {
@@ -185,5 +188,21 @@ impl AgentInner {
             registrations: Vec::new(),
             reloads: Default::default(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The marker of a cut result names `ReadToolResult`, so a child that
+    /// names its tools still has it.
+    #[test]
+    fn a_child_with_named_tools_keeps_the_read_back_tool() {
+        let named = ChildTools {
+            only: Some(vec!["Read".into()]),
+        };
+        assert!(named.keeps("Read") && named.keeps(READ_TOOL));
+        assert!(!named.keeps("Bash") && !named.keeps(SUBAGENT_TOOL));
     }
 }
