@@ -426,6 +426,17 @@ mod tests {
     }
 
     #[test]
+    fn a_pool_timeout_is_found_under_a_run_error() {
+        let exhausted = || StoreError::Backend(Box::new(linch::postgres::PoolExhausted));
+        let direct = RunError::Store(exhausted());
+        let journaled = RunError::Journal(JournalError::Store(exhausted()));
+        let other = RunError::Store(StoreError::Backend("down".into()));
+        assert!(linch::postgres::is_pool_exhausted(&direct));
+        assert!(linch::postgres::is_pool_exhausted(&journaled));
+        assert!(!linch::postgres::is_pool_exhausted(&other));
+    }
+
+    #[test]
     fn a_schema_newer_than_the_binary_has_a_code_of_its_own() {
         let newer = OpenError::SchemaNewer {
             table: "linch_migrations".into(),

@@ -40,6 +40,7 @@ use sqlx::postgres::{PgConnectOptions, PgConnection, PgPoolOptions};
 use sqlx::{Connection, Postgres, SqlSafeStr, Transaction};
 
 mod codec;
+mod exhausted;
 mod files;
 mod mailbox;
 mod memory;
@@ -51,6 +52,7 @@ mod tasks;
 mod tool_cache;
 
 pub use codec::CodecError;
+pub use exhausted::{ACQUIRE_TIMEOUT, PoolExhausted, is_pool_exhausted};
 pub use files::PgFileBackend;
 pub use mailbox::{DEFAULT_LEASE, PgMailbox};
 pub use memory::{DEFAULT_STATEMENT_TIMEOUT, PgMemoryStore};
@@ -80,8 +82,9 @@ pub const IDLE_PING_AFTER: Duration = Duration::from_secs(1);
 ///
 /// sqlx's own `PgPool::connect` retries a refused connection until its
 /// 30 s acquire timeout, so an unreachable database would hold the caller
-/// that long. Only this first connect is bounded; later waits for a pooled
-/// connection keep sqlx's defaults.
+/// that long. Only this first connect is bounded; a later wait for a pooled
+/// connection lasts [`ACQUIRE_TIMEOUT`] (30 s), then the call fails with a
+/// [`PoolExhausted`] cause.
 ///
 /// The pool pings a connection before handing it out only when it sat
 /// idle for [`IDLE_PING_AFTER`] or longer, and replaces it when the ping
@@ -133,6 +136,7 @@ pub async fn connect(
                 Ok(true)
             })
         })
+        .acquire_timeout(ACQUIRE_TIMEOUT)
         .max_connections(max_connections.get());
     match tokio::time::timeout(timeout, pool.connect_with(options)).await {
         Ok(connected) => connected,

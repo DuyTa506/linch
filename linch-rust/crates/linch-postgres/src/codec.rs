@@ -46,7 +46,7 @@ pub(crate) fn decode_err(column: &'static str) -> impl FnOnce(BoxError) -> Store
 
 /// A database error.
 pub(crate) fn backend(error: sqlx::Error) -> StoreError {
-    StoreError::Backend(Box::new(error))
+    StoreError::Backend(crate::exhausted::backend_source(error))
 }
 
 pub(crate) fn not_found(kind: &'static str, namespace: &str, id: &str) -> StoreError {

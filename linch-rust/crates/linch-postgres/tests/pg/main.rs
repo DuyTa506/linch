@@ -6,6 +6,7 @@ mod claim;
 mod common;
 mod conformance;
 mod crash;
+mod exhausted;
 mod files;
 mod idle;
 mod isolation;

@@ -4,7 +4,7 @@ use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 
 use futures::{FutureExt, StreamExt};
-use linch::{Principal, RunId, RunOptions, RunStream};
+use linch::{Principal, RunError, RunId, RunOptions, RunStream};
 use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::sync::CancellationToken;
 
@@ -213,6 +213,42 @@ impl Server {
             .transpose()
     }
 
+    /// Log, once for the run that hit it, a store call that waited out the
+    /// pool's acquire timeout, with the tenant and what the run's pool held
+    /// then: the only place the tenant and the pool are both known.
+    fn warn_pool_exhausted(&self, error: &RunError, run_id: &RunId) {
+        if !linch::postgres::is_pool_exhausted(error) {
+            return;
+        }
+        let tables = lock(&self.0.tables);
+        let opened = tables
+            .runs
+            .get(run_id)
+            .and_then(|run| tables.opened(&run.agent).ok());
+        let pool = opened.and_then(|opened| opened.agent.pool());
+        let (max, open, idle) = pool.map_or((0, 0, 0), |pool| {
+            let max = pool.options().get_max_connections();
+            (
+                max,
+                pool.size(),
+                u32::try_from(pool.num_idle()).unwrap_or(u32::MAX),
+            )
+        });
+        let tenant = self
+            .0
+            .tenant
+            .as_ref()
+            .map_or("local", |tenant| tenant.name());
+        tracing::warn!(
+            tenant,
+            run = %run_id,
+            max_connections = max,
+            open,
+            in_use = open.saturating_sub(idle),
+            "pool timed out: raise max_pool_connections or lower concurrent runs"
+        );
+    }
+
     /// Forward every envelope as soon as the stream yields it, for the
     /// writer to send in `run.event`s, then send `run.end`.
     pub(super) async fn drive(&self, mut stream: RunStream) {
@@ -227,7 +263,10 @@ impl Server {
             };
             match next {
                 None => break None,
-                Some(Err(error)) => break Some(ErrorObject::from(&error)),
+                Some(Err(error)) => {
+                    self.warn_pool_exhausted(&error, &run_id);
+                    break Some(ErrorObject::from(&error));
+                }
                 Some(Ok(envelope)) => match serde_json::value::to_raw_value(&envelope) {
                     Ok(raw) => self.0.outbox.envelope(run_id.clone(), raw).await,
                     Err(error) => {
