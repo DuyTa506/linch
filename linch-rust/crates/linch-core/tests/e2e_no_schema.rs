@@ -74,7 +74,7 @@ async fn without_a_schema_requests_and_checkpoints_are_unchanged() {
     let requests = provider.requests();
     let checkpoints = kept.checkpoints.lock().unwrap().clone();
     assert_eq!((requests.len(), checkpoints.len()), (2, 7));
-    let both = json!({"requests": requests, "checkpoints": checkpoints});
+    let both = without_breakdowns(json!({"requests": requests, "checkpoints": checkpoints}));
     assert_eq!(
         digest(&both).unwrap().to_string(),
         "cf4547065b65e697910d8f1461c0cf0e4ebb679c02a6a99991b15811f2d54418",

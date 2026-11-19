@@ -21,6 +21,7 @@ ghi "fragment" chỉ trích phần cố định của một thông báo dài hơ
 | `SchedulerError` và các lớp con | -32040 đến -32044 | Lời gọi schedule và job ([Scheduler](#lịch-và-run-nền)) |
 | `WorkflowError` và các lớp con | -32045 đến -32049 | Lời gọi workflow ([Workflow](#workflow)) |
 | `ConnectionClosed` | không có | Mọi lệnh gọi hoặc stream, khi server đã biến mất |
+| `IncompatibleServer`, `HandshakeTimeout` | không có | Khi vào một `Server`: [bắt tay phiên bản](./server.md#bắt-tay-phiên-bản) từ chối server |
 | `LinchError` | không có | Lớp cơ sở của tất cả các lớp trên, và việc dùng sai `Server` |
 
 ---
@@ -57,6 +58,9 @@ Một server do `Server()` khởi động ghi nó ra stderr của process của 
 | ``the server is not started; use `async with Server()` `` (`LinchError`) | Gọi trên một `Server` chưa bao giờ được khởi động hoặc đã đóng | Dùng `async with Server() as server:` và gọi bên trong khối đó |
 | `the server is already started` (`LinchError`) | `start()` được gọi hai lần | Khởi động mỗi `Server` một lần |
 | `the server closed its output` (`ConnectionClosed`) | Tiến trình server đã thoát: bị kill, bị crash, hoặc khối `Server` kết thúc khi một run đang stream | Khởi động `Server` mới. Với kho Postgres, resume run ([Run](./runs.md#resume)); run trong bộ nhớ đã mất |
+| `the server speaks protocol <n> (release <v>), this client speaks protocol <m>` (`IncompatibleServer`; `.protocol`, `.server_version`, `.supported`) khi vào khối | Server và client thuộc các bản phát hành có giao thức wire khác nhau | Dùng client và server cùng một bản phát hành ([Server: Bắt tay phiên bản](./server.md#bắt-tay-phiên-bản)) |
+| `the server has no server.info: it predates the version handshake` (`IncompatibleServer`, `.protocol is None`) khi vào khối | Binary cũ hơn client (`LINCH_SERVER_BIN`, binary đi kèm wheel hoặc một server từ xa) | Nâng server lên đúng bản của client, hoặc trỏ `LINCH_SERVER_BIN` vào một bản build hiện tại |
+| `the server did not answer server.info within <n> s` (`HandshakeTimeout`) khi vào khối | Tiến trình không phải `linch-server`, hoặc nó bị kẹt | Kiểm tra binary và stderr của server |
 | fragment: `reading the server failed:` (`ConnectionClosed`) | Không đọc hoặc phân tích được một dòng của server | Báo cáo kèm stderr của server |
 
 ### Server từ xa (`Server.connect`)

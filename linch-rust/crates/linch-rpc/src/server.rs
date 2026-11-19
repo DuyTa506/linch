@@ -28,7 +28,7 @@ use tokio_util::task::TaskTracker;
 use crate::access::{Tenant, new_server_id};
 use crate::error::{ErrorObject, code, invalid_params, invalid_request};
 use crate::message::{Id, Request, Response};
-use crate::protocol::{RunAccepted, method};
+use crate::protocol::{InfoParams, RunAccepted, ServerInfo, method};
 
 mod agents;
 mod callback;
@@ -339,6 +339,7 @@ impl Server {
 
     async fn dispatch(&self, name: &str, params: JsonObject) -> Result<Reply, ErrorObject> {
         match name {
+            method::SERVER_INFO => server_info(parse(params)?).map(Reply::Value),
             method::AGENT_OPEN => self.open(parse(params)?).await.map(Reply::Value),
             method::AGENT_CLOSE => self.close(parse(params)?).await.map(Reply::Value),
             method::SESSION_CLOSE => self.close_session(parse(params)?).map(Reply::Value),
@@ -395,6 +396,20 @@ impl Server {
             )),
         }
     }
+}
+
+/// `server.info`: the same answer for every caller. The client's own version
+/// only goes to the log, at debug level.
+fn server_info(params: InfoParams) -> Result<JsonValue, ErrorObject> {
+    if let Some(problem) = params.problem() {
+        return Err(invalid_params(&problem));
+    }
+    tracing::debug!(
+        client_version = params.client_version.as_deref(),
+        client_protocol = params.client_protocol,
+        "server.info"
+    );
+    to_value(&ServerInfo::current())
 }
 
 /// An object with no `method` but a `result` or `error` answers a server

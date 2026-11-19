@@ -112,7 +112,7 @@ async fn everything(spec: AgentSpec) -> Value {
 
 #[tokio::test]
 async fn without_compaction_requests_checkpoints_and_events_are_unchanged() {
-    let all = everything(spec()).await;
+    let all = without_breakdowns(everything(spec()).await);
     assert_eq!(
         digest(&all).unwrap().to_string(),
         "27e20b0a3abccda3ca124c56bd7a2fed63a7efc29e6d235f11037a18d0855ef1",
@@ -124,7 +124,7 @@ async fn without_compaction_requests_checkpoints_and_events_are_unchanged() {
 async fn compaction_that_never_runs_changes_nothing() {
     let mut spec = spec();
     spec.compaction = Some(CompactionSpec::new(1_000_000));
-    let all = everything(spec).await;
+    let all = without_breakdowns(everything(spec).await);
     assert_eq!(
         digest(&all).unwrap().to_string(),
         "cf5443c3fe214dd6ac19d5608a0f079f304ebfd9fe8ae899a14cab052161c7ed",

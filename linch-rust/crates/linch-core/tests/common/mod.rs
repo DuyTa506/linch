@@ -406,3 +406,27 @@ pub fn is_summary_call(request: &ProviderRequest) -> bool {
             .starts_with("The conversation to summarize ends above")
     })
 }
+
+/// `value` without the usage breakdowns an event or checkpoint may carry
+/// (`usage_by_model`, `cumulative_by_model`, `subagent_usage`): the golden
+/// digests that pin a run's bytes with a feature off were taken before the
+/// breakdowns, which only add fields.
+pub fn without_breakdowns(mut value: JsonValue) -> JsonValue {
+    match &mut value {
+        JsonValue::Object(object) => {
+            for key in ["usage_by_model", "cumulative_by_model", "subagent_usage"] {
+                object.remove(key);
+            }
+            for field in object.values_mut() {
+                *field = without_breakdowns(field.take());
+            }
+        }
+        JsonValue::Array(items) => {
+            for item in items {
+                *item = without_breakdowns(item.take());
+            }
+        }
+        _ => {}
+    }
+    value
+}

@@ -55,7 +55,7 @@ mod versions;
 pub use builder::AgentBuilder;
 pub use error::{BuildError, RunError};
 pub use fork::ForkError;
-pub use spec::AgentSpec;
+pub use spec::{AgentSpec, CONTRACT_VERSION};
 pub use steer::{MAX_PENDING_STEERS, MAX_STEER_BYTES};
 
 pub(crate) use child::ChildTools;

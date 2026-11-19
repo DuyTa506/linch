@@ -14,6 +14,7 @@ use crate::error::ErrorObject;
 mod call;
 mod exec;
 mod hook;
+mod info;
 pub mod monitor;
 mod open;
 mod schedule;
@@ -26,6 +27,7 @@ pub use hook::{
     HookCallParams, ObserveAnswer, PostToolUseAnswer, PostTurnAnswer, PreToolUseAnswer, StopAnswer,
     ToolExecuteAnswer, UserPromptAnswer, WireToolResult,
 };
+pub use info::{BACKENDS, CAPABILITIES, InfoLimits, InfoParams, PROTOCOL_VERSION, ServerInfo};
 pub use monitor::{EvalReport, EvalRunParams, ReportParams, RunReportResult};
 pub use open::{HostToolSpec, OpenParams};
 pub use schedule::{
@@ -45,6 +47,9 @@ pub use workflow::{
 pub mod method {
     /// The first message on a socket connection: present a bearer token.
     pub const CONNECTION_AUTH: &str = "connection.auth";
+    /// What the server is: its versions, capabilities and main limits. The
+    /// first call a client makes after connecting.
+    pub const SERVER_INFO: &str = "server.info";
     /// Open an agent from an `AgentConfig` plus host tools and callbacks.
     pub const AGENT_OPEN: &str = "agent.open";
     /// Disconnect an agent's MCP servers and free its handle.

@@ -20,6 +20,7 @@ exception class tells you its family:
 | `SchedulerError` and its subclasses | -32040 to -32044 | Schedule and job calls ([Scheduler](#schedules-and-background-runs)) |
 | `WorkflowError` and its subclasses | -32045 to -32049 | Workflow calls ([Workflows](#workflows)) |
 | `ConnectionClosed` | none | Any call or stream, when the server went away |
+| `IncompatibleServer`, `HandshakeTimeout` | none | Entering a `Server`: the [version handshake](./server.md#the-version-handshake) refused the server |
 | `LinchError` | none | The base of all of these, and misuse of `Server` |
 
 ---
@@ -57,6 +58,9 @@ the stderr of your process.
 | `the server is already started` (`LinchError`) | `start()` called twice | Start each `Server` once |
 | `the server closed its output` (`ConnectionClosed`) | The server process exited: it was killed, crashed, or the `Server` block ended while a run was streaming | Start a new `Server`. With Postgres stores, resume the run ([Runs](./runs.md#resume)); memory runs are gone |
 | fragment: `reading the server failed:` (`ConnectionClosed`) | A server line could not be read or parsed | Report it with the server's stderr |
+| `the server speaks protocol <n> (release <v>), this client speaks protocol <m>` (`IncompatibleServer`; `.protocol`, `.server_version`, `.supported`) on entering | The server and the client are of releases whose wire protocols differ | Use a client and a server of the same release ([Server: The version handshake](./server.md#the-version-handshake)) |
+| `the server has no server.info: it predates the version handshake` (`IncompatibleServer`, `.protocol is None`) on entering | The binary is older than the client (`LINCH_SERVER_BIN`, a wheel's bundled binary or a remote server) | Upgrade the server to the client's release, or point `LINCH_SERVER_BIN` at a current build |
+| `the server did not answer server.info within <n> s` (`HandshakeTimeout`) on entering | The process is not a `linch-server`, or it is stuck | Check the binary and the server's stderr |
 
 ### A remote server (`Server.connect`)
 

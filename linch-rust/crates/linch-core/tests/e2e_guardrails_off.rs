@@ -100,12 +100,12 @@ async fn without_guardrails_requests_checkpoints_and_events_are_unchanged() {
     let events: Vec<_> = (envelopes.iter())
         .map(|envelope| clockless(json!({"seq": envelope.seq, "event": envelope.event})))
         .collect();
-    let all = json!({
+    let all = without_breakdowns(json!({
         "requests": requests,
         "checkpoints": checkpoints,
         "events": events,
         "contract": agent.contract().to_string(),
-    });
+    }));
     assert_eq!(
         digest(&all).unwrap().to_string(),
         "27e20b0a3abccda3ca124c56bd7a2fed63a7efc29e6d235f11037a18d0855ef1",
