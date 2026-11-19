@@ -117,14 +117,41 @@ time của một lần lặp. Một ô có thể chuyển giữa một mức nha
 | OpenAI chat | 1243, 1258, 1259 | 445, 425, 303 | 315, 361, 364 |
 | OpenAI responses | 2186, 2144, 2137 | 612, 407, 414 | 316, 530, 533 |
 | Gemini | 1795, 1829, 1810 | 299, 455, 466 | 214, 216, 214 |
-| Anthropic | 291, 282, 336 | 579, 607, 594 | 295, 292, 296 |
 
-Rust giải mã các stream DeepSeek, OpenAI và Gemini nhanh hơn Python khoảng 2.7x đến 8.5x trong
-harness này. Anthropic là ngoại lệ: kernel trong tiến trình ngang Python, và qua client và
-sidecar nó chậm hơn kernel. Con số 594 so với 295 ms trong bảng so một lần chạy 2.0 GHz với một lần
-chạy 3.4 GHz. Ở cùng tần số CPU, đường client bằng 1.15 đến 1.25 lần kernel với pipe stdio 64 KiB và
-1.0 đến 1.08 lần với pipe 1 MiB (362 đến 368 ms so với 292 đến 314 ms ở 3.4 GHz; 313 đến
-317 ms với pipe 1 MiB). Xem [Khoảng trống đã biết](#khoảng-trống-đã-biết).
+Rust giải mã các stream DeepSeek, OpenAI và Gemini nhanh hơn Python khoảng 2.7x đến 8.5x trong harness này. Bốn
+hàng này được đo trên bản build `617715b3` mà không ghi mức tần số, nên trung vị mỗi lượt có thể trộn hai mức; chúng
+không được đo lại. Anthropic được đo lại ở cùng mức (bên dưới), và ở đó Rust không dẫn đầu.
+
+#### Anthropic ở cùng mức tần số CPU
+
+Lần chạy 2026-11-19 trên host nêu trên (tải trung bình 1.7 đến 3.1), build `d1f3cfe5` (các commit sau đó chỉ là tài liệu),
+sha256 của `linch-server` là `adfea51fe982f19f048d6d10634f6d1526fd363f31d544ce259c49d39e5c2198`. Fixture: 20 005 sự kiện
+SSE, 2.49 MB. Mỗi lần lặp có thời gian là một tiến trình riêng (1 lần chạy khởi động, 1 lần chạy tính giờ), ba phía xen kẽ
+nhau, ghim bằng `taskset`. Mỗi lần lặp được xếp mức theo tần số của core giải mã (core của sidecar với `rs-client`):
+nhanh là 3.4 GHz, chậm là 2.0 GHz. Không chọn được mức (một core bận thứ hai vẫn ở 2.0 GHz), nên các cách ghim đạt được
+từng mức được nêu tên. Wall ms mỗi lần lặp, n lần lặp.
+
+| Mức | Ô | n | min | trung vị | p90 | sự kiện/s | MB/s |
+|---|---|---|---|---|---|---|---|
+| nhanh (3.4 GHz) | py | 185 | 277 | 283 | 287 | 70.7 k | 8.8 |
+| nhanh | rs-client, sidecar trên core riêng, core client rảnh ở 0.8 đến 2.0 GHz | 57 | 319 | 374 | 388 | 53.4 k | 6.6 |
+| nhanh | rs-client, client và sidecar dùng chung một core | 35 | 338 | 356 | 418 | 56.1 k | 7.0 |
+| nhanh | rs-kernel | 186 | 224 | 282 | 284 | 71.0 k | 8.8 |
+| chậm (2.0 GHz) | py | 13 | 283 | 479 | 490 | 41.7 k | 5.2 |
+| chậm | rs-client | 33 | 481 | 539 | 636 | 37.1 k | 4.6 |
+| chậm | rs-kernel | 29 | 303 | 508 | 524 | 39.4 k | 4.9 |
+
+Ở cùng mức, Python ngang kernel trong tiến trình (1.00x ở 3.4 GHz: 283 so với 282 ms; 1.06x ở 2.0 GHz, nằm trong độ
+phân tán của 13 lần lặp py ở mức chậm) và nhanh hơn đường client và sidecar 1.26x đến 1.33x ở 3.4 GHz (1.13x ở
+2.0 GHz). Con số 594 so với 295 ms trước đó so một lần chạy 2.0 GHz với một lần chạy 3.4 GHz. Để lấy thang so sánh,
+`rs-kernel` trên fixture DeepSeek (20 004 sự kiện, 4.07 MB) mất 199 ms ở 3.4 GHz (n=187) và 373 ms ở 2.0 GHz (n=61):
+cùng kernel đó cần gấp 1.42 lần thời gian mỗi sự kiện cho Anthropic. Một microbenchmark dùng một lần của các bộ giải mã
+(3.4 GHz, 20 000 sự kiện) cho thấy giải mã JSON mất 325 ns mỗi sự kiện Anthropic với các enum serde có tag (237 ns với một
+struct phẳng) so với 312 ns mỗi chunk chat, và tách khung SSE khoảng 540 ns mỗi sự kiện ở cả hai, nên phần phân tích cú
+pháp chỉ khoảng 17 ms của mỗi ô và không giải thích được khoảng cách; chỗ nó nằm chưa xác định được. Đường Anthropic của
+Python nhanh vì SDK Anthropic kiểm tra một sự kiện bằng một lần gọi pydantic-core, còn SDK OpenAI, cũng phục vụ DeepSeek,
+dựng mỗi chunk bằng Python với khoảng 10 lần gọi `construct_type` (profile, tích lũy 0.67 s so với 8.0 s cho 40 000 sự
+kiện). Xem [Khoảng trống đã biết](#khoảng-trống-đã-biết).
 
 ## Bộ nhớ theo session
 
@@ -288,7 +315,7 @@ cache gì trên model này (block của nó là 2176 token), nên không có k�
   60 lần lặp client đã ghim với công việc giống hệt, 48 lần dùng 507 đến 626 ms CPU của server với
   core đọc được trung vị 1998 MHz, và 12 lần liên tiếp dùng 304 đến 313 ms ở trung vị 3358 MHz. Ghim
   không chọn được mức: một core bận vẫn ở 2.0 GHz hàng chục giây trong một microbenchmark giải mã.
-  Lần chạy final không ghi tần số, nên 594 so với 295 ms của nó trộn hai mức. Vì sao HWP giữ một
+  Lần chạy final không ghi tần số, nên 594 so với 295 ms của nó trộn hai mức; hàng Anthropic đã được đo lại với mức ghi theo từng lần lặp (phần trên). Vì sao HWP giữ một
   core bận ở base trong nhiều giây chưa xác định được (cần công cụ root: MSR, `turbostat`).
 - Phương pháp: mỗi ô benchmark phải ghi mức tần số CPU của từng lần lặp và so sánh ở cùng mức.
 - Đường client của case 6 so với kernel, đã profile (3.4 GHz, pipe 64 KiB, 30 lần lặp mỗi nấc, trung
@@ -332,7 +359,7 @@ cache gì trên model này (block của nó là 2176 token), nên không có k�
 
 ### Chưa đo hoặc còn yếu
 
-- Các ô case 6 của lần chạy final không ghi mức tần số CPU, nên trung vị theo lượt của chúng trộn các mức. Các tỉ lệ cùng điều kiện đến từ lần profile sau đó (xem [Chưa giải thích được](#chưa-giải-thích-được)), chạy dưới tải host 2.3 đến 27 và không build lại các binary.
+- Các ô case 6 của lần chạy final, trừ Anthropic, không ghi mức tần số CPU, nên trung vị theo lượt của chúng trộn các mức; các hàng DeepSeek, OpenAI và Gemini không được đo lại ở cùng mức. Trong lần chạy Anthropic ở cùng mức, `rs-client` ở 3.4 GHz có core client ở 0.8 đến 2.0 GHz hoặc dùng chung core với sidecar (không cách ghim nào đặt cả hai ở 3.4 GHz trên các core riêng), và ô Python ở 2.0 GHz có n=13. Vì sao kernel mất gấp 1.42 lần thời gian mỗi sự kiện trên fixture Anthropic so với DeepSeek chưa xác định được. Các tỉ lệ cùng điều kiện đến từ lần profile sau đó (xem [Chưa giải thích được](#chưa-giải-thích-được)), chạy dưới tải host 2.3 đến 27 và không build lại các binary.
 - Loop, tool, khởi động, throughput 16 session và các provider giải mã khác là một lượt từ lần chạy earlier.
 - Bảng agent nhàn rỗi chỉ có memory store; các ô bộ nhớ của kho Postgres (backend cho mỗi
   agent, kích thước pool) không được lặp lại trong lần chạy final. Bộ nhớ của một run đang
