@@ -274,6 +274,57 @@ CI, and not against gVisor or a VM runtime at all: try your configuration
 with a command that must fail (reading a file outside the workspace) before
 you trust it.
 
+## Live tests
+
+`python/tests/live/test_ts_backends.py` runs each guarantee below through a
+real `linch-server` and a real backend, with a scripted model (no LLM). Each
+test name states the guarantee. A case skips with its reason when the host
+cannot run it (not Linux, no Landlock ABI 6, no docker access), so CI without
+docker stays green.
+
+| Guarantee | `local` | `sandbox` | `docker` |
+|---|---|---|---|
+| A command returns its output and exit status; the run survives a failing one | yes | yes | yes |
+| A command starts in the workspace and its files are the file tools' files | yes | yes | yes |
+| No server secret reaches the command's environment | yes | yes | yes |
+| The server's own `environ` is unreadable from the command | n/a | yes | yes |
+| A write outside the workspace does not reach the host | n/a | yes | yes |
+| A host file beside the workspace cannot be read | n/a | yes | yes |
+| A forbidden syscall is an error result, not a crash | n/a | yes | n/a |
+| A command cannot `ptrace` a process outside the sandbox | n/a | yes | n/a |
+| No capabilities, `no-new-privileges`, `mount` refused | n/a | n/a | yes |
+| Memory, CPU time and file size limits fail inside the command | n/a | yes | memory only |
+| A fork bomb stays bounded and the run survives | n/a | yes | yes |
+| The network is off by default | n/a | yes | yes |
+| A timeout kills the whole process tree, no orphan | yes | yes | yes |
+| A 100 MB stream is capped and the server's memory stays small | yes | yes | yes |
+| Cancelling a run leaves no process and no container | yes | yes | yes |
+| `kill -9` of the server leaves no process (background command for `local` and `sandbox`) and no container | yes | yes | yes |
+| `docker inspect` shows the user, dropped capabilities, limits, read-only root, network and the one mount | n/a | n/a | yes |
+
+The `sandbox` and `local` cases run with `LINCH_SERVER_BIN` set:
+
+```sh
+cd linch-rust/python
+LINCH_SERVER_BIN=/path/to/linch-server pytest -m live tests/live/test_ts_backends.py
+```
+
+The `docker` cases also need `LINCH_LIVE_DOCKER=1`, so they never run by
+accident. They use `LINCH_LIVE_DOCKER_IMAGE` (default `alpine:3.20`, pulled when
+absent), cap each container (256 MiB, half a CPU, 64 processes), and name them
+`linch-live-<id>` through a `docker_path` wrapper, so
+`docker ps -a --filter name=linch-live-` finds any leftover. A user who
+reaches the daemon through the `docker` group runs them as:
+
+```sh
+LINCH_LIVE_DOCKER=1 LINCH_SERVER_BIN=/path/to/linch-server \
+  sg docker -c 'pytest -m live tests/live/test_ts_backends.py'
+```
+
+Other guarantees (Landlock paths, `/etc` allowlist, namespaces, Unix sockets,
+the sandbox with the network on) are covered by `crates/linch-tools/tests/sandbox.rs`
+and `python/tests/live/test_ts_sandbox.py`.
+
 ## On a server
 
 A remote tenant may use only the backends its server lists, each with the

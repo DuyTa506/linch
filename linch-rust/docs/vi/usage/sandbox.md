@@ -251,6 +251,54 @@ Backend docker không được kiểm chứng với một Docker daemon trong CI
 toàn không được kiểm chứng với gVisor hay một runtime VM: hãy thử cấu hình của bạn với một lệnh
 bắt buộc phải lỗi (đọc một tệp ngoài workspace) trước khi tin vào nó.
 
+## Kiểm thử live
+
+`python/tests/live/test_ts_backends.py` chạy từng đảm bảo dưới đây qua một `linch-server` thật và
+một backend thật, với model có kịch bản (không có LLM). Tên mỗi test nêu đảm bảo của nó. Một case
+bị bỏ qua kèm lý do khi máy không chạy được (không phải Linux, không có Landlock ABI 6, không truy
+cập được docker), nên CI không có docker vẫn xanh.
+
+| Đảm bảo | `local` | `sandbox` | `docker` |
+|---|---|---|---|
+| Lệnh trả output và exit status; run sống sót khi một lệnh lỗi | có | có | có |
+| Lệnh bắt đầu trong workspace và tệp của nó là tệp của công cụ file | có | có | có |
+| Không bí mật nào của server lọt vào môi trường của lệnh | có | có | có |
+| `environ` của server không đọc được từ lệnh | n/a | có | có |
+| Ghi ngoài workspace không tới được host | n/a | có | có |
+| Không đọc được tệp host nằm cạnh workspace | n/a | có | có |
+| Syscall bị cấm cho kết quả lỗi, không làm sập | n/a | có | n/a |
+| Lệnh không `ptrace` được tiến trình ngoài sandbox | n/a | có | n/a |
+| Không có capability, `no-new-privileges`, `mount` bị từ chối | n/a | n/a | có |
+| Giới hạn bộ nhớ, thời gian CPU, cỡ tệp lỗi bên trong lệnh | n/a | có | chỉ bộ nhớ |
+| Fork bomb bị chặn và run sống sót | n/a | có | có |
+| Mạng tắt theo mặc định | n/a | có | có |
+| Timeout giết cả cây tiến trình, không mồ côi | có | có | có |
+| Luồng 100 MB bị cắt và bộ nhớ server vẫn nhỏ | có | có | có |
+| Hủy run không để lại tiến trình hay container | có | có | có |
+| `kill -9` server không để lại tiến trình (lệnh nền với `local` và `sandbox`) hay container | có | có | có |
+| `docker inspect` cho thấy user, capability bị bỏ, giới hạn, root chỉ đọc, mạng và một mount duy nhất | n/a | n/a | có |
+
+Các case `sandbox` và `local` chạy khi đặt `LINCH_SERVER_BIN`:
+
+```sh
+cd linch-rust/python
+LINCH_SERVER_BIN=/path/to/linch-server pytest -m live tests/live/test_ts_backends.py
+```
+
+Các case `docker` còn cần `LINCH_LIVE_DOCKER=1`, để không bao giờ chạy nhầm. Chúng dùng
+`LINCH_LIVE_DOCKER_IMAGE` (mặc định `alpine:3.20`, tự pull nếu thiếu), giới hạn mỗi container
+(256 MiB, nửa CPU, 64 tiến trình) và đặt tên `linch-live-<id>` qua một wrapper `docker_path`, nên
+`docker ps -a --filter name=linch-live-` tìm ra mọi container còn sót. Người dùng truy cập daemon
+qua nhóm `docker` chạy chúng như sau:
+
+```sh
+LINCH_LIVE_DOCKER=1 LINCH_SERVER_BIN=/path/to/linch-server \
+  sg docker -c 'pytest -m live tests/live/test_ts_backends.py'
+```
+
+Các đảm bảo khác (đường dẫn Landlock, allowlist `/etc`, namespace, socket Unix, sandbox bật mạng)
+được phủ bởi `crates/linch-tools/tests/sandbox.rs` và `python/tests/live/test_ts_sandbox.py`.
+
 ## Trên server
 
 Một tenant từ xa chỉ được dùng các backend mà server của nó liệt kê, mỗi cái với
