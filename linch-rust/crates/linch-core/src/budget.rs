@@ -15,6 +15,15 @@
 //! Python does: the cap could no longer be kept. The first charge that
 //! reaches `warn_ratio` of a cap adds a `budget` `warning`, once per tree.
 //!
+//! A subagent definition may carry a budget of its own
+//! ([`SubagentDefinition::budget`](crate::SubagentDefinition)): each child
+//! run of it charges a meter *within* the tree's, so its spend counts for
+//! both. The tree is checked first (an exhausted tree refuses the child
+//! with the run's own `BudgetExceededError`); then the child's cap, which
+//! ends that child with a `BudgetExceededError` whose message says
+//! `subagent budget`, and not the parent. Its warning fires once per child
+//! run, beside the tree's once per tree.
+//!
 //! The meter is not a durable record of its own. A root run that resumes
 //! sums the receipts in its log and in the logs of its child runs (each
 //! `<run id>:<tool_use_id>` of a `Subagent` or `SubagentContinue` call), so
@@ -142,6 +151,8 @@ fn tokens(usage: &Usage) -> u64 {
 pub(crate) enum Refusal {
     /// A cap is reached; the event reports the spend.
     Exceeded(BudgetEvent),
+    /// The cap of a subagent definition is reached by one child run.
+    SubagentExceeded(BudgetEvent),
     /// A capped budget cannot account for a call of the tree.
     Unknown,
     /// A cost cap cannot count a call the pricing has no rate for.
@@ -156,6 +167,14 @@ impl Refusal {
                 "name": "BudgetExceededError",
                 "message": format!(
                     "run budget exhausted ({} tokens, ${:.4} spent)",
+                    event.spent_tokens, event.spent_usd
+                ),
+                "retryable": false,
+            }),
+            Self::SubagentExceeded(event) => json!({
+                "name": "BudgetExceededError",
+                "message": format!(
+                    "subagent budget exhausted ({} tokens, ${:.4} spent)",
                     event.spent_tokens, event.spent_usd
                 ),
                 "retryable": false,
@@ -185,6 +204,10 @@ pub(crate) struct Meter(Arc<Inner>);
 struct Inner {
     limits: RunBudget,
     spent: Mutex<Spent>,
+    /// The meter this one is within: what it charges, it charges too.
+    within: Option<Meter>,
+    /// Whether this is a child run's own cap (a subagent definition's).
+    subagent: bool,
 }
 
 impl Meter {
@@ -193,6 +216,20 @@ impl Meter {
         Self(Arc::new(Inner {
             limits,
             spent: Mutex::new(spent),
+            within: None,
+            subagent: false,
+        }))
+    }
+
+    /// A meter for a child run's own `limits` that has spent `spent`
+    /// already, within `tree` when the run has one: it charges both, and
+    /// the tree refuses first.
+    pub(crate) fn within(tree: Option<Meter>, limits: RunBudget, spent: Spent) -> Self {
+        Self(Arc::new(Inner {
+            limits,
+            spent: Mutex::new(spent),
+            within: tree,
+            subagent: true,
         }))
     }
 
@@ -204,6 +241,9 @@ impl Meter {
     /// Charge a settled receipt.
     pub(crate) fn charge(&self, receipt: &ModelCallReceiptEvent) {
         self.spent().charge(receipt);
+        if let Some(tree) = &self.0.within {
+            tree.charge(receipt);
+        }
     }
 
     fn event(&self, kind: BudgetKind, spent: &Spent) -> BudgetEvent {
@@ -218,6 +258,11 @@ impl Meter {
 
     /// The warning, the first time the spend reaches `warn_ratio` of a cap.
     pub(crate) fn take_warning(&self) -> Option<BudgetEvent> {
+        self.take_own_warning()
+            .or_else(|| self.0.within.as_ref()?.take_warning())
+    }
+
+    fn take_own_warning(&self) -> Option<BudgetEvent> {
         let limits = &self.0.limits;
         let mut spent = self.spent();
         let ratio = limits.warn_ratio;
@@ -232,12 +277,19 @@ impl Meter {
 
     /// Why the next call may not start; `None` when it may.
     pub(crate) fn refusal(&self) -> Option<Refusal> {
+        if let Some(refusal) = self.0.within.as_ref().and_then(Meter::refusal) {
+            return Some(refusal);
+        }
         let limits = &self.0.limits;
         let spent = *self.spent();
         let exceeded = (limits.max_tokens).is_some_and(|max| spent.tokens >= max)
             || (limits.max_cost_usd).is_some_and(|max| spent.usd >= max);
         if exceeded {
-            return Some(Refusal::Exceeded(self.event(BudgetKind::Exceeded, &spent)));
+            let event = self.event(BudgetKind::Exceeded, &spent);
+            return Some(match self.0.subagent {
+                true => Refusal::SubagentExceeded(event),
+                false => Refusal::Exceeded(event),
+            });
         }
         if limits.max_cost_usd.is_some() && spent.unpriced {
             return Some(Refusal::Unpriced);

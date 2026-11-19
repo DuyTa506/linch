@@ -212,3 +212,82 @@ fn a_budget_reads_with_python_s_default_ratio_and_refuses_unknown_fields() {
     assert!(infinite.problem().is_some());
     assert!(RunBudget::default().problem().is_none());
 }
+
+fn within(tree: Option<Meter>, max_tokens: u64) -> Meter {
+    let limits = RunBudget {
+        max_tokens: Some(max_tokens),
+        ..RunBudget::default()
+    };
+    Meter::within(tree, limits, Spent::default())
+}
+
+#[test]
+fn a_meter_within_a_tree_charges_both_and_the_tree_refuses_first() {
+    let tree = meter(Some(40), None);
+    let child = within(Some(tree.clone()), 100);
+    child.charge(&receipt(used(30, 0, 0, 0), None, CallDisposition::Accepted));
+    assert_eq!(tree.spent().tokens, 30, "the tree counts the child's spend");
+    assert!(child.refusal().is_none());
+    tree.charge(&receipt(used(10, 0, 0, 0), None, CallDisposition::Accepted));
+    let Some(Refusal::Exceeded(event)) = child.refusal() else {
+        panic!("an exhausted tree refuses the child with the run's own error");
+    };
+    assert_eq!((event.spent_tokens, event.max_tokens), (40, Some(40)));
+}
+
+#[test]
+fn a_child_cap_is_its_own_error_and_leaves_the_tree_open() {
+    let tree = meter(Some(1000), None);
+    let child = within(Some(tree.clone()), 30);
+    child.charge(&receipt(used(30, 0, 0, 0), None, CallDisposition::Accepted));
+    let Some(refusal @ Refusal::SubagentExceeded(_)) = child.refusal() else {
+        panic!("the child's cap is reached");
+    };
+    let error = refusal.error().error;
+    assert_eq!(error["name"], "BudgetExceededError");
+    assert_eq!(
+        error["message"],
+        "subagent budget exhausted (30 tokens, $0.0000 spent)"
+    );
+    assert!(tree.refusal().is_none(), "the parent goes on");
+    // A child with no tree around it keeps its own error too.
+    let alone = within(None, 5);
+    alone.charge(&receipt(used(5, 0, 0, 0), None, CallDisposition::Accepted));
+    assert!(matches!(
+        alone.refusal(),
+        Some(Refusal::SubagentExceeded(_))
+    ));
+}
+
+#[test]
+fn a_child_and_its_tree_each_warn_once() {
+    let tree = meter(Some(100), None);
+    let child = within(Some(tree.clone()), 10);
+    child.charge(&receipt(used(9, 0, 0, 0), None, CallDisposition::Accepted));
+    let first = child.take_warning().expect("the child's cap reached 90%");
+    assert_eq!(first.max_tokens, Some(10));
+    assert!(child.take_warning().is_none(), "once per child run");
+    child.charge(&receipt(used(81, 0, 0, 0), None, CallDisposition::Accepted));
+    let second = child.take_warning().expect("then the tree's");
+    assert_eq!(second.max_tokens, Some(100));
+    assert!(child.take_warning().is_none(), "once per tree");
+}
+
+#[test]
+fn a_child_resumes_with_what_its_log_spent() {
+    let spent = Spent {
+        tokens: 25,
+        ..Spent::default()
+    };
+    let limits = RunBudget {
+        max_tokens: Some(30),
+        ..RunBudget::default()
+    };
+    let child = Meter::within(None, limits, spent);
+    assert!(child.refusal().is_none());
+    child.charge(&receipt(used(5, 0, 0, 0), None, CallDisposition::Accepted));
+    assert!(matches!(
+        child.refusal(),
+        Some(Refusal::SubagentExceeded(_))
+    ));
+}

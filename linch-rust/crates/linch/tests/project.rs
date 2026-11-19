@@ -341,3 +341,71 @@ fn a_symlinked_skills_agents_or_skill_md_is_never_followed() {
     let want = ("near".to_owned(), SkipReason::IoError, not_followed);
     assert_eq!(reasons(&skipped), [want]);
 }
+
+#[test]
+fn a_subagent_cap_reads_from_its_frontmatter_and_a_bad_one_skips_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let agents = dir.path().join("agents");
+    write(
+        &agents.join("a-capped.md"),
+        "---\ndescription: D.\nmax_tokens: 20000\nmax_cost_usd: 0.5\nwarn_ratio: 0.8\n---\n",
+    );
+    write(
+        &agents.join("b-tokens.md"),
+        "---\ndescription: D.\nmax_tokens: 100\n---\n",
+    );
+    write(&agents.join("c-plain.md"), "---\ndescription: D.\n---\n");
+    for (file, front) in [
+        ("d-text", "max_tokens: lots"),
+        ("e-zero", "max_tokens: 0"),
+        ("f-float", "max_tokens: 1.5"),
+        ("g-neg", "max_cost_usd: -1"),
+        ("h-big", "max_tokens: 5\nwarn_ratio: 2"),
+        ("i-alone", "warn_ratio: 0.5"),
+        ("j-str", "max_cost_usd: cheap"),
+    ] {
+        write(
+            &agents.join(format!("{file}.md")),
+            &format!("---\ndescription: D.\n{front}\n---\n"),
+        );
+    }
+    let (definitions, skipped) = load_subagents(dir.path());
+    let budgets: Vec<(&str, Option<linch_core::RunBudget>)> = (definitions.iter())
+        .map(|d| (d.name.as_str(), d.budget.clone()))
+        .collect();
+    assert_eq!(
+        budgets,
+        [
+            (
+                "a-capped",
+                Some(linch_core::RunBudget {
+                    max_tokens: Some(20000),
+                    max_cost_usd: Some(0.5),
+                    warn_ratio: 0.8,
+                })
+            ),
+            (
+                "b-tokens",
+                Some(linch_core::RunBudget {
+                    max_tokens: Some(100),
+                    ..linch_core::RunBudget::default()
+                })
+            ),
+            ("c-plain", None),
+        ]
+    );
+    // A cap that was meant is never dropped: the file does not load.
+    let mut bad: Vec<String> = (skipped.iter())
+        .map(|s| {
+            assert_eq!(s.reason, SkipReason::InvalidFrontmatter, "{s:?}");
+            s.path.file_stem().unwrap().to_string_lossy().into_owned()
+        })
+        .collect();
+    bad.sort();
+    assert_eq!(
+        bad,
+        [
+            "d-text", "e-zero", "f-float", "g-neg", "h-big", "i-alone", "j-str"
+        ]
+    );
+}

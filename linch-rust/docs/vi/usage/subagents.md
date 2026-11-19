@@ -39,6 +39,9 @@ problem with its file and line. Do not edit anything.
 | `description` | có | Được liệt kê trong mô tả của tool `Subagent` |
 | `name` | không | Giá trị mà mô hình truyền làm `subagent_type`; là tên tệp khi không có |
 | `tools` | không | Các tool mà run con được dùng, dưới dạng danh sách hoặc chuỗi phân tách bằng dấu phẩy; `Read(...)` được tính là `Read`; khi không có hoặc là `*` nghĩa là tất cả tool của agent cha |
+| `max_tokens` | không | Giới hạn cho mỗi run của agent này, tính bằng token (cả bốn bucket usage), một số nguyên dương; xem [Giới hạn một subagent](#giới-hạn-một-subagent) |
+| `max_cost_usd` | không | Cùng giới hạn đó tính bằng USD, một số dương; cần có giá cho model, như `budget.max_cost_usd` của một run |
+| `warn_ratio` | không | Mức mà cảnh báo duy nhất của giới hạn nổ ra, lớn hơn 0 và tối đa 1 (mặc định 0.9); cần có giới hạn |
 
 Phần thân là chỉ dẫn của run con. Có sẵn hai định nghĩa: `verification`, cố gắng phá
 vỡ công việc đã hoàn thành bằng `Read`, `Glob`, `Grep` và `Bash` (những tool mà agent
@@ -59,6 +62,32 @@ Những gì run con nhận được:
 | Phê duyệt | Nó không thể tạm dừng: một lệnh gọi cần phê duyệt sẽ bị từ chối, trừ khi một quy tắc quyền hoặc callback `permission_request` cho phép |
 
 ---
+
+## Giới hạn một subagent
+
+Một định nghĩa có `max_tokens` hoặc `max_cost_usd` giới hạn mỗi run con của nó, với cùng
+bộ đếm và đơn vị như [`budget`](./agent.md#budget) của một run:
+
+- Chi tiêu của run con vẫn được tính vào `budget` của agent cha, được kiểm tra trước:
+  agent cha đã cạn sẽ từ chối lần gọi kế tiếp của run con bằng `BudgetExceededError`
+  của chính run (`run budget exhausted`).
+- Run con chạm giới hạn riêng sẽ dừng trước lần gọi provider kế tiếp, kết thúc `failed`
+  với `BudgetExceededError` (`subagent budget exhausted (N tokens, $X spent)`), và lần
+  gọi `Subagent` của agent cha trả về đó dưới dạng kết quả lỗi (`Subagent encountered an
+  error: BudgetExceededError: ...`, kèm văn bản cuối của run con làm đầu ra dở dang).
+  Run của agent cha vẫn tiếp tục, và mô hình có thể thử lại hoặc trả lời mà không cần nó.
+- Giới hạn tính theo từng run con. Một lần gọi `SubagentContinue` bắt đầu một run con mới,
+  nên có giới hạn mới; `budget` của agent cha giới hạn tổng.
+- Các event `budget` của run con cho biết nguồn: cảnh báo ở `warn_ratio` của giới hạn riêng
+  nổ ra một lần mỗi run con, bên cạnh cảnh báo duy nhất của cả cây.
+- Giới hạn là một phần của contract run của run con. Nó sống sót qua crash: run con được
+  resume đếm các receipt mà log của chính nó đã có, nên không bao giờ gọi vượt giới hạn.
+  Một crash để lại lần gọi chưa biết mức dùng sẽ làm run con thất bại với
+  `BudgetAccountingError`, như với `budget` của một run.
+- Giới hạn không bao giờ mở rộng thứ gì: run con có cùng tool, quyền và quy tắc phê duyệt
+  như run con không bị giới hạn. Giá trị trong frontmatter không phải số dương sẽ bỏ qua tệp
+  (có trong `Agent.skipped`), không bao giờ nạp nó mà không có giới hạn. Một định nghĩa không
+  có các khóa này hoạt động như trước và giữ nguyên contract run.
 
 ## Chạy một subagent
 

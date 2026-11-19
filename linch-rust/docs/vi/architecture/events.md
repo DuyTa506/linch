@@ -57,7 +57,7 @@ bỏ tag bằng tay (`events/kinds/mod.rs:1-9`). `Event::type_name`
 | `compaction` | `CompactionEvent`, `kinds/control.rs:64` | yes | yes | |
 | `loop_guard` | `LoopGuardEvent`, `kinds/control.rs:123` | yes | yes | |
 | `policy` | `PolicyEvent`, `kinds/policy.rs` | yes | yes | Một `policy` của spec (`crates/linch-core/src/gates.rs`): một lần từ chối cùng lần ghi `ToolBatch` của batch của nó, một lần sửa cùng notification và checkpoint của nó, một lần dừng trong lần ghi terminal |
-| `budget` | `BudgetEvent`, `kinds/control.rs:145` | yes | yes | Một `budget` của spec (`crates/linch-core/src/budget.rs`): `warning` ngay sau event `usage` vượt tỷ lệ, một lần cho mỗi cây run; `exceeded` trong lần ghi terminal, trước `error` của nó |
+| `budget` | `BudgetEvent`, `kinds/control.rs:145` | yes | yes | Một `budget` của spec (`crates/linch-core/src/budget.rs`): `warning` ngay sau event `usage` vượt tỷ lệ, một lần cho mỗi cây run; `exceeded` trong lần ghi terminal, trước `error` của nó; `budget` của một định nghĩa subagent thêm hai event đó vào log riêng của run con, mỗi run con một lần, và `exceeded` của nó chỉ kết thúc run con đó |
 | `provider_retry` | `ProviderRetryEvent`, `kinds/reliability.rs:13` | yes | yes | Một `provider_retry` của spec (`crates/linch-core/src/reliability.rs`): trước lúc chờ, trong cùng một lần ghi với receipt thất bại |
 | `model_fallback` | `ModelFallbackEvent`, `kinds/reliability.rs:31` | yes | yes | `fallback_models` của một spec: cùng receipt thất bại, trên barrier dispatch của model fallback |
 | `prompt_cache_advisory` | `PromptCacheAdvisoryEvent`, `kinds/control.rs:186` | yes | yes | Chưa được phát ở revision này |

@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::fs;
 
-use linch_core::SubagentDefinition;
+use linch_core::{RunBudget, SubagentDefinition};
 use yaml_rust2::Yaml;
 
 use super::frontmatter::{self, get};
@@ -17,7 +17,10 @@ use super::{NOT_FOLLOWED, SkipReason, Skipped, entries, name_error, symlink, val
 /// ignoring case. `description` is required. `tools`, a list or a
 /// comma-separated string, names the tools the child may use; `Read(...)`
 /// counts as `Read`, and a value of another type means every tool. The
-/// body is the child's instructions.
+/// body is the child's instructions. `max_tokens` (a positive integer)
+/// and `max_cost_usd` (a positive number) cap each run of the agent, and
+/// `warn_ratio` (0 to 1) sets where its warning fires; a value of another
+/// type skips the file, never loads it uncapped.
 ///
 /// Blocking: call it off the async loop.
 ///
@@ -131,7 +134,49 @@ fn parse(raw: &str, base: &str) -> Result<SubagentDefinition, (SkipReason, Strin
     }
     let mut definition = SubagentDefinition::new(name, description, body);
     definition.tools = get(&doc, "tools").and_then(tools);
+    definition.budget = budget(&doc).map_err(invalid)?;
     Ok(definition)
+}
+
+/// The cap the frontmatter keys `max_tokens`, `max_cost_usd` and
+/// `warn_ratio` give each run of the agent; `None` when it sets neither
+/// cap. A value that is not what the key takes is an error: a cap that was
+/// meant must never be dropped, which would run the agent uncapped.
+fn budget(doc: &Yaml) -> Result<Option<RunBudget>, String> {
+    let number = |key: &str| -> Result<Option<f64>, String> {
+        let bad = || format!("frontmatter '{key}' must be a positive number");
+        let value = match get(doc, key) {
+            None => return Ok(None),
+            Some(Yaml::Integer(n)) => *n as f64,
+            Some(Yaml::Real(text)) => text.parse::<f64>().map_err(|_| bad())?,
+            Some(_) => return Err(bad()),
+        };
+        (value.is_finite() && value > 0.0)
+            .then_some(Some(value))
+            .ok_or_else(bad)
+    };
+    let max_tokens = match get(doc, "max_tokens") {
+        None => None,
+        Some(Yaml::Integer(n)) if *n > 0 => Some(*n as u64),
+        Some(_) => return Err("frontmatter 'max_tokens' must be a positive integer".into()),
+    };
+    let max_cost_usd = number("max_cost_usd")?;
+    let warn_ratio = number("warn_ratio")?;
+    if warn_ratio.is_some_and(|ratio| ratio > 1.0) {
+        return Err("frontmatter 'warn_ratio' must be at most 1".into());
+    }
+    if max_tokens.is_none() && max_cost_usd.is_none() {
+        return match warn_ratio {
+            Some(_) => Err("frontmatter 'warn_ratio' needs 'max_tokens' or 'max_cost_usd'".into()),
+            None => Ok(None),
+        };
+    }
+    let defaults = RunBudget::default();
+    Ok(Some(RunBudget {
+        max_tokens,
+        max_cost_usd,
+        warn_ratio: warn_ratio.unwrap_or(defaults.warn_ratio),
+    }))
 }
 
 /// The tool names in a `tools` value, or `None` (every tool) when it is

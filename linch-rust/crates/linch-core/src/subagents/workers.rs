@@ -10,7 +10,7 @@ use crate::ids::{RunId, SessionId};
 
 /// One worker a parent session started: a subagent's child run, whose id
 /// is also its session's.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Worker {
     pub(crate) id: RunId,
     /// The definition's name, or `Agent #N` for the N-th general-purpose

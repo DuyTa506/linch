@@ -196,6 +196,7 @@ pub(super) async fn new_run(
         let limits = agent.spec.budget.clone()?;
         Some(Meter::new(limits, Spent::default()))
     });
+    let budget = capped(&agent, budget, Spent::default());
     share(&family, &budget);
     let seq = journal.durable_seq();
     hooks::event_emit(&agent.hooks, &outbox, &session_id, &run_id, seq, &ready).await;
@@ -501,6 +502,9 @@ pub(super) async fn continue_run(
             None => None,
         },
     };
+    // A child run of a capped definition counts its own spend, from its own
+    // durable receipts, against the cap.
+    let budget = capped(&agent, budget, Spent::of(&events));
     share(&family, &budget);
     if let Some(family) = &family {
         crate::subagents::reattach(&agent, family, &run, &events).await;
@@ -603,6 +607,15 @@ fn drive_family(
     let family = agent.family_for(run_id, session_id);
     driving.attach(&family);
     Some(family)
+}
+
+/// The meter of a run of `agent`: `tree`'s, or, for a child run of a
+/// capped subagent definition, the cap's within it, having spent `spent`.
+fn capped(agent: &AgentInner, tree: Option<Meter>, spent: Spent) -> Option<Meter> {
+    match &agent.cap {
+        Some(limits) => Some(Meter::within(tree, limits.clone(), spent)),
+        None => tree,
+    }
 }
 
 /// Let the children of `family` charge `budget`.

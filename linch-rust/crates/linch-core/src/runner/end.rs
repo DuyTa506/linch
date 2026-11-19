@@ -255,7 +255,7 @@ impl Runner {
     /// that cannot count a call of its tree fails with a
     /// `BudgetAccountingError` and no `budget` event.
     pub(super) async fn over_budget(&mut self, refusal: Refusal) -> Result<(), RunError> {
-        if let Refusal::Exceeded(event) = &refusal {
+        if let Refusal::Exceeded(event) | Refusal::SubagentExceeded(event) = &refusal {
             self.journal.stage(Event::Budget(event.clone()));
         }
         self.journal.stage(Event::Error(refusal.error()));

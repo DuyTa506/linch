@@ -173,6 +173,7 @@ impl AgentInner {
             workers: Default::default(),
             worker_registry: Default::default(),
             child: true,
+            cap: definition.budget.clone(),
             pricing: self.pricing.clone(),
             gate: self.gate.clone(),
             cache_diagnostic: self.cache_diagnostic,

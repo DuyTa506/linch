@@ -5,7 +5,7 @@ use std::sync::{Arc, OnceLock};
 use super::spec::{self, AgentSpec};
 use super::{
     Agent, AgentInner, BuildError, Pricing, SessionClose, Versions, first_unpriced,
-    tool_choice_problem,
+    subagent_budget_problem, tool_choice_problem,
 };
 use crate::coordination::{Mailbox, SendMessageTool};
 use crate::gates::Rules;
@@ -397,6 +397,10 @@ impl AgentBuilder {
         }
         let workers = self.workers.unwrap_or_default();
         if let Some(definitions) = self.subagents {
+            let problem = subagent_budget_problem(self.pricing.as_ref(), &self.spec, &definitions);
+            if let Some(problem) = problem {
+                return Err(BuildError::Invalid(problem));
+            }
             let roster = Arc::new(Roster::new(definitions));
             let value =
                 serde_json::to_value(&*roster).map_err(|e| BuildError::Invalid(e.to_string()))?;
@@ -527,6 +531,7 @@ impl AgentBuilder {
             workers,
             worker_registry: Default::default(),
             child: false,
+            cap: None,
             pricing: self.pricing,
             gate: self.gate,
             cache_diagnostic: self.cache_diagnostic,

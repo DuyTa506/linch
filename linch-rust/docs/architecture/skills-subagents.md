@@ -488,6 +488,22 @@ async fn main() {
 | A `RunBudget` object on the agent config (or the run options), shared by every run that uses it and inherited by the subagent tree | A spec `budget` gives each root run its own meter (`crates/linch-core/src/budget.rs`), which the run's family hands to every child; a resumed root run sums its own and its children's durable receipts. A parent's totals still count its own calls, as Python's `ResultEvent` does |
 | A coordinator loses its heavy tools | Not applied: the kernel offers a parent every tool its subagents can use |
 
+## A cap per subagent
+
+`SubagentDefinition::budget` (frontmatter `max_tokens`, `max_cost_usd`,
+`warn_ratio`) is a `RunBudget` for each child run of that definition; it
+stays off the wire when unset, so the definition's part of the run contract
+does not move. `AgentInner::child` copies it to the child's agent (`cap`),
+and `runner/start.rs` (`capped`) gives each run of that agent a `Meter::within`
+the tree's meter: a charge counts for both, the tree refuses first (the run's
+own `BudgetExceededError`), then the cap (`Refusal::SubagentExceeded`, the same
+error name with `subagent budget exhausted`), which fails only that child. A
+resume seeds the cap's meter from the child's own durable receipts
+(`Spent::of`), so nothing new is written, and the cost cap's price check runs
+in `AgentBuilder::build` and `reload_subagents` (`subagent_budget_problem`).
+`crates/linch-core/tests/e2e_subagent_budget.rs` covers the cap, the parent's
+count, a crash at every write and the host path (`Agent::subagent`).
+
 ## Tests
 
 | Test | Pins |
