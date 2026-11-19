@@ -98,6 +98,7 @@ The entries below are condensed to one line per area. The full text of each item
 
 ### Docs
 
+- **Live tests of the Bash backends.** `python/tests/live/test_ts_backends.py` runs the `local`, `sandbox` and `docker` guarantees (confinement, seccomp, rlimits, network, timeout tree, output cap, cancel and `kill -9` without orphans or containers, `docker inspect` of the arguments) through a real server; docker cases need `LINCH_LIVE_DOCKER=1`. [Sandbox](docs/usage/sandbox.md#live-tests) lists which guarantees each backend has covered and how to run them.
 - **Benchmarks, case 6 correction.** The two timing levels of case 6 are CPU frequency levels (2.0 and 3.4 GHz), so the 594 against 295 ms Anthropic comparison mixed two levels; at equal level the client path is 1.15 to 1.25 times the kernel (1.0 to 1.08 with a 1 MiB stdio pipe). The message-count hypothesis is refuted for case 6, msgpack and compression are rejected for stdio, and the case 14 client gap on Postgres stays an open gap with its evidence (English and Vietnamese).
 
 ## 0.1.1 - 2026-11-07
