@@ -435,11 +435,14 @@ outside the tool. A host closes it in its own tools:
   [Tools](./tools.md#which-call-a-tool-serves)) as the idempotency key of the
   effect. The `tool_use_id` is the provider's and is the same after a resume, so
   a side effect keyed by it is done once however often the call is attempted.
-  This holds for host tools you write. The built-in `Bash` and the remote
-  execution host carry no such key today (a remote command's id is a counter of
-  its shell, and `exec.start` has no run or tool id), so a command with side
-  effects is at most once with no deduplication: make the command itself
-  idempotent, or check its effect before running it again.
+  This holds for host tools you write. A remote execution host gets the same
+  key in `exec.start` (`ExecStart.idempotency_key`, see
+  [Remote execution](./remote-execution.md#after-a-crash-the-key-lets-the-host-dedupe)),
+  and can dedupe by it. The other backends have no host to dedupe on (what each
+  guarantees after a crash is on that page too), so a `local`, `sandbox` or
+  `docker` command with side effects is at most once with no deduplication:
+  make the command itself idempotent, or check its effect before running it
+  again.
 - Find the calls to reconcile with the `tool_call_end` events whose
   `error_code` is `tool_interrupted`, and ask the system the tool talks to
   whether the key was applied.

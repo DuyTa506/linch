@@ -99,6 +99,55 @@ tracks the principal there knows it later too. On a tenant's connection the
 principal's tenant is the connection's own; its `user` and `roles` are what
 the client claims, as for permission rules.
 
+### After a crash: the key lets the host dedupe
+
+`exec.start` carries `idempotency_key`, `<run_id>:<tool_use_id>`: the same
+value a host tool reads as `ToolContext.idempotency_key`, derived the same way
+(the run's id and the provider's id of the call). It is the same when the run
+is resumed or the call is attempted again, differs for every tool call, and
+holds no secret. `exec_id` is not a substitute: it is a counter of the
+server's process and restarts from 1. The key is absent from a server that
+predates it; ask `server.info.has("exec_idempotency_key")`. A client that
+ignores the field keeps working.
+
+A call whose start is durable and whose end is not is reported as
+`tool_interrupted`, effect unknown, and the server never starts it again by
+itself. The key serves the cases where the same call does reach you twice
+(a start whose answer was lost, a call attempted again): the host records
+the key with the command and refuses a second start with the same key.
+
+```python
+from linch_rust import ExecStart, SubprocessHost
+
+
+class DedupingHost(SubprocessHost):
+    """Starts a command once per tool call, however often the server asks."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._seen: dict[str, str] = {}  # idempotency_key -> exec_id of the first start
+
+    async def start(self, request: ExecStart) -> None:
+        key = request.idempotency_key
+        if key is not None and key in self._seen:
+            raise RuntimeError("this tool call was already started on this host")
+        await super().start(request)
+        if key is not None:
+            self._seen[key] = request.exec_id  # keep it in a store that survives your restart
+```
+
+A refusal is read by the server as proof the command did not run, so refuse
+only when the first start did happen, and say so in the message (the model
+reads it).
+
+What each backend guarantees after the server crashes (`kill -9`) mid-call:
+
+| Backend | A command that was running | Dedupe key |
+|---|---|---|
+| `local`, `sandbox` | A foreground command has no lifeline and may keep running; a background command's watchdog kills it when the server dies ([Tools architecture](../architecture/tools.md)) | None: there is no host. The call is `tool_interrupted`, effect unknown |
+| `docker` | The container is removed (the lifeline runs `docker rm -f`) | None. The call is `tool_interrupted`, effect unknown |
+| `remote` | The host's own rules (`SubprocessHost` kills what the connection started when it ends) | `idempotency_key` in `exec.start` |
+
 ## Files: the file tools act on the server
 
 Read this before enabling it. `Read`, `Write`, `Edit`, `Grep` and `Glob` run

@@ -273,6 +273,7 @@ async with Server.connect(SOCKET, token=TOKEN) as server:
     info.protocol            # 1: giao thức wire; client này nói từ 1 đến 1
     info.contract_version    # 1: phiên bản digest của run contract
     info.has("cache_isolation")   # một tính năng tùy chọn, theo tên
+    info.has("exec_idempotency_key")   # exec.start mang khóa của lời gọi
     info.backends            # ("local", "sandbox", "docker", "remote")
     info.max_message_bytes   # 16777216
     info.default_max_runs    # 16

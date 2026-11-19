@@ -18,6 +18,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// for another behavior, and a client ignores names it does not know.
 pub const CAPABILITIES: &[&str] = &[
     "cache_isolation",
+    "exec_idempotency_key",
     "provider_info",
     "run_steer",
     "schedule",

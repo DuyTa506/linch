@@ -440,11 +440,13 @@ bên ngoài tool. Host đóng nó trong các tool của chính mình:
   [Tools](./tools.md#tool-đang-phục-vụ-lời-gọi-nào)) làm khóa idempotency của tác
   động. `tool_use_id` là của provider và giữ nguyên sau resume, nên một side effect
   được khóa bằng nó chỉ xảy ra một lần dù lời gọi được thử bao nhiêu lần. Điều này
-  đúng với các host tool bạn viết. `Bash` tích hợp sẵn và execution host từ xa hiện
-  không mang khóa như vậy (id của một lệnh từ xa là bộ đếm của shell của nó, và
-  `exec.start` không có run hay tool id), nên một lệnh có side effect chỉ chạy tối
-  đa một lần mà không có khử trùng lặp: hãy làm cho chính lệnh đó idempotent, hoặc
-  kiểm tra tác động của nó trước khi chạy lại.
+  đúng với các host tool bạn viết. Execution host từ xa nhận cùng khóa đó trong
+  `exec.start` (`ExecStart.idempotency_key`, xem
+  [Thực thi từ xa](./remote-execution.md#sau-crash-khóa-cho-phép-host-khử-trùng-lặp)) và có
+  thể khử trùng lặp theo nó. Các backend khác không có host để khử trùng lặp (trang đó
+  cũng nêu mỗi backend đảm bảo gì sau crash), nên một lệnh `local`, `sandbox` hay
+  `docker` có side effect chỉ chạy tối đa một lần mà không có khử trùng lặp: hãy làm
+  cho chính lệnh đó idempotent, hoặc kiểm tra tác động của nó trước khi chạy lại.
 - Tìm các lời gọi cần đối soát bằng các event `tool_call_end` có `error_code` là
   `tool_interrupted`, và hỏi hệ thống mà tool nói chuyện cùng xem khóa đã được áp
   dụng chưa.

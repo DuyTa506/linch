@@ -472,7 +472,7 @@ từ chối ngay khi không khớp, thay vì lỗi ở method đầu tiên có h
 
 ```json
 {"server_version": "0.1.1", "protocol": 1, "contract_version": 1,
- "capabilities": ["cache_isolation", "provider_info", "run_steer", "schedule", "workflow"],
+ "capabilities": ["cache_isolation", "exec_idempotency_key", "provider_info", "run_steer", "schedule", "workflow"],
  "backends": ["local", "sandbox", "docker", "remote"],
  "limits": {"max_message_bytes": 16777216, "default_max_runs": 16}}
 ```

@@ -235,6 +235,7 @@ impl Bash {
             env: &self.env,
             session: &ctx.session_id,
             principal: ctx.principal.as_ref(),
+            idempotency_key: Some(ctx.idempotency_key()),
             lifeline,
         }
     }

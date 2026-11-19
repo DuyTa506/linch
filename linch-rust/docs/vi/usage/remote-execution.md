@@ -89,6 +89,52 @@ host đã thấy ở `exec.start`, nên host nào ghi nhớ principal ở đó t
 sau. Trên kết nối của một tenant, tenant của principal là tenant của chính kết nối;
 `user` và `roles` là điều client tuyên bố, như với các quy tắc quyền.
 
+### Sau crash: khóa cho phép host khử trùng lặp
+
+`exec.start` mang `idempotency_key`, `<run_id>:<tool_use_id>`: cùng giá trị mà một host
+tool đọc là `ToolContext.idempotency_key`, được suy ra theo cùng cách (id của run và id
+của lời gọi do provider cấp). Nó giữ nguyên khi run được resume hoặc lời gọi được thử
+lại, khác nhau ở mỗi lời gọi tool và không chứa bí mật. `exec_id` không thay được nó:
+đó là bộ đếm của process server và bắt đầu lại từ 1. Server cũ hơn không gửi khóa này;
+hỏi `server.info.has("exec_idempotency_key")`. Client bỏ qua trường này vẫn chạy bình
+thường.
+
+Một lời gọi có start đã bền nhưng end thì chưa được báo là `tool_interrupted`, tác động
+không rõ, và server không tự start lại nó. Khóa phục vụ các trường hợp cùng một lời gọi
+thực sự đến host hai lần (một start mà câu trả lời bị mất, một lời gọi được thử lại):
+host ghi khóa cùng với lệnh và từ chối start thứ hai có cùng khóa.
+
+```python
+from linch_rust import ExecStart, SubprocessHost
+
+
+class DedupingHost(SubprocessHost):
+    """Chỉ start một lệnh một lần cho mỗi lời gọi tool, dù server hỏi bao nhiêu lần."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._seen: dict[str, str] = {}  # idempotency_key -> exec_id của lần start đầu
+
+    async def start(self, request: ExecStart) -> None:
+        key = request.idempotency_key
+        if key is not None and key in self._seen:
+            raise RuntimeError("lời gọi tool này đã được start trên host này")
+        await super().start(request)
+        if key is not None:
+            self._seen[key] = request.exec_id  # lưu ở nơi sống sót qua lần khởi động lại
+```
+
+Server hiểu một lần từ chối là bằng chứng lệnh không chạy, nên chỉ từ chối khi lần start
+đầu đã thực sự xảy ra, và nói rõ trong thông báo (model đọc nó).
+
+Mỗi backend đảm bảo gì khi server crash (`kill -9`) giữa lời gọi:
+
+| Backend | Lệnh đang chạy | Khóa khử trùng lặp |
+|---|---|---|
+| `local`, `sandbox` | Lệnh foreground không có lifeline và có thể vẫn chạy; watchdog của lệnh background kill nó khi server chết ([kiến trúc Tools](../architecture/tools.md)) | Không có: không có host. Lời gọi là `tool_interrupted`, tác động không rõ |
+| `docker` | Container bị xóa (lifeline chạy `docker rm -f`) | Không có. Lời gọi là `tool_interrupted`, tác động không rõ |
+| `remote` | Quy tắc của chính host (`SubprocessHost` kill những gì kết nối đã start khi nó kết thúc) | `idempotency_key` trong `exec.start` |
+
 ## Tệp: các tool tệp tác động lên server
 
 Hãy đọc phần này trước khi bật. `Read`, `Write`, `Edit`, `Grep` và `Glob` chạy trong

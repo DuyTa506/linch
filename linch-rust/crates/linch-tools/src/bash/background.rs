@@ -314,6 +314,7 @@ mod tests {
                     env: &env,
                     session: &session,
                     principal: None,
+                    idempotency_key: None,
                     lifeline: true,
                 };
                 let timeout = Duration::from_secs(30);

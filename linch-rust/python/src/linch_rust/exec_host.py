@@ -72,6 +72,14 @@ class ExecStart:
             more than one must scope or deny the command by it (a working
             directory, an account or a container per principal);
             `SubprocessHost` ignores it and runs every command the same way.
+        idempotency_key: `<run_id>:<tool_use_id>` of the tool call that made
+            the command, the same as a host tool's
+            `ToolContext.idempotency_key`. Unlike `exec_id`, a counter of the
+            server's process, it is the same when a run is resumed or a call
+            is attempted again, and differs per call, so a host dedupes a
+            command by it. `None` from a server without the
+            `exec_idempotency_key` capability. The host stores it only as
+            long as it needs to dedupe; it holds no secret.
     """
 
     agent: str
@@ -82,6 +90,7 @@ class ExecStart:
     background: bool
     session_id: str
     principal: Mapping[str, Any] | None = None
+    idempotency_key: str | None = None
 
 
 @dataclass(frozen=True)

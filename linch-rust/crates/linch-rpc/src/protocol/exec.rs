@@ -38,6 +38,14 @@ pub struct ExecStartParams {
     /// is the only one a tenant's principal can name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principal: Option<Principal>,
+    /// Names the tool call that made the command: `<run_id>:<tool_use_id>`,
+    /// the same as a host tool's `ToolContext.idempotency_key`. Unlike
+    /// `exec_id`, a counter of the server's process, it is the same when a
+    /// run is resumed or a call is attempted again, so a host dedupes by it.
+    /// Absent from a server that predates it (`server.info` capability
+    /// `exec_idempotency_key`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
 }
 
 /// Params of `exec.read`: wait up to `wait_ms` for output or the end of a

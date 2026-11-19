@@ -117,6 +117,11 @@ async fn a_command_runs_in_the_client_and_its_output_comes_back() {
     assert_eq!(start.session_id.as_str(), "s1");
     assert_eq!(start.cwd, None);
     assert!(!start.background);
+    assert_eq!(
+        start.idempotency_key,
+        Some(format!("{run_id}:c1")),
+        "the key of a host tool: run id and tool_use_id"
+    );
     for server_only in ["PATH", "HOME", "USER", "SHELL", "TMPDIR"] {
         assert!(!start.env.contains_key(server_only), "{:?}", start.env);
     }
@@ -171,6 +176,31 @@ async fn each_command_reaches_the_host_with_its_runs_principal() {
     assert_eq!(seen[2].get("principal"), None, "a run with none sends none");
     let start: ExecStartParams = serde_json::from_value(seen[0].clone()).unwrap();
     assert_eq!(start.principal.unwrap().user(), "ada");
+}
+
+/// The key is the call's, not the command's: two calls of one run differ, a
+/// call of another run differs, and `exec_id` (a counter of the server) is
+/// not part of it.
+#[tokio::test]
+async fn each_call_reaches_the_host_with_its_own_stable_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut rpc, mut calls) = host(Script::Quick);
+    let input = json!({"command": "echo hi", "timeout_ms": 5000});
+    let mut config = bash_config(dir.path(), input.clone(), remote());
+    let turns = [
+        tool_turn("c1", "Bash", input.clone()),
+        tool_turn("c2", "Bash", input.clone()),
+        text_turn("done"),
+    ];
+    config["provider"]["turns"] = json!(turns);
+    let agent = rpc.open(config).await;
+    let run_id = rpc.start(&agent, "s1", "go").await;
+    rpc.until_end(&run_id).await;
+    let first = next(&mut calls, "exec.start").await;
+    let second = next(&mut calls, "exec.start").await;
+    assert_eq!(first["idempotency_key"], json!(format!("{run_id}:c1")));
+    assert_eq!(second["idempotency_key"], json!(format!("{run_id}:c2")));
+    assert_ne!(first["exec_id"], second["exec_id"]);
 }
 
 #[tokio::test]

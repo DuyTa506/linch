@@ -417,6 +417,7 @@ mod tests {
             env: &env,
             session: &session,
             principal: None,
+            idempotency_key: None,
             lifeline: true,
         };
         let Spawned { mut child, .. } = shell.spawn(launch).await.unwrap().into_process();
@@ -444,6 +445,7 @@ mod tests {
             env: &env,
             session: &session,
             principal: None,
+            idempotency_key: None,
             lifeline: false,
         };
         let child = shell.spawn(launch).await.unwrap().into_process().child;
