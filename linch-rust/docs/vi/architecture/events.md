@@ -44,7 +44,7 @@ bỏ tag bằng tay (`events/kinds/mod.rs:1-9`). `Event::type_name`
 | `steer_received` | `SteerReceivedEvent`, `kinds/lifecycle.rs` | no | yes | `steer_id`, `text`: một steer mà run đã chấp nhận, được ghi và flush trước khi trả lời caller; event `alignment` có cùng id đánh dấu nó đã được giao. Một run dựng lại những gì đang chờ từ hai event này (`runner/steer.rs`) |
 | `assistant` | `AssistantEvent`, `kinds/lifecycle.rs:72` | yes | yes | |
 | `partial_assistant` | `PartialAssistantEvent`, `kinds/lifecycle.rs:82` | no | yes | |
-| `usage` | `UsageEvent`, `kinds/control.rs:13` | yes | yes | |
+| `usage` | `UsageEvent`, `kinds/control.rs:15` | yes | yes | `cumulative_by_model` chia `cumulative` theo model đã phục vụ (`actual_model`, nếu không có thì model của run); bị bỏ cho đến khi một lần gọi báo usage. Event usage của subagent đến parent được bọc trong event `subagent` |
 | `tool_call_start` | `ToolCallStartEvent`, `kinds/tooling.rs:11` | yes | yes | |
 | `tool_call_end` | `ToolCallEndEvent`, `kinds/tooling.rs:29` | yes | yes | `tool_use_id` và `is_error` nằm trong `result`. `cache_hit` (bị bỏ khi false) đánh dấu một kết quả do `spec.tool_cache` phục vụ: `tool_call_start` của nó được ghi cùng với event này, không phải trước đó |
 | `tool_retry` | `ToolRetryEvent`, `kinds/tooling.rs` | yes | yes | Một `tool_retry` của spec (`crates/linch-core/src/tool_retry.rs`): được flush trước khi chờ và trước lần thử kế tiếp, nên một lần crash sau nó để lại một lời gọi đã bắt đầu mà một lần resume báo là bị gián đoạn và không bao giờ chạy lại |
@@ -71,7 +71,7 @@ bỏ tag bằng tay (`events/kinds/mod.rs:1-9`). `Event::type_name`
 | `hook` | `HookEvent`, `kinds/hook.rs:14` | no | yes | |
 | `cache_diagnostic` | `CacheDiagnosticEvent`, `kinds/control.rs` | no | yes | Chỉ khi `monitoring.cache_diagnostic` bật: `CacheWatch` của run (`crates/linch-core/src/cache_diagnostic.rs`) băm mỗi request (system, tool, từng message) và chỉ giữ mã băm, rồi so với lời gọi đã trả lời trước. Runner ghi nhận request sau `stage_context` và chốt nó sau `provider_call_stop` (`runner/cache.rs`, hai lời gọi trong `dispatch`), rồi stage event ở dạng stream-only: không ghi, không barrier, không seq. Nó không phải hook vì mọi hook đều vào contract digest (`Hooks::policy_digest`) và bật một chẩn đoán không được làm run đã dừng không resume được. Khi tắt, watch là `None` và không có gì được băm |
 | `error` | `ErrorEvent`, `kinds/lifecycle.rs:90` | yes | yes | |
-| `result` | `ResultEvent`, `kinds/lifecycle.rs:115` | yes | yes | Kết quả terminal |
+| `result` | `ResultEvent`, `kinds/lifecycle.rs:195` | yes | yes | Kết quả terminal. `usage_by_model` cộng lại bằng `total_usage` (các lần gọi của chính run); `subagent_usage` (`SubagentUsage`) giữ tổng và phần chia theo model của từng child run, đọc từ `result` của chính child (`crates/linch-core/src/subagents/usage.rs`); cả hai bị bỏ khi rỗng |
 | `model_call_delivery` | `ModelCallDeliveryEvent`, `model_call.rs:33` | yes | no | |
 | `model_call_receipt` | `ModelCallReceiptEvent`, `model_call.rs:72` | yes | no | |
 | `model_call_usage_settlement` | `ModelCallUsageSettlementEvent`, `model_call.rs:110` | yes | no | Chưa được phát ở revision này |

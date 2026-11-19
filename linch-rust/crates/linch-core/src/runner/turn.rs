@@ -1,6 +1,6 @@
 //! [`Runner`]: one run's state and the provider half of a turn.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -144,6 +144,8 @@ pub(super) struct Runner {
     pub(super) turn: u32,
     pub(super) usage: Usage,
     pub(super) usage_complete: bool,
+    /// `usage` split by the model that served each call.
+    pub(super) usage_by_model: BTreeMap<String, Usage>,
     /// Cost of the priced calls so far; `None` until one was priced.
     pub(super) cost: Option<f64>,
     /// Why the last response stopped, for `post_turn`.
@@ -264,6 +266,7 @@ impl Runner {
             turn: progress.turn,
             usage: progress.usage,
             usage_complete: progress.usage_complete,
+            usage_by_model: progress.usage_by_model,
             cost: progress.cost,
             stop_reason: progress.stop_reason,
             started: progress.started,

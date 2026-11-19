@@ -90,6 +90,7 @@ mod run;
 #[cfg(test)]
 mod tests;
 mod tool;
+mod usage;
 mod workers;
 
 use serde::{Deserialize, Serialize};
@@ -97,6 +98,7 @@ use serde::{Deserialize, Serialize};
 pub(crate) use background::{Completion, reattach};
 pub(crate) use control::{ContinueTool, Handle, StopTool};
 pub(crate) use tool::SubagentTool;
+pub(crate) use usage::Spawned;
 pub(crate) use workers::Registry;
 
 /// How the `Subagent` tool keeps its workers. Off by default.

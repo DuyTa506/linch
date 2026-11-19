@@ -45,7 +45,7 @@ encoding.
 | `steer_received` | `SteerReceivedEvent`, `kinds/lifecycle.rs` | no | yes | `steer_id`, `text`: a steer the run accepted, written and flushed before the caller is answered; the `alignment` event with the same id marks it delivered. A run rebuilds what is pending from these two (`runner/steer.rs`) |
 | `assistant` | `AssistantEvent`, `kinds/lifecycle.rs:72` | yes | yes | |
 | `partial_assistant` | `PartialAssistantEvent`, `kinds/lifecycle.rs:82` | no | yes | |
-| `usage` | `UsageEvent`, `kinds/control.rs:13` | yes | yes | |
+| `usage` | `UsageEvent`, `kinds/control.rs:15` | yes | yes | `cumulative_by_model` splits `cumulative` by the serving model (`actual_model`, else the run's model); left out until a call reports usage. A subagent's usage events reach the parent wrapped in `subagent` events |
 | `tool_call_start` | `ToolCallStartEvent`, `kinds/tooling.rs:11` | yes | yes | |
 | `tool_call_end` | `ToolCallEndEvent`, `kinds/tooling.rs:29` | yes | yes | `tool_use_id` and `is_error` live in `result`. `cache_hit` (left out when false) marks a result `spec.tool_cache` served: its `tool_call_start` is written with it, not before |
 | `tool_retry` | `ToolRetryEvent`, `kinds/tooling.rs` | yes | yes | A spec `tool_retry` (`crates/linch-core/src/tool_retry.rs`): flushed before the wait and the next attempt, so a crash after it leaves a started call a resume reports interrupted and never runs again |
@@ -72,7 +72,7 @@ encoding.
 | `hook` | `HookEvent`, `kinds/hook.rs:14` | no | yes | |
 | `cache_diagnostic` | `CacheDiagnosticEvent`, `kinds/control.rs` | no | yes | Only with `monitoring.cache_diagnostic` on: the run's `CacheWatch` (`crates/linch-core/src/cache_diagnostic.rs`) hashes each request (system, tools, every message; never content) and compares it with the previous answered call. The runner notes the request after `stage_context` and settles it after `provider_call_stop` (`runner/cache.rs`, two calls in `dispatch`), and stages the event stream-only: no write, no barrier, no seq. It is not a hook, because every hook enters the contract digest (`Hooks::policy_digest`) and switching a diagnostic on must not strand a resumable run. Off, the watch is `None` and nothing is hashed |
 | `error` | `ErrorEvent`, `kinds/lifecycle.rs:90` | yes | yes | |
-| `result` | `ResultEvent`, `kinds/lifecycle.rs:115` | yes | yes | The terminal outcome |
+| `result` | `ResultEvent`, `kinds/lifecycle.rs:195` | yes | yes | The terminal outcome. `usage_by_model` sums to `total_usage` (the run's own calls); `subagent_usage` (`SubagentUsage`) holds each child run's own total and per-model split, read from the child's own `result` (`crates/linch-core/src/subagents/usage.rs`); both left out when empty |
 | `model_call_delivery` | `ModelCallDeliveryEvent`, `model_call.rs:33` | yes | no | |
 | `model_call_receipt` | `ModelCallReceiptEvent`, `model_call.rs:72` | yes | no | |
 | `model_call_usage_settlement` | `ModelCallUsageSettlementEvent`, `model_call.rs:110` | yes | no | Not emitted at this revision |

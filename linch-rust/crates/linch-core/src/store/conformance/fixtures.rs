@@ -87,6 +87,7 @@ pub(super) fn checkpoint(turn: u32) -> Checkpoint {
         turn,
         usage: Usage::default(),
         usage_complete: true,
+        usage_by_model: Default::default(),
         cost_usd: None,
         session_len: u64::from(turn),
         phase: Phase::ProviderPending { attempt: 1 },
@@ -94,8 +95,16 @@ pub(super) fn checkpoint(turn: u32) -> Checkpoint {
 }
 
 pub(super) fn checkpoint_at(turn: u32) -> Checkpoint {
+    // A breakdown that a store must keep whole.
+    let spent = Usage {
+        input_tokens: 7,
+        output_tokens: 3,
+        ..Usage::default()
+    };
     Checkpoint {
+        usage: spent,
         usage_complete: false,
+        usage_by_model: [("served-model".to_owned(), spent)].into(),
         ..checkpoint(turn)
     }
 }

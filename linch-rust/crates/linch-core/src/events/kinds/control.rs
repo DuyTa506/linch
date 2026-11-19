@@ -1,6 +1,8 @@
 //! Context and control-flow kinds: usage, context assembly, compaction,
 //! loop guard, budget, prompt-cache advisory, and verification.
 
+use std::collections::BTreeMap;
+
 use super::is_zero;
 use crate::events::wire::{serialize_finite_f64, serialize_finite_f64_option};
 use crate::json::JsonObject;
@@ -15,6 +17,10 @@ pub struct UsageEvent {
     pub usage: Usage,
     /// Usage accumulated across the run.
     pub cumulative: Usage,
+    /// `cumulative` split by the model that served each call; its sum is
+    /// `cumulative`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub cumulative_by_model: BTreeMap<String, Usage>,
     /// Cost of the current call in USD; `None` when the agent has no price
     /// for its model. Encoding a NaN or infinite value is an error.
     #[serde(
@@ -286,6 +292,30 @@ pub struct VerificationEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_event_breakdown_is_off_the_wire_until_set() {
+        let mut event = UsageEvent {
+            usage: Usage::default(),
+            cumulative: Usage::default(),
+            cumulative_by_model: BTreeMap::new(),
+            cost_usd: None,
+            cumulative_cost_usd: None,
+            actual_model: None,
+        };
+        let plain = serde_json::to_value(&event).unwrap();
+        assert!(plain.get("cumulative_by_model").is_none());
+        assert_eq!(
+            serde_json::from_value::<UsageEvent>(plain).unwrap(),
+            event,
+            "a usage event without the field still decodes"
+        );
+        event
+            .cumulative_by_model
+            .insert("m".into(), Usage::default());
+        let wire = serde_json::to_value(&event).unwrap();
+        assert!(wire["cumulative_by_model"]["m"].is_object());
+    }
 
     fn budget(spent_usd: f64, max_cost_usd: Option<f64>) -> BudgetEvent {
         BudgetEvent {

@@ -57,6 +57,8 @@ fn result(subtype: ResultSubtype) -> Event {
         stop_reason: StopReason::EndTurn,
         total_usage: Usage::default(),
         usage_complete: true,
+        usage_by_model: Default::default(),
+        subagent_usage: Default::default(),
         duration_ms: 0,
         total_cost_usd: None,
         final_text: None,

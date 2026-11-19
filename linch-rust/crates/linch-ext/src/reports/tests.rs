@@ -40,6 +40,8 @@ fn result(subtype: ResultSubtype, usage: Usage) -> Event {
         stop_reason: StopReason::EndTurn,
         total_usage: usage,
         usage_complete: true,
+        usage_by_model: Default::default(),
+        subagent_usage: Default::default(),
         duration_ms: 0,
         total_cost_usd: None,
         final_text: Some("all done".into()),
@@ -333,6 +335,7 @@ fn usage_falls_back_to_the_last_usage_event() {
         Event::Usage(UsageEvent {
             usage: Usage::default(),
             cumulative,
+            cumulative_by_model: Default::default(),
             cost_usd: None,
             cumulative_cost_usd: None,
             actual_model: None,

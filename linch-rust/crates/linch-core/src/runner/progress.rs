@@ -2,6 +2,8 @@
 
 use std::time::Instant;
 
+use std::collections::BTreeMap;
+
 use crate::reliability::Standing;
 use crate::run::{Checkpoint, StopReason};
 use crate::usage::Usage;
@@ -9,11 +11,12 @@ use crate::usage::Usage;
 /// What one call of a run (the run, a resume or an approve) starts from:
 /// the turn index, usage, cost and last stop reason carried over from
 /// durable state, and when the call started.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct Progress {
     pub(super) turn: u32,
     pub(super) usage: Usage,
     pub(super) usage_complete: bool,
+    pub(super) usage_by_model: BTreeMap<String, Usage>,
     /// Cost of the priced calls so far; `None` until one was priced.
     pub(super) cost: Option<f64>,
     /// Why the last response stopped, for `post_turn`.
@@ -32,6 +35,7 @@ impl Progress {
             turn: 0,
             usage: Usage::default(),
             usage_complete: true,
+            usage_by_model: BTreeMap::new(),
             cost: None,
             stop_reason: StopReason::EndTurn,
             started,
@@ -51,6 +55,7 @@ impl Progress {
             turn: checkpoint.turn,
             usage: checkpoint.usage,
             usage_complete: checkpoint.usage_complete,
+            usage_by_model: checkpoint.usage_by_model.clone(),
             cost: checkpoint.cost_usd,
             stop_reason,
             started,

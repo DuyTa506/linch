@@ -91,11 +91,20 @@ impl Runner {
             }
         }
         self.stage_children();
+        let subagent_usage = match self.journal.spawned.is_empty() {
+            true => Default::default(),
+            false => {
+                let spawned = self.journal.spawned.clone();
+                spawned.usage(&self.agent, &self.run.run_id).await?
+            }
+        };
         let result = ResultEvent {
             subtype,
             stop_reason,
             total_usage: self.usage,
             usage_complete: self.usage_complete,
+            usage_by_model: self.usage_by_model.clone(),
+            subagent_usage,
             duration_ms: millis(self.started.elapsed()),
             total_cost_usd: self.cost,
             final_text: answer.text,

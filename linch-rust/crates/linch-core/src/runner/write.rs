@@ -13,7 +13,7 @@ use crate::message::Message;
 use crate::run::{Checkpoint, Phase};
 use crate::session_log::{LogEntry, MessageEntry, SessionLog};
 use crate::store::StoreError;
-use crate::usage::Usage;
+use crate::usage::{Usage, tally};
 
 impl Runner {
     /// Session write: flush the held checkpoint, then append `message`.
@@ -135,6 +135,7 @@ impl Runner {
             turn: self.turn,
             usage: self.usage,
             usage_complete: self.usage_complete,
+            usage_by_model: self.usage_by_model.clone(),
             cost_usd: self.cost,
             session_len: self.session_len,
             phase,
@@ -155,10 +156,11 @@ impl Runner {
         match receipt.usage {
             Some(usage) => {
                 self.usage += usage;
+                let model = receipt.actual_model.as_deref();
+                let model = model.unwrap_or(self.model()).to_owned();
+                tally(&mut self.usage_by_model, &model, usage);
                 if receipt.cost_usd.is_none() {
-                    let model = receipt.actual_model.as_deref();
-                    let model = model.unwrap_or(self.model());
-                    receipt.cost_usd = self.agent.price(model, &usage);
+                    receipt.cost_usd = self.agent.price(&model, &usage);
                 }
                 if let Some(cost) = receipt.cost_usd {
                     self.cost = Some(self.cost.unwrap_or(0.0) + cost);
@@ -184,6 +186,7 @@ impl Runner {
             self.journal.stage(Event::Usage(UsageEvent {
                 usage,
                 cumulative: self.usage,
+                cumulative_by_model: self.usage_by_model.clone(),
                 cost_usd: cost,
                 cumulative_cost_usd: self.cost,
                 actual_model: served,

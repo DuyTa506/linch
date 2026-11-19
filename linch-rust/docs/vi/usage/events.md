@@ -241,6 +241,7 @@ Mức sử dụng token của một lời gọi model. Xem [Mức sử dụng v�
 | Trường | Ý nghĩa |
 |---|---|
 | `usage` | Lời gọi này: `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens` |
+| `cumulative_by_model` | `cumulative` chia theo model đã phục vụ từng lời gọi (id model sang usage); tổng của nó là `cumulative`; rỗng khi server chưa có trường này |
 | `cumulative` | Run tính đến hiện tại, cùng các key |
 | `cost_usd` | Chi phí lời gọi này bằng USD; `None` khi model không có giá |
 | `cumulative_cost_usd` | Các lời gọi đã có giá của run tính đến hiện tại; `None` cho tới khi có một lời gọi có giá |
@@ -466,6 +467,8 @@ Run đã kết thúc; stream của nó kết thúc ở đây.
 | `final_text` | Văn bản của câu trả lời cuối; `None` khi không có |
 | `total_usage` | Usage cộng trên mọi lời gọi có usage đã biết |
 | `usage_complete` | `False` khi usage của một lời gọi nào đó không xác định và không có trong tổng |
+| `usage_by_model` | `total_usage` chia theo model đã phục vụ (id model sang usage; một fallback hoặc một bản tóm tắt compaction hiện thành mục riêng); tổng của nó là `total_usage` |
+| `subagent_usage` | Tổng của từng child run subagent, theo id child run (`SubagentUsage`: `total_usage`, `usage_complete`, `usage_by_model`, `total_cost_usd`, `subagent_type`); không nằm trong `total_usage`, nên cả cây là `total_usage` cộng từng mục |
 | `duration_ms` | Thời gian thực của lời gọi `run`, `resume` hoặc `approve` đã kết thúc run. Khoảng thời gian của cả run là `ts_ms` của envelope này trừ `ts_ms` của envelope `init` đầu tiên (cái không phải `resumed`) |
 | `total_cost_usd` | Chi phí của các lời gọi đã có giá của run; `None` khi không lời gọi nào có giá |
 | `structured_output`, `structured_error` | Với một [output schema](./structured-output.md): câu trả lời đã parse, hoặc lý do câu trả lời cuối không thỏa schema (run khi đó kết thúc `error`); `None` khi không có |

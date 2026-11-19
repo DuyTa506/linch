@@ -31,6 +31,7 @@ from linch_rust import (
     ScheduleExists,
     ScheduleNotFound,
     SessionBusy,
+    SubagentUsage,
     ToolCallEndEvent,
     UnknownEvent,
     UsageEvent,
@@ -260,6 +261,58 @@ def test_envelopes_and_results_carry_their_time_and_cost() -> None:
     assert isinstance(unpriced, ResultEvent) and unpriced.total_cost_usd is None
     assert isinstance(spent, UsageEvent)
     assert (spent.cost_usd, spent.cumulative_cost_usd) == (0.25, 0.5)
+
+
+def test_results_and_usage_events_carry_their_breakdowns() -> None:
+    usage = {"input_tokens": 3, "output_tokens": 1}
+    result = decode_event(
+        {
+            "type": "result",
+            "subtype": "success",
+            "stop_reason": "end_turn",
+            "total_usage": usage,
+            "usage_complete": True,
+            "duration_ms": 7,
+            "usage_by_model": {"m": usage},
+            "subagent_usage": {
+                "r1:call_1": {
+                    "subagent_type": "verification",
+                    "total_usage": usage,
+                    "usage_complete": True,
+                    "usage_by_model": {"child": usage},
+                    "total_cost_usd": 0.5,
+                }
+            },
+        }
+    )
+    plain = decode_event(
+        {
+            "type": "result",
+            "subtype": "success",
+            "stop_reason": "end_turn",
+            "total_usage": usage,
+            "usage_complete": True,
+            "duration_ms": 7,
+        }
+    )
+    spent = decode_event(
+        {"type": "usage", "usage": usage, "cumulative": usage, "cumulative_by_model": {"m": usage}}
+    )
+
+    assert isinstance(result, ResultEvent)
+    assert result.usage_by_model == {"m": usage}
+    assert result.subagent_usage == {
+        "r1:call_1": SubagentUsage(
+            total_usage=usage,
+            usage_complete=True,
+            subagent_type="verification",
+            usage_by_model={"child": usage},
+            total_cost_usd=0.5,
+        )
+    }
+    assert isinstance(plain, ResultEvent)
+    assert plain.usage_by_model == {} and plain.subagent_usage == {}
+    assert isinstance(spent, UsageEvent) and spent.cumulative_by_model == {"m": usage}
 
 
 @pytest.mark.parametrize(

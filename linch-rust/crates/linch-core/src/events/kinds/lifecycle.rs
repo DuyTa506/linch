@@ -1,6 +1,8 @@
 //! Run lifecycle kinds: init, user/assistant messages, error, and the
 //! terminal result.
 
+use std::collections::BTreeMap;
+
 use crate::events::wire::serialize_finite_f64_option;
 use crate::ids::{RunId, SessionId};
 use crate::json::JsonObject;
@@ -159,6 +161,31 @@ pub enum ResultSubtype {
     Interrupted,
 }
 
+/// What one subagent child run spent, as its own `Result` reports it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubagentUsage {
+    /// The `subagent_type` its `Subagent` call named; absent for a
+    /// general-purpose call and for a `SubagentContinue` run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_type: Option<String>,
+    /// Usage summed across the child's calls whose usage is known.
+    pub total_usage: Usage,
+    /// Whether `total_usage` accounts for every call of the child.
+    pub usage_complete: bool,
+    /// `total_usage` split by the model that served each call.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub usage_by_model: BTreeMap<String, Usage>,
+    /// Cost of the child's priced calls in USD; `None` when none was
+    /// priced. Encoding a NaN or infinite value is an error.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_finite_f64_option"
+    )]
+    pub total_cost_usd: Option<f64>,
+}
+
 /// The terminal outcome of a run.
 ///
 /// A suspended run's stream ends with a
@@ -176,6 +203,17 @@ pub struct ResultEvent {
     /// least one turn's usage was unknown and is excluded from the sum
     /// (never folded in as a zero [`Usage`]).
     pub usage_complete: bool,
+    /// `total_usage` split by the model that served each call (the run's
+    /// own calls, a compaction summary's included); its sum is
+    /// `total_usage`. Absent when no call reported usage.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub usage_by_model: BTreeMap<String, Usage>,
+    /// What each subagent child run this run started spent, by child run
+    /// id. Not part of `total_usage`, which counts the run's own calls
+    /// only; add each entry's `total_usage` for the tree. Absent when the
+    /// run started no child, and on a run ended by `Agent::fail`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub subagent_usage: BTreeMap<String, SubagentUsage>,
     /// Wall time in milliseconds of the call that ended the run (the run,
     /// or the resume or approve that continued it), from its start to this
     /// result. The whole run's span is this envelope's `ts_ms` minus the
@@ -258,5 +296,44 @@ mod tests {
         assert_eq!(event.total_usage, Usage::default());
         assert!(!event.usage_complete);
         assert_eq!(serde_json::to_value(&event).unwrap(), value);
+    }
+
+    #[test]
+    fn result_event_breakdowns_are_off_the_wire_until_set() {
+        let zero = json!({
+            "input_tokens": 0, "output_tokens": 0,
+            "cache_read_tokens": 0, "cache_creation_tokens": 0,
+        });
+        let mut event: ResultEvent =
+            serde_json::from_value(result_value(zero.clone(), json!(true))).unwrap();
+        assert!(event.usage_by_model.is_empty() && event.subagent_usage.is_empty());
+        let plain = serde_json::to_value(&event).unwrap();
+        assert!(plain.get("usage_by_model").is_none());
+        assert!(plain.get("subagent_usage").is_none());
+
+        let spent = Usage {
+            input_tokens: 3,
+            ..Usage::default()
+        };
+        event.usage_by_model.insert("m".into(), spent);
+        event.subagent_usage.insert(
+            "run:call".into(),
+            SubagentUsage {
+                subagent_type: Some("verification".into()),
+                total_usage: spent,
+                usage_complete: true,
+                usage_by_model: [("child".to_owned(), spent)].into(),
+                total_cost_usd: None,
+            },
+        );
+        let wire = serde_json::to_value(&event).unwrap();
+        assert_eq!(wire["usage_by_model"]["m"]["input_tokens"], 3);
+        let child = &wire["subagent_usage"]["run:call"];
+        assert_eq!(child["subagent_type"], "verification");
+        assert_eq!(child["total_usage"]["input_tokens"], 3);
+        assert_eq!(child["usage_complete"], true);
+        assert_eq!(child["usage_by_model"]["child"]["input_tokens"], 3);
+        assert!(child.get("total_cost_usd").is_none());
+        assert_eq!(serde_json::from_value::<ResultEvent>(wire).unwrap(), event);
     }
 }

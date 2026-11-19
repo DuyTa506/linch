@@ -199,6 +199,7 @@ mod tests {
                 turn: 0,
                 usage: Usage::default(),
                 usage_complete: true,
+                usage_by_model: Default::default(),
                 cost_usd: None,
                 session_len: 0,
                 phase: Phase::ProviderPending { attempt: 1 },

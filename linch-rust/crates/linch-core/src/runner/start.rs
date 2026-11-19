@@ -32,7 +32,7 @@ use crate::scheduler::RunIdentity;
 use crate::skills::SKILL_TOOL;
 use crate::store::{Lease, RunRecord, StoreError};
 use crate::structured::{self, FinalTool, OutputContract};
-use crate::subagents::{CONTINUE_TOOL, SUBAGENT_TOOL};
+use crate::subagents::{CONTINUE_TOOL, SUBAGENT_TOOL, Spawned};
 use crate::tool_search::Loads;
 use crate::truncation::Truncated;
 use crate::usage::Usage;
@@ -155,6 +155,7 @@ pub(super) async fn new_run(
         turn: 0,
         usage: Usage::default(),
         usage_complete: true,
+        usage_by_model: Default::default(),
         cost_usd: None,
         session_len: entries.len() as u64,
         phase: Phase::Started {
@@ -460,6 +461,7 @@ pub(super) async fn continue_run(
         },
     };
     let mut journal = Journal::new(Arc::clone(&agent.runs), lease, record.last_seq);
+    journal.spawned = Spawned::of(&events);
     held.watch(&journal);
     let fallbacks = &agent.spec.fallback_models;
     let standing = Standing::of(&events, fallbacks);

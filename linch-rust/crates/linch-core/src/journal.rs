@@ -46,6 +46,7 @@ use crate::ids::{RunId, SessionId};
 use crate::policy::Principal;
 use crate::run::{Checkpoint, Phase, RunStatus};
 use crate::store::{Commit, Lease, NewRun, RunStore, StoreError};
+use crate::subagents::Spawned;
 
 mod reconcile;
 #[cfg(test)]
@@ -80,6 +81,8 @@ pub struct Journal {
     /// Set once a write moved the run out of `running` (suspended or
     /// ended); the run's lease no longer matters then.
     settled: Arc<AtomicBool>,
+    /// The subagent calls of the run, for its `Result`.
+    pub(crate) spawned: Spawned,
 }
 
 /// A held checkpoint and how many pending events it covers.
@@ -105,6 +108,7 @@ impl Journal {
             held: None,
             poisoned: false,
             settled: Arc::default(),
+            spawned: Spawned::default(),
         }
     }
 
@@ -140,6 +144,7 @@ impl Journal {
         if event.persistence() == Persistence::StreamOnly {
             return Some(self.envelope(self.durable_seq, event));
         }
+        self.spawned.see(&event);
         let envelope = self.envelope(self.last_seq() + 1, event);
         self.pending.push(envelope);
         None

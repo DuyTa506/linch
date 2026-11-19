@@ -54,6 +54,27 @@ write ở bậc 5 phút:
 
 USD trên một triệu token. Một model được khớp theo id chính xác.
 
+**Theo model và theo subagent.** Event `result` chia usage theo hai cách, và mỗi
+cách cộng lại đúng bằng phần nó chia:
+
+- `usage_by_model` (id model sang bốn bucket usage) cộng lại bằng
+  `total_usage`. Khóa là model đã phục vụ lần gọi (`actual_model`; model hiện
+  tại của run khi provider không nêu), nên một fallback hoặc một bản tóm tắt
+  compaction chạy trên model khác hiện thành một mục riêng. Event `usage` mang
+  phần chia đang chạy dưới tên `cumulative_by_model`.
+- `subagent_usage` (id child run sang `{subagent_type, total_usage,
+  usage_complete, usage_by_model, total_cost_usd}`) giữ những gì mỗi child run
+  subagent mà run đã khởi động đã tiêu, đúng như `result` của chính child báo.
+  `total_usage` chỉ đếm các lần gọi của chính run, nên cả cây là `total_usage`
+  cộng `total_usage` của từng mục, và cả cây theo model là `usage_by_model` cộng
+  `usage_by_model` của từng mục. Child chưa từng được khởi động hoặc chưa kết
+  thúc thì bị bỏ.
+
+Cả hai bị bỏ khỏi event khi rỗng, nên một run một model và không subagent báo
+đúng như trước. Một run bị `Agent.fail` kết thúc báo `usage_by_model` từ
+checkpoint cuối và không có `subagent_usage`. Python: `ResultEvent.usage_by_model`,
+`ResultEvent.subagent_usage` (`SubagentUsage`) và `UsageEvent.cumulative_by_model`.
+
 **Mọi model khác có chi phí `None`**, không bao giờ là số 0 âm thầm và không bao
 giờ là phỏng đoán: các model OpenAI, Gemini và DeepSeek, và mọi model mà một
 server cục bộ (vLLM, SGLang, llama.cpp) phục vụ. Python Linch cũng không có đơn

@@ -1,6 +1,7 @@
 //! Token usage reported by a provider call.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::ops::{Add, AddAssign};
 
 /// Tokens reported for one provider call, or a sum of calls.
@@ -54,6 +55,16 @@ impl Add for Usage {
 impl AddAssign for Usage {
     fn add_assign(&mut self, other: Usage) {
         *self = *self + other;
+    }
+}
+
+/// Add `usage` to the entry of `model` in `by_model`.
+pub(crate) fn tally(by_model: &mut BTreeMap<String, Usage>, model: &str, usage: Usage) {
+    match by_model.get_mut(model) {
+        Some(entry) => *entry += usage,
+        None => {
+            by_model.insert(model.to_owned(), usage);
+        }
     }
 }
 
