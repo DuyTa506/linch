@@ -165,11 +165,11 @@ host tool in `asyncio.to_thread`. The server logs warnings to stderr; set `LINCH
 
 - **The run contract is a digest.** Spec, tool descriptions, callbacks' `policy_version`, skills and
   subagents feed it; a different digest cannot resume an unfinished run (`ContractMismatch`).
-  Keep old configs until their runs finish, and read the CHANGELOG before an upgrade. A new
+  Keep the earlier configs until their runs finish, and read the CHANGELOG before an upgrade. An added
   optional field that is unset stays off the wire and leaves digests alone; rely on that when
   adding one (`usage/agent.md`, "The run contract").
 - **Fields are additive.** Read events and results by name and ignore ones you do not know; a
-  client older than the server sees new fields, and an unknown field you send is `-32602`.
+  client older than the server sees added fields, and an unknown field you send is `-32602`.
 - **Durability is Postgres only.** Memory stores lose runs with the server, `resume` from another
   process and schedules need Postgres (`usage/stores.md`).
 - **A shared server denies by default.** Tenant admission refuses what could be abused until
@@ -183,7 +183,7 @@ host tool in `asyncio.to_thread`. The server logs warnings to stderr; set `LINCH
 - **A timing number can be a frequency level.** On a host with a `powersave` governor the same work
   ran at 2.0 or 3.4 GHz, 1.7x apart. Record the CPU frequency per iteration, compare cells from one
   run, and say when a gap was not explained (`benchmarks.md`, "Known gaps").
-- **Upgrading.** Run `migrate` with the new binary, start new servers and drain the old with
+- **Upgrading.** Run `migrate` with the upgraded binary, start servers of the upgraded build and drain the servers already running with
   SIGTERM (it releases leases; `kill -9` waits a lease). Let suspended runs finish first. The later
   build resumes what the earlier wrote, but the earlier build cannot read a run the later wrote
   (`RunError` -32020, `unknown field 'usage_by_model'`), so a rollback needs the later build's runs
