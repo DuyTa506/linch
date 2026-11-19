@@ -284,8 +284,9 @@ sent and how thinking is turned off. A profile copies nothing from OpenAI's.
 The table of what each supports is in the
 [architecture providers page](../architecture/providers.md#openai-chat-completions-and-server-profiles).
 
-Only vLLM has live tests (`LINCH_TEST_VLLM_URL`; they skip without it). The SGLang profile has not
-been run against a live server, and the `n_ctx` that llama.cpp's `GET /props`
+The live tests drive a vLLM server (`LINCH_TEST_VLLM_URL`; they skip without it). Set
+`LINCH_LIVE_KIND=sglang` to run the same suites with the provider kind `sglang` against an SGLang
+server at that URL (`python/tests/live/README.md`). The `n_ctx` that llama.cpp's `GET /props`
 returns was checked against its documentation only; if a server answers
 differently, the context window falls back to 128000 and `context_window`
 sets it.

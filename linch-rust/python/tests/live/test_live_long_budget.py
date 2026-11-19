@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 from e2e_long_support import Tee, dump, msg_text
-from live_core_support import ONLY_VLLM, Live, live_server, make_config, needs_vllm
+from live_core_support import LIVE_KIND, ONLY_VLLM, Live, live_server, make_config, needs_vllm
 
 from linch_rust import ContextBuildEvent, ResultEvent, callback
 
@@ -32,7 +32,7 @@ def make_callback(policy: str, tags: list[str]) -> Any:
 
 async def one_run(tee: Tee, spec: dict[str, Any], callbacks: list[Any]) -> tuple[Any, Any]:
     config = make_config(LIVE, LIVE.spec(**spec))
-    config["provider"] = {"id": "vllm", "base_url": tee.url}
+    config["provider"] = {"id": LIVE_KIND, "base_url": tee.url}
     async with live_server() as server:
         agent = await server.open_agent(config, callbacks=callbacks)
         run = await agent.run("b1", "Reply with the single word ok.")

@@ -279,8 +279,9 @@ thinking. Một profile không sao chép gì từ profile của OpenAI. Bảng v
 mỗi loại hỗ trợ nằm ở
 [trang providers của kiến trúc](../architecture/providers.md#openai-chat-completions-and-server-profiles).
 
-Chỉ vLLM có test chạy thật (`LINCH_TEST_VLLM_URL`; không đặt biến này thì chúng
-bị bỏ qua). Profile SGLang chưa được chạy với server thật, và `n_ctx` mà
+Các test chạy thật điều khiển một server vLLM (`LINCH_TEST_VLLM_URL`; không đặt biến này
+thì chúng bị bỏ qua). Đặt `LINCH_LIVE_KIND=sglang` để chạy cùng các bộ test với loại provider
+`sglang` trên một server SGLang tại URL đó (`python/tests/live/README.md`). `n_ctx` mà
 `GET /props` của llama.cpp trả về chỉ được đối chiếu với tài liệu của nó; nếu
 server trả lời khác, cửa sổ ngữ cảnh rơi về 128000 và `context_window` đặt nó.
 

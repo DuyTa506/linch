@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 from e2e_long_support import Tee, dump, load, msg_text
-from live_core_support import ONLY_VLLM, Live, live_server, make_config, needs_vllm
+from live_core_support import LIVE_KIND, ONLY_VLLM, Live, live_server, make_config, needs_vllm
 from live_sched_support import pg_dsn, query
 
 from linch_rust import (
@@ -43,7 +43,7 @@ def vllm_config(tee: Tee, dsn: str, namespace: str, **top: Any) -> Any:
         **top,
     )
     config["namespace"] = namespace
-    config["provider"] = {"id": "vllm", "base_url": tee.url}
+    config["provider"] = {"id": LIVE_KIND, "base_url": tee.url}
     return config
 
 

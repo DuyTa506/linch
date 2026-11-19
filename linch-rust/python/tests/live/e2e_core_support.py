@@ -31,6 +31,7 @@ from typing import Any, TypeVar
 
 import pytest
 from live_core_support import (
+    LIVE_KIND,
     PG_DSN,
     Trace,
     drive,
@@ -214,7 +215,7 @@ def config(fwd: Forwarder | None, spec_: dict[str, Any] | None = None, **top: An
     cfg: dict[str, Any] = {
         "namespace": f"e2ecore-{uuid.uuid4().hex[:8]}",
         "spec": spec_ if spec_ is not None else spec(),
-        "provider": {"id": "vllm", "base_url": url},
+        "provider": {"id": LIVE_KIND, "base_url": url},
         "stores": pg(),
     }
     cfg.update(top)
