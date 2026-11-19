@@ -76,10 +76,12 @@ Tradeoffs to keep in view:
 **Durability.** Memory stores are for tests and development: runs live in the agent handle and
 are gone with the server. If a run must survive a restart, or be resumed or approved from another
 process, use Postgres stores (`usage/stores.md`). On resume, a tool whose start was recorded is
-never run again, and a model call that was sent but not recorded may be sent twice
+never run again (its end is a `tool_interrupted` error and its effect is unknown: at most once, never
+exactly once), and a model call that was sent but not recorded may be sent twice
 (`usage/runs.md`). So make host tools that change things idempotent with
 `ToolContext.idempotency_key`, or check before acting. Choose run ids yourself so a crash before
-`agent.run` returns can still find the run. Keep the config, tools, callbacks and skill files of
+`agent.run` returns can still find the run: an id `agent.run` returned is durable, and one you chose
+that is already stored is `RunExists`, which `run_or_resume` handles. Keep the config, tools, callbacks and skill files of
 every released version until its runs finish, because a different contract cannot resume them.
 
 **Human approval.** Give each tool the narrowest scope. In mode `default`, write and exec calls
@@ -92,8 +94,9 @@ deny by tool, path or shell command, and can match the roles of the run's `princ
 **Blast radius.** Set `spec.max_turns`, `spec.call_timeout_ms` and each host tool's `timeout`.
 Give a workspace only to agents that need files, and turn off `Bash` with `bash: False` unless
 the job needs commands. Deny what must never run with a deny rule or a profile's `tool_deny`,
-which no mode overrides. Cost is priced only for the models in the built-in table
-(`usage/events.md`); vLLM, DeepSeek, SGLang and llama.cpp models are not in it. A `max_cost_usd`
+which no mode overrides. Give a subagent its own cap with `max_tokens` or `max_cost_usd` in its definition file. Cost is
+priced only for the models in the built-in table (`usage/events.md`), and the result splits it by
+model and by subagent (`usage_by_model`, `subagent_usage`); vLLM, DeepSeek, SGLang and llama.cpp models are not in it. A `max_cost_usd`
 cap needs a price for the primary and every fallback model, or the agent does not open: set
 `pricing`, or cap `max_tokens`. `spec.call_timeout_ms` must be at least 100.
 
@@ -105,7 +108,9 @@ server's environment. A tenant's agent needs `max_turns` or a `budget` cap (toke
 not opened. Admission denies by default what a tenant could abuse: `Bash`
 (`exec_tools`), execution backends, tool cache, long-term memory, schedules, the task ledger and
 provider lookups each need their `allow` entry, and the operator may add `system_sections` and a
-`required_policy` every agent of the tenant carries. List which of these each tenant needs. A
+`required_policy` every agent of the tenant carries. List which of these each tenant needs. When
+tenants share a provider key, decide whether `allow.cache_isolation` is needed, which only some
+providers support (`usage/providers.md`). A
 tenant's workflows (`allow.workflow`, with caps) and provider request settings
 (`allow.provider_request`) are denied the same way. A client that vanishes is noticed by TCP
 keepalive and WebSocket pings (`liveness`); a Python client whose event loop a blocking tool holds
@@ -170,7 +175,8 @@ A heartbeat continues one session and skips a fire while that session is busy. A
 
 **Load.** Decide where the kernel runs: one `Server()` sidecar per process, several sidecars
 with sessions spread across them, or one shared server. Size `stores.max_connections` at about
-two connections per run in flight per server process. See step 6 of `SKILL.md`.
+two connections per run in flight per server process. Above roughly 500 runs in flight on one
+sidecar, choose between `LINCH_STDIO_THREADS` and more sidecars. See step 6 of `SKILL.md`.
 
 **Tracing.** `linch_rust.otel` builds OpenTelemetry spans and metrics from each run's events,
 and the host supplies the providers and exporter (`usage/observability.md`). Decide now:
@@ -182,6 +188,9 @@ and the host supplies the providers and exporter (`usage/observability.md`). Dec
 - How a run joins your request's trace: pass `trace_id=` to `agent.run`, and log `run.id` and
   `run.trace_id`.
 - Which signals you will watch: cost, latency, failed tools, and runs stopped by `max_turns`.
+
+Also check the pitfalls list and Platform support in `SKILL.md` against the design (the sandbox is
+Linux only; there is no Windows build).
 
 ## 5. Decide how you will prove it
 
