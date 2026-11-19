@@ -12,6 +12,7 @@ Tests that drive a real `linch-server` process with a real model and a real Post
 | `LINCH_TEST_PG_DSN` (or `LINCH_LIVE_PG_DSN`) | a Postgres database the tests may create schemas in; each test makes its own schema and drops it |
 | `LINCH_TEST_VLLM_URL` (or `LINCH_LIVE_VLLM_URL`) | base URL (ending `/v1`) of an OpenAI-compatible vLLM server |
 | `LINCH_TEST_VLLM_MODEL` | the model name that server serves |
+| `LINCH_LIVE_KIND` | optional; the provider kind the suites drive the server as (default `vllm`; for example `sglang`). See below |
 | `DEEPSEEK_API_KEY` | only for the DeepSeek scenarios; tests that need it skip without it |
 | `E2E_RESULTS`, `TOOLSEC_RESULTS`, `E2E_DIR` | where the suites write their raw JSON/JSONL results (default: a `linch-live-e2e` directory under the system temp directory) |
 
@@ -27,6 +28,17 @@ pytest -m live -q tests/live/test_live_long_steer.py -k "not deepseek"
 
 Assertions are on durable facts (events, rows, files, process state), never on wording. A test that
 depends on the model following a script retries the scenario once and says so on stderr.
+
+## Running the suites against SGLang
+
+The suites speak to `LINCH_TEST_VLLM_URL` as provider kind `vllm`. To drive an SGLang server instead, point
+`LINCH_TEST_VLLM_URL` at it and set `LINCH_LIVE_KIND=sglang`; every suite then sends `{"id": "sglang", ...}` as
+its provider, and the collected cases, ids and skip rules are the same (`pytest --collect-only -m live`
+reports the same count with and without the variable). Unset, nothing changes. The server must be started
+with the flags the scenarios need (a reasoning parser, a tool-call parser and `--enable-cache-report`).
+Assertions that read the server's raw usage use `wire_usage.reasoning_tokens`, which accepts SGLang's
+`usage.reasoning_tokens` and vLLM's `usage.completion_tokens_details.reasoning_tokens`. The `ts_*` toolsec
+suites use a scripted local model, not a server, and keep the `vllm` kind.
 
 ## The vLLM proxy
 

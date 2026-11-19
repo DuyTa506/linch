@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from live_core_support import LIVE_KIND
 
 from linch_rust import (
     AgentConfig,
@@ -106,7 +107,7 @@ def query(dsn: str, statement: str, *args: Any) -> list[tuple[Any, ...]]:
 def model(kind: str) -> tuple[str, dict[str, Any]]:
     """`(spec.model, provider)` of a live provider."""
     if kind == "vllm":
-        return VLLM_MODEL, {"id": "vllm", "base_url": VLLM_URL}
+        return VLLM_MODEL, {"id": LIVE_KIND, "base_url": VLLM_URL}
     return DEEPSEEK_MODEL, {"id": "deepseek"}
 
 

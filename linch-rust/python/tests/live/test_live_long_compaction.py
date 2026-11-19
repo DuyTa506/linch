@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 from e2e_long_support import Tee, dump, load, msg_text
-from live_core_support import ONLY_VLLM, Live, live_server, make_config, needs_vllm
+from live_core_support import LIVE_KIND, ONLY_VLLM, Live, live_server, make_config, needs_vllm
 
 from linch_rust import CompactionEvent, ResultEvent, tool
 
@@ -60,7 +60,7 @@ def agent_config(
     config = make_config(
         LIVE, LIVE.spec(max_output_tokens=200, compaction=compaction, **spec_extra)
     )
-    provider: dict[str, Any] = {"id": "vllm", "base_url": tee.url}
+    provider: dict[str, Any] = {"id": LIVE_KIND, "base_url": tee.url}
     if window is not None:
         provider["context_window"] = window
     config["provider"] = provider

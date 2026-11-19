@@ -19,6 +19,7 @@ from e2e_core_support import (
     run_to_end,
     spec,
 )
+from wire_usage import reasoning_tokens
 
 from linch_rust import (
     BudgetEvent,
@@ -275,9 +276,7 @@ async def test_5_reasoning_effort_levels(fwd: Any, effort: str, prompt_key: str)
                     "prompt": prompt_key,
                     "rep": rep,
                     "completion_tokens": usage.get("completion_tokens"),
-                    "reasoning_tokens": (usage.get("completion_tokens_details") or {}).get(
-                        "reasoning_tokens"
-                    ),
+                    "reasoning_tokens": reasoning_tokens(usage),
                     "result_output_tokens": trace.result.total_usage["output_tokens"],
                     "thinking_deltas": len(deltas),
                     "wire_effort_fields": {
@@ -293,7 +292,7 @@ async def test_5_reasoning_effort_levels(fwd: Any, effort: str, prompt_key: str)
             assert not trace.of(ErrorEvent), trace.of(ErrorEvent)
             assert len(wire) == 1
             if effort == "off":
-                assert not deltas and usage["completion_tokens_details"]["reasoning_tokens"] == 0
+                assert not deltas and reasoning_tokens(usage) == 0
             elif effort in ("high", "max"):
                 assert "xhigh" in json.dumps(
                     {k: v for k, v in body.items() if "effort" in k or "chat_template" in k}
