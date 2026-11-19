@@ -119,6 +119,28 @@
 //!
 //! # Methods
 //!
+//! **`server.info`**: the call a client makes first, after the login on a
+//! socket and after the upgrade on a WebSocket. Params are optional and only
+//! logged: `{client_version?, client_protocol?}`
+//! ([`InfoParams`](protocol::InfoParams)); the result is
+//! [`ServerInfo`](protocol::ServerInfo), the same for every caller, a
+//! tenant included, since it holds only facts of the build:
+//!
+//! ```json
+//! {"server_version": "0.1.1", "protocol": 1, "contract_version": 1,
+//!  "capabilities": ["cache_isolation", "provider_info", "run_steer",
+//!                   "schedule", "workflow"],
+//!  "backends": ["local", "sandbox", "docker", "remote"],
+//!  "limits": {"max_message_bytes": 16777216, "default_max_runs": 16}}
+//! ```
+//!
+//! `protocol` ([`PROTOCOL_VERSION`](protocol::PROTOCOL_VERSION)) changes only
+//! for a change an older client would misread; a client refuses a server
+//! whose protocol it does not speak. `contract_version`
+//! ([`linch::CONTRACT_VERSION`]) is the run contract digest's version.
+//! A client ignores members and capability names it does not know, so adding
+//! one keeps the protocol. A server without the method answers `-32601`.
+//!
 //! **`agent.open`**: params are an [`AgentConfig`](linch::AgentConfig) plus
 //! optional `tools` and `callbacks` lists
 //! ([`OpenParams`](protocol::OpenParams)):

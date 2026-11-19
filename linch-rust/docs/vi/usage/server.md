@@ -246,6 +246,8 @@ final: Hello over WebSocket.
 | `OSError` khi vào khối | Không có gì lắng nghe ở địa chỉ đó |
 | `Unauthenticated` (-32003) khi vào khối | Token không có trong cấu hình (HTTP `401` trên WebSocket) |
 | `LimitReached` (-32005) khi vào khối | Tenant đang giữ `max_connections` kết nối (`kind == "connections"`; HTTP `429` trên WebSocket), hoặc 32 lượt đăng nhập đang chờ cùng lúc (`kind == "logins"`) |
+| `IncompatibleServer` khi vào khối | [Bắt tay phiên bản](#bắt-tay-phiên-bản) thất bại: protocol của server nằm ngoài dải client này nói, hoặc server có trước `server.info` |
+| `HandshakeTimeout` khi vào khối | Server không trả lời `server.info` trong 15 giây |
 | `NotAllowed` (-32004) | `open_agent` hoặc một lệnh gọi run không qua được một [bước kiểm tra](#những-gì-admission-từ-chối-và-lý-do); `.kind` nêu tên bước đó |
 | `LimitReached` (-32005) bởi `open_agent` | Tenant đang giữ mở `max_agents` agent; không có gì được khởi động (`kind == "agents"`) |
 | `LimitReached` (-32005) bởi `run`, `resume` hoặc `approve` | Tenant đang điều khiển `max_runs` run; không có gì được khởi động (`kind == "runs"`, `.max` là giới hạn) |
@@ -258,6 +260,37 @@ final: Hello over WebSocket.
 - Mỗi kết nối có các handle agent riêng (`agent-1` luôn là của chính kết nối) và chỉ
   có thể hủy các run mà nó điều khiển. Một run Postgres có thể được resume hoặc approve
   từ một kết nối khác mở cùng cấu hình.
+
+### Bắt tay phiên bản
+
+Vào `Server()` hoặc `Server.connect(...)` thực hiện thêm một lời gọi trước khi trả về:
+`server.info`, sau bước đăng nhập. Câu trả lời nằm ở `server.info`:
+
+```python
+async with Server.connect(SOCKET, token=TOKEN) as server:
+    info = server.info
+    info.server_version      # "0.1.1"
+    info.protocol            # 1: giao thức wire; client này nói từ 1 đến 1
+    info.contract_version    # 1: phiên bản digest của run contract
+    info.has("cache_isolation")   # một tính năng tùy chọn, theo tên
+    info.backends            # ("local", "sandbox", "docker", "remote")
+    info.max_message_bytes   # 16777216
+    info.default_max_runs    # 16
+```
+
+- **Không khớp thì lỗi ngay, có tên.** Protocol nằm ngoài dải của client ném
+  `IncompatibleServer` (`.protocol`, `.server_version`, `.supported`), server không có
+  `server.info` cũng vậy (`.protocol` là `None`): một binary cũ hơn client. Tiến trình
+  con được dừng, hoặc kết nối được đóng, trước khi lỗi đến tay bạn, nên không rò chỗ
+  kết nối của tenant. Server không bao giờ trả lời ném `HandshakeTimeout`.
+- **Số protocol hiếm khi đổi.** Nó chỉ đổi với một thay đổi wire mà client cũ sẽ đọc sai.
+  Một method, member hoặc tính năng tùy chọn mới thì thêm một tên capability; kiểm tra
+  bằng `info.has(...)` và bỏ qua các tên bạn không biết.
+- **Mọi kết nối nhận cùng một câu trả lời.** Tenant thấy đúng những gì client local
+  thấy: các hằng của bản build, không có giới hạn, tên, host hay đường dẫn riêng của
+  nó. `backends` liệt kê những gì bản build cài đặt, không phải những gì host chạy được
+  hay tenant được dùng; `default_max_runs` là mức giới hạn mặc định, không phải của
+  riêng tenant.
 
 ---
 

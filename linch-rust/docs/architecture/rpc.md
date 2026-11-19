@@ -57,6 +57,7 @@ to its handler. Params types refuse unknown fields; `OpenParams` takes
 | Method | Params | Handler | Result |
 |---|---|---|---|
 | `connection.auth` | `AuthParams` (`protocol.rs:73`) | `login` (`crates/linch-rpc/src/server/login.rs:24`), first message on the socket only; elsewhere `-32600` | `Authenticated` `{tenant}` |
+| `server.info` | `InfoParams` `{client_version?, client_protocol?}` (`crates/linch-rpc/src/protocol/info.rs`); both are only logged at debug level, `client_version` is at most 64 bytes of text without control characters | `server_info` (`server.rs`), no tenant check: the answer is constants of the build, the same for a local client and every tenant | `ServerInfo` `{server_version, protocol, contract_version, capabilities, backends, limits: {max_message_bytes, default_max_runs}}`; unlike the other results it is not strict about unknown members |
 | `agent.open` | `OpenParams` | `Server::open` (`crates/linch-rpc/src/server/agents.rs:20-49`) | `AgentOpened` `{agent, contract, skipped?}` |
 | `agent.close` | `CloseParams` | `agents.rs:52-80`; `-32002` while the connection drives a run of it | `{}` once its MCP servers are gone |
 | `session.close` | `SessionCloseParams` | `agents.rs:81-92`: `Agent::close_session` (forgets the session's reads, kills its background `Bash` commands) | `{}` |
@@ -479,6 +480,49 @@ this connection takes it over instead of a new one (`run.rs:84-89`).
 Either way the run holds one place, so a tenant's running runs have at most
 `max_runs × (1 + max_background)` provider streams.
 
+## The version handshake
+
+`server.info` lets a client and a server learn each other's version at
+connect and refuse a mismatch at once, instead of failing on the first
+method whose shape changed.
+
+```json
+{"server_version": "0.1.1", "protocol": 1, "contract_version": 1,
+ "capabilities": ["cache_isolation", "provider_info", "run_steer", "schedule", "workflow"],
+ "backends": ["local", "sandbox", "docker", "remote"],
+ "limits": {"max_message_bytes": 16777216, "default_max_runs": 16}}
+```
+
+| Member | Meaning | Changes when |
+|---|---|---|
+| `server_version` | The release (`CARGO_PKG_VERSION`) | Every release |
+| `protocol` | `PROTOCOL_VERSION` (`protocol/info.rs`) | A change an older client would misread: a member removed or retyped, a meaning changed. Adding a method, member, capability or optional param does not bump it |
+| `contract_version` | `linch::CONTRACT_VERSION` (`linch-core/src/agent/spec.rs`) | The run contract digest of an unchanged agent changes, so stored runs no longer resume. It is not an input of the digest; a golden test (`the_contract_version_names_the_golden_digest`) pairs it with a fixed digest |
+| `capabilities` | Names of optional features (`CAPABILITIES`) | A feature is added; a name is never reused for other behavior |
+| `backends` | The execution backends the build implements (`BACKENDS`: `sandbox` only on Linux) | A backend is added. Whether one works on the host or is allowed to a tenant is decided at `agent.open` |
+| `limits` | `max_message_bytes` (`MAX_LINE_BYTES`), `default_max_runs` (`DEFAULT_MAX_RUNS`) | The constants change |
+
+Choices:
+
+- **Same answer for everyone.** The method runs no tenant check and reads no
+  tenant: a tenant's own `max_runs`, `allow` lists, name, DSNs, hosts and paths
+  are not in it (`crates/linch-rpc/tests/server_info.rs` compares a tenant's
+  answer with a local client's). A tenant learns its own caps from the
+  `-32005` refusals, as before.
+- **The first call's params are frozen.** The client does not know the server
+  yet, so `{client_version?, client_protocol?}` are optional and only logged
+  at debug level; the server never changes behavior on them. An unknown
+  param is `-32602`, as for every method.
+- **The result is open.** `ServerInfo` does not use `deny_unknown_fields`, and
+  clients ignore unknown members and capability names, so a later server can
+  add them without a protocol bump.
+- **A client states the range it speaks.** The Python client speaks protocols
+  `PROTOCOL_MIN` to `PROTOCOL_MAX` (`python/src/linch_rust/info.py`) and
+  raises `IncompatibleServer` (and closes the connection) for any other. A
+  server that has no `server.info` answers `-32601`, which the client reports
+  as the same error with `protocol` `None`, not as a bare `ProtocolError`; one
+  that never answers is `HandshakeTimeout` after 15 s.
+
 ## The clients
 
 The Rust `Client` (`client.rs:97-101`) has one generic method,
@@ -513,6 +557,11 @@ and `close`, `close_session` and `events` (`agent.py:159-201`).
 A field added to `AgentConfig` reaches `agent.open` with no change here;
 `python/tests/test_config.py:53` checks that the Python typed config names
 every field the server reads.
+
+A change to the wire that an older client would misread bumps
+`PROTOCOL_VERSION` and `PROTOCOL_MIN`/`PROTOCOL_MAX` in the Python client in
+the same change; a purely additive one adds a capability name and leaves
+both alone.
 
 ## Example
 

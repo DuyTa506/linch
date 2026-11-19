@@ -61,8 +61,8 @@ pub mod verification;
 pub mod vfs;
 
 pub use agent::{
-    Agent, AgentBuilder, AgentSpec, BuildError, ForkError, MAX_PENDING_STEERS, MAX_STEER_BYTES,
-    RunError, RunOptions,
+    Agent, AgentBuilder, AgentSpec, BuildError, CONTRACT_VERSION, ForkError, MAX_PENDING_STEERS,
+    MAX_STEER_BYTES, RunError, RunOptions,
 };
 pub use budget::RunBudget;
 pub use canonical::{

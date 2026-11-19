@@ -244,6 +244,8 @@ final: Hello over WebSocket.
 | `OSError` on entering | Nothing listens at the address |
 | `Unauthenticated` (-32003) on entering | The token is not in the config (an HTTP `401` on the WebSocket) |
 | `LimitReached` (-32005) on entering | The tenant holds `max_connections` connections (`kind == "connections"`; an HTTP `429` on the WebSocket), or 32 logins wait at once (`kind == "logins"`) |
+| `IncompatibleServer` on entering | The [version handshake](#the-version-handshake) failed: the server's protocol is outside the range this client speaks, or the server predates `server.info` |
+| `HandshakeTimeout` on entering | The server did not answer `server.info` within 15 seconds |
 | `NotAllowed` (-32004) | `open_agent` or a run call failed a [check](#what-admission-refuses-and-why); `.kind` names it |
 | `LimitReached` (-32005) by `open_agent` | The tenant keeps `max_agents` agents open; nothing started (`kind == "agents"`) |
 | `LimitReached` (-32005) by `run`, `resume` or `approve` | The tenant drives `max_runs` runs; nothing started (`kind == "runs"`, `.max` the cap) |
@@ -257,6 +259,39 @@ final: Hello over WebSocket.
   connection's own) and can cancel only the runs it drives. A Postgres run
   can be resumed or approved from another connection that opens the same
   config.
+
+### The version handshake
+
+Entering `Server()` or `Server.connect(...)` makes one more call before it
+returns: `server.info`, after the login. The answer is on `server.info`:
+
+```python
+async with Server.connect(SOCKET, token=TOKEN) as server:
+    info = server.info
+    info.server_version      # "0.1.1"
+    info.protocol            # 1: the wire protocol; this client speaks 1 to 1
+    info.contract_version    # 1: the run contract digest's version
+    info.has("cache_isolation")   # an optional feature, by name
+    info.backends            # ("local", "sandbox", "docker", "remote")
+    info.max_message_bytes   # 16777216
+    info.default_max_runs    # 16
+```
+
+- **A mismatch fails at once, by name.** A protocol outside the client's range
+  raises `IncompatibleServer` (`.protocol`, `.server_version`, `.supported`),
+  and so does a server that has no `server.info` (`.protocol` is `None`): a
+  binary older than the client. The child process is stopped, or the
+  connection closed, before the error reaches you, so no tenant connection
+  place leaks. A server that never answers raises `HandshakeTimeout`.
+- **The protocol number moves rarely.** It changes only for a wire change an
+  older client would misread. A new method, member or optional feature adds a
+  capability name instead; check it with `info.has(...)` and ignore names you
+  do not know.
+- **Every connection gets the same answer.** A tenant sees what a local
+  client sees: constants of the build, none of its own caps, names, hosts or
+  paths. `backends` lists what the build implements, not what the host can run
+  or the tenant may use; `default_max_runs` is the default cap, not the
+  tenant's own.
 
 ---
 

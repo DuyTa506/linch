@@ -4,6 +4,7 @@ reached over its Unix socket or WebSocket."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import os
 from collections.abc import Callable, Mapping, Sequence
@@ -18,6 +19,7 @@ from .callbacks import Callback
 from .config import AgentConfig
 from .errors import LinchError
 from .exec_host import ExecutionHost
+from .info import ServerInfo, handshake
 from .provider import ModelInfo, ModelList, ProviderCapabilities
 from .run import Observer
 from .tools import HostTool
@@ -64,6 +66,7 @@ class Server:
         self._process: asyncio.subprocess.Process | None = None
         self._link: Link | None = None
         self._conn: Connection | None = None
+        self._info: ServerInfo | None = None
 
     @classmethod
     def connect(cls, address: str, *, token: str) -> Server:
@@ -127,10 +130,24 @@ class Server:
         self._started()
         return self._link.tenant if self._link is not None else None
 
+    @property
+    def info(self) -> ServerInfo:
+        """What the server said about itself when this client connected: its
+        release, protocol and contract versions, capabilities, backends and
+        main limits. The same for every tenant."""
+        self._started()
+        assert self._info is not None
+        return self._info
+
     async def start(self) -> None:
-        """Spawn the server, or connect and log in; `async with` calls this.
+        """Spawn the server, or connect and log in, then ask `server.info`;
+        `async with` calls this.
 
         Raises:
+            IncompatibleServer: The server's protocol is outside the range
+                this client speaks, or it has no `server.info`. The child
+                is stopped, or the connection closed, before this is raised.
+            HandshakeTimeout: The server did not answer `server.info` in time.
             Unauthenticated: A remote server does not know the token.
             LimitReached: The tenant holds all its connections, or too many
                 connections wait to log in to a remote socket.
@@ -139,6 +156,18 @@ class Server:
         """
         if self._conn is not None:
             raise LinchError("the server is already started")
+        await self._open()
+        try:
+            self._info = await handshake(self._started())
+        except BaseException:
+            # `async with` does not call `close` when `start` raises: free the
+            # child or the tenant's connection place here.
+            with contextlib.suppress(Exception):
+                await self.close()
+            self._conn = self._link = self._process = None
+            raise
+
+    async def _open(self) -> None:
         if self._remote is not None:
             self._link = await open_link(*self._remote)
             self._conn = self._link.connection
