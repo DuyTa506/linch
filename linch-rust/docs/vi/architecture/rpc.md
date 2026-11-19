@@ -50,6 +50,13 @@ process của chính mình, nên không có wire protocol, tenant hay allowlist.
 
 ## Method và message
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../../assets/rpc-protocol-dark.svg">
+  <img src="../../assets/rpc-protocol.svg" alt="The JSON-RPC session: server.info, agent.open, run.start, run.event notifications, server requests for host tools and remote exec, and run.end, over stdio, a Unix socket or HTTP with WebSocket" width="900">
+</picture>
+
+*Một phiên JSON-RPC: handshake, request và answer, luồng event, và các lệnh server gọi ngược vào client.*
+
 Mỗi tên method là một hằng số `method::` (`crates/linch-rpc/src/protocol.rs:28-66`),
 và `Server::dispatch` (`crates/linch-rpc/src/server.rs:304-322`) ánh xạ từng tên
 tới handler của nó. Các kiểu params từ chối trường không biết; `OpenParams` tách

@@ -14,6 +14,13 @@ The Rust queue is a plain table dequeued with `FOR UPDATE SKIP LOCKED` and
 woken by `LISTEN/NOTIFY`. It keeps PgQueuer's defaults for the failure cap
 and the longest retry delay (`crates/linch-worker/src/settle.rs:14-20`).
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../assets/worker-dark.svg">
+  <img src="../assets/worker.svg" alt="The worker job queue: a host enqueues jobs or creates schedules, workers dequeue from Postgres and run with a heartbeat, and a job ends done, superseded, retried with back-off, or as a dead letter" width="900">
+</picture>
+
+*The job queue: enqueue, dequeue under a lease, heartbeat, then done, retry with back-off, or dead letter.*
+
 ## Tables
 
 `linch_worker::migrate(&pool)` (`crates/linch-worker/src/lib.rs:135`) creates

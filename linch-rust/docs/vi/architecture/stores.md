@@ -57,6 +57,13 @@ Các trạng thái terminal là `completed`, `failed` và `aborted`
 
 ### Fencing
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../../assets/lease-fencing-dark.svg">
+  <img src="../../assets/lease-fencing.svg" alt="Worker A claims a run at epoch 1 and stops renewing; worker B claims at epoch 2; A's late commit is rejected with LeaseLost (-32022)" width="900">
+</picture>
+
+*Mỗi claim cộng 1 vào epoch, nên lần ghi muộn của worker đã mất lease bị từ chối.*
+
 Mỗi claim cộng 1 vào epoch; mọi `commit` sau đó dưới một lease cũ hơn đều
 thất bại với `LeaseLost`, nên một holder đã mất run không bao giờ ghi vào nó được nữa.
 Các commit chỉ bị fence bởi epoch: một holder có lease đã hết hạn nhưng chưa ai claim
@@ -289,6 +296,13 @@ Một `Worker` cần thêm một kết nối cho kết nối `LISTEN` của nó
 <a id="group-commit-write-counts"></a>
 
 ## Số lần ghi của group commit
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../../assets/group-commit-dark.svg">
+  <img src="../../assets/group-commit.svg" alt="The journal holds checkpoints in memory and writes them at barriers: five run-store commits and two session-store writes for a turn with one started tool" width="900">
+</picture>
+
+*Journal giữ các checkpoint và flush chúng cùng nhau tại các barrier: 3 + 2k lần ghi run và 2 lần ghi session cho mỗi lượt có tool.*
 
 Run journal (`crates/linch-core/src/journal.rs`) giữ các event và checkpoint trong bộ nhớ
 và ghi chúng trong một `commit` tại mỗi barrier: trước khi gửi tới provider, quanh mỗi

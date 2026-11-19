@@ -343,6 +343,13 @@ never names a new process.
 
 ### Execution backends
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../assets/exec-isolation-dark.svg">
+  <img src="../assets/exec-isolation.svg" alt="The four Bash execution backends, local, sandbox, docker and remote, with the isolation layers each one has" width="900">
+</picture>
+
+*The Bash backends and the isolation layers each one provides.*
+
 `ExecutionBackend` (`crates/linch-tools/src/exec.rs:141`) is one execution
 world, Python's `ExecutionBackend`: the `LocalFs` the file tools use and a
 shell `Bash` starts commands with. One belongs to one opened agent, which

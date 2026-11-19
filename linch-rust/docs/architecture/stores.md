@@ -55,6 +55,13 @@ Terminal statuses are `completed`, `failed` and `aborted`
 
 ### Fencing
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../assets/lease-fencing-dark.svg">
+  <img src="../assets/lease-fencing.svg" alt="Worker A claims a run at epoch 1 and stops renewing; worker B claims at epoch 2; A's late commit is rejected with LeaseLost (-32022)" width="900">
+</picture>
+
+*A claim adds 1 to the epoch, so the late write of a worker that lost its lease is rejected.*
+
 Every claim adds 1 to the epoch; every later `commit` under an older lease
 fails with `LeaseLost`, so a holder that lost its run can never write to it
 again. Commits are fenced by the epoch alone: a holder whose lease ran out
@@ -294,6 +301,13 @@ connections per concurrently committing run. A `Worker` needs one more for its
 below sizes its pool that way with `connect`.
 
 ## Group-commit write counts
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../assets/group-commit-dark.svg">
+  <img src="../assets/group-commit.svg" alt="The journal holds checkpoints in memory and writes them at barriers: five run-store commits and two session-store writes for a turn with one started tool" width="900">
+</picture>
+
+*The journal holds checkpoints and flushes them together at barriers: 3 + 2k run writes and 2 session writes per tool turn.*
 
 The run journal (`crates/linch-core/src/journal.rs`) holds events and the
 checkpoint in memory and writes them in one `commit` at each barrier: before a

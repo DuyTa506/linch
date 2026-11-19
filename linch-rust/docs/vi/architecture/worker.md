@@ -16,6 +16,13 @@ Hàng đợi Rust là một bảng thường được dequeue bằng `FOR UPDATE
 được đánh thức bằng `LISTEN/NOTIFY`. Nó giữ các giá trị mặc định của PgQueuer cho ngưỡng
 thất bại và độ trễ retry dài nhất (`crates/linch-worker/src/settle.rs:14-20`).
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../../assets/worker-dark.svg">
+  <img src="../../assets/worker.svg" alt="The worker job queue: a host enqueues jobs or creates schedules, workers dequeue from Postgres and run with a heartbeat, and a job ends done, superseded, retried with back-off, or as a dead letter" width="900">
+</picture>
+
+*Hàng đợi job: đưa vào, dequeue dưới một lease, heartbeat, rồi done, retry có back-off, hoặc dead letter.*
+
 ## Bảng
 
 `linch_worker::migrate(&pool)` (`crates/linch-worker/src/lib.rs:135`) tạo
