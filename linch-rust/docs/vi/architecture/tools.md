@@ -339,6 +339,13 @@ tới một process mới.
 
 ### Execution backend
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../../assets/exec-isolation-dark.svg">
+  <img src="../../assets/exec-isolation.svg" alt="The four Bash execution backends, local, sandbox, docker and remote, with the isolation layers each one has" width="900">
+</picture>
+
+*Các backend của Bash và các lớp cô lập mà mỗi backend có.*
+
 `ExecutionBackend` (`crates/linch-tools/src/exec.rs:141`) là một thế giới thực thi,
 `ExecutionBackend` của Python: `LocalFs` mà các tool tệp dùng và một shell mà `Bash`
 dùng để khởi động lệnh. Mỗi cái thuộc về một agent đã mở, agent này gọi

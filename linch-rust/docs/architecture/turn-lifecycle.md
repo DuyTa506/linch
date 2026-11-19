@@ -55,6 +55,13 @@ What differs in Rust:
 
 ## One turn
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../assets/turn-lifecycle-dark.svg">
+  <img src="../assets/turn-lifecycle.svg" alt="One turn of the agent loop as a swimlane across the model provider, the kernel, tools and Postgres, with the run-store writes numbered 1 to 5 and the session-store writes S1 and S2" width="900">
+</picture>
+
+*One turn: the run store is written before the provider call, before and after each tool, and before each session write.*
+
 `runner.rs:1-39` lists the turn. In order:
 
 1. **Compact** when `spec.compaction` is set and the provider view is due
@@ -357,6 +364,13 @@ write of a prerequisite run, a gate that passes after a correction, a gate
 that never passes, a rewritten answer, and the same through a final tool.
 
 ## Barriers and group commit
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../assets/group-commit-dark.svg">
+  <img src="../assets/group-commit.svg" alt="The journal holds checkpoints in memory and writes them at barriers: five run-store commits and two session-store writes for a turn with one started tool" width="900">
+</picture>
+
+*The journal holds checkpoints and flushes them together at barriers: 3 + 2k run writes and 2 session writes per tool turn.*
 
 A `Journal` holds one run's events and checkpoint in memory and writes them
 with `RunStore::commit` at barriers (`journal.rs:1-34`). The count per turn and

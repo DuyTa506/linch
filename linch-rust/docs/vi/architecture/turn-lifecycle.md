@@ -55,6 +55,13 @@ Linch bản Python có cùng vòng lặp ([vòng đời của lượt](../../../
 
 ## Một lượt
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../../assets/turn-lifecycle-dark.svg">
+  <img src="../../assets/turn-lifecycle.svg" alt="One turn of the agent loop as a swimlane across the model provider, the kernel, tools and Postgres, with the run-store writes numbered 1 to 5 and the session-store writes S1 and S2" width="900">
+</picture>
+
+*Một lượt: run store được ghi trước lệnh gọi provider, trước và sau mỗi tool, và trước mỗi lần ghi session.*
+
 `runner.rs:1-39` liệt kê các bước của lượt. Theo thứ tự:
 
 1. **Compact** khi `spec.compaction` được đặt và provider view đến hạn
@@ -336,6 +343,13 @@ run prerequisite, một gate đạt sau một lần sửa, một gate không bao
 trường hợp đó qua một final tool.
 
 ## Barrier và group commit
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../../assets/group-commit-dark.svg">
+  <img src="../../assets/group-commit.svg" alt="The journal holds checkpoints in memory and writes them at barriers: five run-store commits and two session-store writes for a turn with one started tool" width="900">
+</picture>
+
+*Journal giữ các checkpoint và flush chúng cùng nhau tại các barrier: 3 + 2k lần ghi run và 2 lần ghi session cho mỗi lượt có tool.*
 
 Một `Journal` giữ các event và checkpoint của một run trong bộ nhớ và ghi chúng bằng
 `RunStore::commit` tại các barrier (`journal.rs:1-34`). Số lần ghi cho mỗi lượt và các

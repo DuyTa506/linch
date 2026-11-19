@@ -48,6 +48,13 @@ package `linch_rust` (`python/src/linch_rust/`) is a client of this server.
 
 ## Methods and messages
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../assets/rpc-protocol-dark.svg">
+  <img src="../assets/rpc-protocol.svg" alt="The JSON-RPC session: server.info, agent.open, run.start, run.event notifications, server requests for host tools and remote exec, and run.end, over stdio, a Unix socket or HTTP with WebSocket" width="900">
+</picture>
+
+*A JSON-RPC session: handshake, requests and answers, the event stream, and the server's calls back into the client.*
+
 Every method name is a `method::` constant (`crates/linch-rpc/src/protocol.rs:28-66`),
 and `Server::dispatch` (`crates/linch-rpc/src/server.rs:304-322`) maps each
 to its handler. Params types refuse unknown fields; `OpenParams` takes
