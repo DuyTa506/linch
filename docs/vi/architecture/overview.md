@@ -24,50 +24,16 @@ Khi nhúng trong một tiến trình, ứng dụng chủ tạo một `Agent`, l�
 worker thực thi chúng. Postgres là nguồn dữ liệu chuẩn, được lưu trữ bền vững cho session,
 run, checkpoint, lease và các event của run có số thứ tự.
 
-```mermaid
-flowchart LR
-    subgraph Host["Host service"]
-        API["HTTP/API process"]
-        OTel["OpenTelemetry SDK/exporter"]
-        Deps["RunOptions(deps=...)\ntenant services"]
-    end
+<div align="center">
 
-    subgraph Dispatch["Optional linch.worker"]
-        Queue["PgQueuer"]
-        Worker["Worker\nclaim / renew / release"]
-    end
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../../assets/py-overview-dark.svg">
+  <img src="../../assets/py-overview.svg" alt="Cấu trúc runtime của Linch: dịch vụ chủ, worker tùy chọn, kernel headless và Postgres là nguồn dữ liệu chuẩn" width="700">
+</picture>
 
-    subgraph Kernel["Linch headless kernel"]
-        Agent["Agent\nContext + registries"]
-        Session["Session\nappend-only SessionLog"]
-        Loop["loop/runner.py\nturn phases"]
-        Guard["turn_stopping\nreliability listeners"]
-        Scheduler["scheduler.py\npermission + tool execution"]
-        Provider["providers/*\nnormalized provider stream"]
-    end
+</div>
 
-    subgraph Durable["Postgres source of truth"]
-        Sessions["PostgresSessionStore"]
-        Runs["PostgresRunStore\nruns + leases + checkpoints"]
-        Events["run_events\n(run_id, seq)"]
-    end
-
-    API -->|"enqueue_run"| Queue
-    Queue --> Worker
-    Worker -->|"RunLease(epoch)"| Runs
-    Worker --> Agent
-    API -->|"embedded run"| Agent
-    Agent --> Session --> Loop
-    Loop --> Provider
-    Loop --> Scheduler
-    Loop --> Guard
-    Scheduler --> Deps
-    Session <-->|"messages / snapshots"| Sessions
-    Loop <-->|"checkpoint before side effects"| Runs
-    Runs --> Events
-    Events -->|"load_events(after_seq=...)"| API
-    Agent -.->|"tracer + meter resolved from Context"| OTel
-```
+*Dịch vụ chủ đưa run vào hàng đợi hoặc chạy agent nhúng; kernel Linch checkpoint vào Postgres, nơi vẫn là nguồn dữ liệu chuẩn.*
 
 ## Ranh giới và các bất biến
 
