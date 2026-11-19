@@ -108,21 +108,23 @@ def check_runs(dsn: str, expected: int) -> None:
 async def test_the_later_build_resumes_a_run_the_earlier_one_left_unfinished(pg_dsn: str) -> None:
     stores = leased_stores(pg_dsn)
     wait, started = blocking_tool()
-    async with earlier() as old:
-        agent = await old.open_agent(
+    async with earlier() as earlier_server:
+        agent = await earlier_server.open_agent(
             config([tool_turn("call_1", "wait", {"q": "x"})], stores=stores), tools=[wait]
         )
         run = await agent.run("s1", "Wait for x")
         await asyncio.wait_for(started.wait(), 20)
         before = await agent.events(run.id)
         entries_before = session_entries(pg_dsn)
-        os.kill(old.pid, signal.SIGKILL)
+        os.kill(earlier_server.pid, signal.SIGKILL)
         with pytest.raises(ConnectionClosed):
             await run.result()
 
     wait, started = blocking_tool()
-    async with Server() as new:
-        agent = await new.open_agent(config([text_turn("Recovered.")], stores=stores), tools=[wait])
+    async with Server() as later_server:
+        agent = await later_server.open_agent(
+            config([text_turn("Recovered.")], stores=stores), tools=[wait]
+        )
         result = await once_free(lambda: agent.resume(run.id))
         replayed = await agent.events(run.id)
 
@@ -136,19 +138,21 @@ async def test_the_later_build_resumes_a_run_the_earlier_one_left_unfinished(pg_
 async def test_the_earlier_build_cannot_resume_a_run_the_later_one_wrote(pg_dsn: str) -> None:
     stores = leased_stores(pg_dsn)
     wait, started = blocking_tool()
-    async with Server() as new:
-        agent = await new.open_agent(
+    async with Server() as later_server:
+        agent = await later_server.open_agent(
             config([tool_turn("call_1", "wait", {"q": "x"})], stores=stores), tools=[wait]
         )
         run = await agent.run("s1", "Wait for x")
         await asyncio.wait_for(started.wait(), 20)
-        os.kill(new.pid, signal.SIGKILL)
+        os.kill(later_server.pid, signal.SIGKILL)
         with pytest.raises(ConnectionClosed):
             await run.result()
 
     wait, started = blocking_tool()
-    async with earlier() as old:
-        agent = await old.open_agent(config([text_turn("Never.")], stores=stores), tools=[wait])
+    async with earlier() as earlier_server:
+        agent = await earlier_server.open_agent(
+            config([text_turn("Never.")], stores=stores), tools=[wait]
+        )
         failure: BaseException | None = None
         for _ in range(20):
             resumed = await agent.resume(run.id)
@@ -206,30 +210,30 @@ async def test_a_rolling_upgrade_loses_no_run_and_repeats_no_effect(pg_dsn: str)
         ]
 
     handles = []
-    async with earlier() as old:
+    async with earlier() as earlier_server:
         live = []
         for i in range(runs):
-            agent = await old.open_agent(
+            agent = await earlier_server.open_agent(
                 config(turns(i, True), stores=stores), tools=tools_for(i, True)
             )
             run = await agent.run(f"s{i}", "go")
             live.append(run)
             handles.append((i, run.id))
         await asyncio.wait_for(asyncio.gather(*(e.wait() for e in slow_started.values())), 30)
-        old._process.send_signal(signal.SIGTERM)  # type: ignore[union-attr]
+        earlier_server._process.send_signal(signal.SIGTERM)  # type: ignore[union-attr]
         for run in live:
             with pytest.raises(ConnectionClosed):
                 await run.result()
-        assert old._process is not None
-        await asyncio.wait_for(old._process.wait(), 30)
+        assert earlier_server._process is not None
+        await asyncio.wait_for(earlier_server._process.wait(), 30)
 
     assert all(count == 1 for count in bumped.values())
     for e in slow_started.values():
         e.clear()
-    async with Server() as new:
+    async with Server() as later_server:
         results = []
         for i, run_id in handles:
-            agent = await new.open_agent(
+            agent = await later_server.open_agent(
                 config(turns(i, False), stores=stores), tools=tools_for(i, False)
             )
             results.append(await once_free(lambda a=agent, r=run_id: a.resume(r)))  # type: ignore[misc]
@@ -269,8 +273,8 @@ async def serving_other(dsn: str, binary: str, *, allow: dict[str, Any]) -> Asyn
 
 async def test_server_info_differs_and_the_later_client_refuses_the_earlier_build() -> None:
     assert OTHER is not None
-    async with Server() as new:
-        assert new.info.protocol >= 1 and new.info.contract_version >= 1
+    async with Server() as later_server:
+        assert later_server.info.protocol >= 1 and later_server.info.contract_version >= 1
     with pytest.raises(IncompatibleServer) as refused:
         async with Server(OTHER):
             pass
