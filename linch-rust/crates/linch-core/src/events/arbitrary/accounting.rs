@@ -12,15 +12,28 @@ use proptest::prelude::*;
 pub(super) fn usage_event() -> impl Strategy<Value = UsageEvent> {
     let costs = (option::of(finite_f64()), option::of(finite_f64()));
     let served = option::of(short_string());
-    (usage(), usage(), costs, served).prop_map(
-        |(usage, cumulative, (cost_usd, cumulative_cost_usd), actual_model)| UsageEvent {
+    (usage(), usage(), by_model(), costs, served).prop_map(
+        |(
             usage,
             cumulative,
-            cost_usd,
-            cumulative_cost_usd,
+            cumulative_by_model,
+            (cost_usd, cumulative_cost_usd),
             actual_model,
+        )| {
+            UsageEvent {
+                usage,
+                cumulative,
+                cumulative_by_model,
+                cost_usd,
+                cumulative_cost_usd,
+                actual_model,
+            }
         },
     )
+}
+
+fn by_model() -> impl Strategy<Value = std::collections::BTreeMap<String, Usage>> {
+    proptest::collection::btree_map(short_string(), usage(), 0..3)
 }
 
 pub(super) fn tool_result_block() -> impl Strategy<Value = ToolResultBlock> {
@@ -73,6 +86,7 @@ pub(super) fn result_event() -> impl Strategy<Value = ResultEvent> {
         stop_reason(),
         usage(),
         any::<bool>(),
+        by_model(),
         any::<u64>(),
         option::of(finite_f64()),
         option::of(short_string()),
@@ -86,6 +100,7 @@ pub(super) fn result_event() -> impl Strategy<Value = ResultEvent> {
                 stop_reason,
                 total_usage,
                 usage_complete,
+                usage_by_model,
                 duration_ms,
                 total_cost_usd,
                 final_text,
@@ -98,6 +113,8 @@ pub(super) fn result_event() -> impl Strategy<Value = ResultEvent> {
                     stop_reason,
                     total_usage,
                     usage_complete,
+                    usage_by_model,
+                    subagent_usage: Default::default(),
                     duration_ms,
                     total_cost_usd,
                     final_text,

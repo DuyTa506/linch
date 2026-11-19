@@ -1,6 +1,7 @@
 //! Failing a run for good from outside its loop (see
 //! [`crate::agent::Agent::fail`]).
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -54,6 +55,8 @@ pub(crate) async fn fail(
         stop_reason: StopReason::Error,
         total_usage: checkpoint.usage,
         usage_complete: checkpoint.usage_complete && !unsettled,
+        usage_by_model: checkpoint.usage_by_model,
+        subagent_usage: BTreeMap::new(),
         duration_ms: millis(started.elapsed()),
         total_cost_usd: checkpoint.cost_usd,
         final_text: None,

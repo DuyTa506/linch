@@ -54,6 +54,7 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
         Event::Usage(UsageEvent {
             usage: Usage::default(),
             cumulative: Usage::default(),
+            cumulative_by_model: [("claude-served".to_owned(), Usage::default())].into(),
             cost_usd: Some(0.25),
             cumulative_cost_usd: Some(1.5),
             actual_model: Some("claude-served".into()),
@@ -223,6 +224,8 @@ pub(super) fn one_of_every_kind() -> Vec<Event> {
             stop_reason: StopReason::EndTurn,
             total_usage: Usage::default(),
             usage_complete: true,
+            usage_by_model: Default::default(),
+            subagent_usage: Default::default(),
             duration_ms: 0,
             total_cost_usd: Some(1.5),
             final_text: None,

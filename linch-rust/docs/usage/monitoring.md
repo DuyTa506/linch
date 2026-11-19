@@ -52,6 +52,28 @@ with cache writes at the 5-minute tier:
 
 USD per million tokens. A model is matched on its exact id.
 
+**By model and by subagent.** The `result` event splits its usage two ways,
+and each split sums to what it splits:
+
+- `usage_by_model` (model id to the four usage buckets) sums to
+  `total_usage`. The key is the model that served the call
+  (`actual_model`; the run's current model when the provider named none), so
+  a fallback or a compaction summary on another model shows as its own
+  entry. The `usage` event carries the running split as `cumulative_by_model`.
+- `subagent_usage` (child run id to `{subagent_type, total_usage,
+  usage_complete, usage_by_model, total_cost_usd}`) holds what each subagent
+  child run the run started spent, as the child's own `result` reports it.
+  `total_usage` counts the run's own calls only, so the whole tree is
+  `total_usage` plus each entry's `total_usage`, and the tree by model is
+  `usage_by_model` plus each entry's `usage_by_model`. A child that was
+  never started or has not ended is left out.
+
+Both are left out of the event when empty, so a run with one model and no
+subagent reports what it always did. A run ended by `Agent.fail` reports
+`usage_by_model` from its last checkpoint and no `subagent_usage`. Python:
+`ResultEvent.usage_by_model`, `ResultEvent.subagent_usage` (`SubagentUsage`)
+and `UsageEvent.cumulative_by_model`.
+
 **Every other model costs `None`**, never a silent zero and never a guess:
 OpenAI, Gemini and DeepSeek models, and every model a local server (vLLM,
 SGLang, llama.cpp) serves. Python Linch has no rates for them either. A run

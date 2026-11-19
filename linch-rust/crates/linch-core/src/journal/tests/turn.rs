@@ -53,6 +53,7 @@ async fn tool_turn(
     journal.stage(Event::Usage(UsageEvent {
         usage: Usage::default(),
         cumulative: Usage::default(),
+        cumulative_by_model: Default::default(),
         cost_usd: None,
         cumulative_cost_usd: None,
         actual_model: None,

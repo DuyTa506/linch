@@ -99,7 +99,11 @@ class UsageEvent:
 
     `cost_usd` and `cumulative_cost_usd` are in USD, `None` when the model
     has no price. `actual_model` is the model the provider reported
-    serving the call, `None` when it named none.
+    serving the call, `None` when it named none. `cumulative_by_model`
+    splits `cumulative` by the model that served each call (model id to
+    usage); its sum is `cumulative`, and it is empty from a server that
+    predates the field. A subagent's own usage events reach the parent's
+    stream wrapped in a `SubagentEvent`, which names the child run.
     """
 
     type: ClassVar[str] = "usage"
@@ -108,6 +112,7 @@ class UsageEvent:
     cost_usd: float | None = None
     cumulative_cost_usd: float | None = None
     actual_model: str | None = None
+    cumulative_by_model: dict[str, JsonObject] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -544,6 +549,28 @@ class ErrorEvent:
 
 
 @dataclass(frozen=True)
+class SubagentUsage:
+    """What one subagent child run spent, as its own `result` reports it.
+
+    Attributes:
+        subagent_type: The type the `Subagent` call named; `None` for a
+            general-purpose call and for a `SubagentContinue` run.
+        total_usage: Usage summed across the child's calls with known usage.
+        usage_complete: Whether `total_usage` accounts for every call.
+        usage_by_model: `total_usage` split by serving model (model id to
+            usage).
+        total_cost_usd: Cost of the child's priced calls, `None` when none
+            was priced.
+    """
+
+    total_usage: JsonObject
+    usage_complete: bool
+    subagent_type: str | None = None
+    usage_by_model: dict[str, JsonObject] = field(default_factory=dict)
+    total_cost_usd: float | None = None
+
+
+@dataclass(frozen=True)
 class ResultEvent:
     """The run finished; `subtype` is `success`, `error`, `aborted` or `interrupted`.
 
@@ -552,6 +579,13 @@ class ResultEvent:
     `None` when none was priced. With an output schema, `structured_output`
     is the answer parsed and checked against it; when the answer failed
     the schema the run ends `error` with `structured_error` saying why.
+
+    `total_usage` counts the run's own calls only. `usage_by_model` splits
+    it by the model that served each call (a fallback, a compaction
+    summary), and sums to it. `subagent_usage` holds what each subagent
+    child run the run started spent, by child run id: add each entry's
+    `total_usage` to `total_usage` for the whole tree. Both are empty when
+    there is nothing to report.
     """
 
     type: ClassVar[str] = "result"
@@ -565,6 +599,8 @@ class ResultEvent:
     structured_error: str | None = None
     trace_id: str | None = None
     total_cost_usd: float | None = None
+    usage_by_model: dict[str, JsonObject] = field(default_factory=dict)
+    subagent_usage: dict[str, SubagentUsage] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -778,8 +814,19 @@ def decode_event(raw: JsonObject) -> Event:
             event=decode_event(raw.get("event", {})),
         )
     names = _FIELDS[kind]
-    event: Event = cls(**{key: value for key, value in raw.items() if key in names})
+    values = {key: value for key, value in raw.items() if key in names}
+    if cls is ResultEvent and "subagent_usage" in values:
+        values["subagent_usage"] = {
+            child: _decode_subagent_usage(child_usage)
+            for child, child_usage in values["subagent_usage"].items()
+        }
+    event: Event = cls(**values)
     return event
+
+
+def _decode_subagent_usage(raw: JsonObject) -> SubagentUsage:
+    names = frozenset(field.name for field in fields(SubagentUsage))
+    return SubagentUsage(**{key: value for key, value in raw.items() if key in names})
 
 
 def decode_envelope(raw: JsonObject) -> Envelope:

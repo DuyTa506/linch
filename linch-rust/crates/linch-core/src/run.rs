@@ -1,5 +1,7 @@
 //! Run and response status vocabularies shared by events and stores.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::json::JsonObject;
@@ -231,6 +233,10 @@ pub struct Checkpoint {
         serialize_with = "crate::events::serialize_finite_f64_option"
     )]
     pub cost_usd: Option<f64>,
+    /// `usage` split by the model that served each call; its sum is
+    /// `usage`. Empty until a call reported usage.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub usage_by_model: BTreeMap<String, Usage>,
     /// Session log length this checkpoint expects.
     pub session_len: u64,
     /// Position inside the turn.
@@ -311,6 +317,7 @@ mod tests {
             turn: 1,
             usage: Usage::default(),
             usage_complete: true,
+            usage_by_model: Default::default(),
             cost_usd: None,
             session_len: 3,
             phase: Phase::ToolBatch {
@@ -322,6 +329,10 @@ mod tests {
             },
         };
         let wire = serde_json::to_value(&cp).unwrap();
+        assert!(
+            wire.get("usage_by_model").is_none(),
+            "an unset breakdown stays off the wire"
+        );
         assert_eq!(wire["phase"]["phase"], "tool_batch");
         assert_eq!(
             serde_json::from_value::<Checkpoint>(wire.clone()).unwrap(),
