@@ -95,9 +95,16 @@ pub(super) fn checkpoint(turn: u32) -> Checkpoint {
 }
 
 pub(super) fn checkpoint_at(turn: u32) -> Checkpoint {
+    // A breakdown that a store must keep whole.
+    let spent = Usage {
+        input_tokens: 7,
+        output_tokens: 3,
+        ..Usage::default()
+    };
     Checkpoint {
+        usage: spent,
         usage_complete: false,
-        usage_by_model: Default::default(),
+        usage_by_model: [("served-model".to_owned(), spent)].into(),
         ..checkpoint(turn)
     }
 }

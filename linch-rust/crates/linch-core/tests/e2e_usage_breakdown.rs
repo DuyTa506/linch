@@ -266,3 +266,58 @@ async fn the_breakdowns_survive_a_crash_and_resume() {
     }
     assert!(resumed_with_child > 0, "no run reported its child");
 }
+
+/// A summary call served by another model: the compaction receipt's usage
+/// is in the total, so it is in the breakdown under its own model.
+struct Summarizing {
+    turns: Vec<linch_core::ScriptedTurn>,
+}
+
+#[async_trait::async_trait]
+impl Provider for Summarizing {
+    fn id(&self) -> &str {
+        "summarizing"
+    }
+
+    async fn stream(
+        &self,
+        request: linch_core::ProviderRequest,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<linch_core::ProviderStream, linch_core::ProviderError> {
+        use futures::StreamExt;
+        let turn = if is_summary_call(&request) {
+            TurnBuilder::new("summary-model")
+                .thinking("nothing to add", None)
+                .usage(usage(30, 40))
+                .build()
+        } else {
+            let at = (request.messages.iter())
+                .filter(|m| m.role == linch_core::Role::Assistant)
+                .count();
+            self.turns[at].clone()
+        };
+        let events: Vec<_> = turn.events.into_iter().map(Ok).collect();
+        Ok(futures::stream::iter(events).boxed())
+    }
+}
+
+#[tokio::test]
+async fn a_compaction_summary_shows_under_its_own_model() {
+    let mut spec = spec();
+    spec.compaction = Some(linch_core::CompactionSpec {
+        keep_recent_turns: 1,
+        ..linch_core::CompactionSpec::new(1)
+    });
+    let provider = Arc::new(Summarizing {
+        turns: script(3, 1, "Read"),
+    });
+    let agent = built(spec, provider, Arc::new(Stores::default()), false);
+    let events = finish(agent.run("go", RunOptions::new("s1"))).await;
+    let result = result_of(&events);
+
+    let summaries = result.usage_by_model.get("summary-model").copied();
+    assert!(summaries.is_some(), "{:?}", result.usage_by_model);
+    assert!(summaries.is_some_and(|u| u.input_tokens > 0 && u.input_tokens % 30 == 0));
+    assert!(result.usage_by_model.contains_key(MODEL));
+    assert_eq!(sum(result.usage_by_model.values()), result.total_usage);
+}

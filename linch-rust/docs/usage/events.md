@@ -238,6 +238,7 @@ Token usage of one model call. See [Usage and cost](#usage-and-cost).
 | Field | What it is |
 |---|---|
 | `usage` | This call: `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens` |
+| `cumulative_by_model` | `cumulative` split by the model that served each call (model id to usage); its sum is `cumulative`; empty from a server that predates the field |
 | `cumulative` | The run so far, same keys |
 | `cost_usd` | This call's cost in USD; `None` when the model has no price |
 | `cumulative_cost_usd` | The run's priced calls so far; `None` until one is priced |
@@ -472,6 +473,8 @@ The run finished; its stream ends here.
 | `final_text` | The last answer's text; `None` when there is none |
 | `total_usage` | Usage summed over every call whose usage is known |
 | `usage_complete` | `False` when some call's usage was unknown and is not in the sum |
+| `usage_by_model` | `total_usage` split by serving model (model id to usage; a fallback or a compaction summary shows as its own entry); its sum is `total_usage` |
+| `subagent_usage` | Each subagent child run's own total, by child run id (`SubagentUsage`: `total_usage`, `usage_complete`, `usage_by_model`, `total_cost_usd`, `subagent_type`); not part of `total_usage`, so the tree is `total_usage` plus each entry |
 | `duration_ms` | Wall time of the `run`, `resume` or `approve` call that ended the run. The whole run's span is this envelope's `ts_ms` minus the first `init` envelope's (the one not `resumed`) |
 | `total_cost_usd` | Cost of the run's priced calls; `None` when none was priced |
 | `structured_output`, `structured_error` | With an [output schema](./structured-output.md): the parsed answer, or why the last answer failed the schema (the run then ends `error`); `None` without one |
