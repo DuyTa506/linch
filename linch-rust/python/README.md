@@ -15,7 +15,7 @@ binary (the Rust sidecar the client starts and drives over JSON-RPC). Wheels are
 Linux and macOS. It needs Python 3.11 or newer; the only other runtime dependency is
 `orjson`.
 
-![Architecture of linch-rust](https://raw.githubusercontent.com/DuyTa506/linch/master/docs/assets/architecture.svg)
+![Architecture of linch-rust: a Python app drives linch-server over JSON-RPC; the server uses Postgres, provider APIs and exec backends](https://raw.githubusercontent.com/DuyTa506/linch/master/docs/assets/architecture.svg)
 
 ## Install
 

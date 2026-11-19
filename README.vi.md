@@ -122,14 +122,15 @@ Python Linch so với linch-rust, một host chung 64 thread, 2026-11-19.
 có thiết lập, cách đo và các khoảng trống đã biết.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/memory-dark.svg">
-  <img src="docs/assets/memory.svg" alt="Biểu đồ cột bộ nhớ đỉnh với 500, 1000 và 2000 session đồng thời, Python và linch-rust" width="700">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/scale-dark.svg">
+  <img src="docs/assets/scale.svg" alt="Hai biểu đồ cột cho 500, 1000 và 2000 session đồng thời: bộ nhớ đỉnh (MB) và thông lượng (lượt mỗi giây), Python Linch và linch-rust" width="700">
 </picture>
 
-Rust dùng nhiều bộ nhớ hơn Python cho mỗi session đồng thời từ 1000 session trở lên
-(411 MB so với 244 MB ở 2000); ở 500 thì Rust thấp hơn. Trang benchmark còn ghi rằng qua client
-Rust hoàn tất 351 lượt mỗi giây ở 500 session và 686 ở 2000, so với 89 của Python, vốn
-làm vòng lặp event bão hòa, và rằng sau một lần kill cưỡng bức ngay sau `run.start` nó tìm
+Biểu đồ bên trái là bộ nhớ đỉnh: linch-rust (client cộng sidecar) thấp hơn ở 500 session
+(136 MB so với 159 MB của Python) và cao hơn từ 1000 trở lên (227 so với 186 MB, và 411
+so với 244 MB ở 2000). Biểu đồ bên phải là thông lượng: qua client, linch-rust hoàn tất
+351, 484 và 686 lượt mỗi giây ở 500, 1000 và 2000 session, so với 89, 85 và 89 của Python,
+vốn làm vòng lặp event bão hòa. Trang benchmark còn ghi rằng sau một lần kill cưỡng bức ngay sau `run.start` nó tìm
 thấy đủ 160 run (trước khi sửa lỗi là mất 70 trên 160). Trang không có số liệu của Python
 cho bài kiểm tra kill này, nên không đưa ra phép so sánh nào.
 
