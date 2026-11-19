@@ -45,6 +45,9 @@ VLLM_MODEL = (
     or os.environ.get("LINCH_TEST_VLLM_MODEL")
     or "qwen3.6-35b-a3b"
 )
+# The adapter kind the vLLM-compatible server is driven as: `vllm` unless
+# `LINCH_LIVE_KIND` names another OpenAI-compatible kind (for example `sglang`).
+LIVE_KIND = os.environ.get("LINCH_LIVE_KIND") or "vllm"
 DEEPSEEK_KEY = os.environ.get("DEEPSEEK_API_KEY")
 DEEPSEEK_MODEL = os.environ.get("LINCH_LIVE_DEEPSEEK_MODEL", "deepseek-flash")
 PG_DSN = os.environ.get("LINCH_LIVE_PG_DSN") or os.environ.get("LINCH_TEST_PG_DSN")
@@ -77,7 +80,7 @@ class Live:
         return spec
 
 
-VLLM = Live("vllm", {"id": "vllm", "base_url": VLLM_URL or ""}, VLLM_MODEL, 1200)
+VLLM = Live("vllm", {"id": LIVE_KIND, "base_url": VLLM_URL or ""}, VLLM_MODEL, 1200)
 DEEPSEEK = Live("deepseek", {"id": "deepseek"}, DEEPSEEK_MODEL, 800)
 
 PROVIDERS = [

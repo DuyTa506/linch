@@ -18,7 +18,7 @@ from e2e_core_support import (
     run_to_end,
     spec,
 )
-from live_core_support import PG_DSN, message_text, text_of
+from live_core_support import LIVE_KIND, PG_DSN, message_text, text_of
 
 from linch_rust import InitEvent, PartialAssistantEvent, UsageEvent, tool
 
@@ -61,7 +61,7 @@ async def test_1_basic_run_events_usage_and_a_durable_row(fwd: Any) -> None:
         },
     )
     assert types[0] == "init" and types[-1] == "result" and "assistant" in types
-    assert init.provider == "vllm" and init.model == MODEL
+    assert init.provider == LIVE_KIND and init.model == MODEL
     assert result.subtype == "success" and result.usage_complete
     assert "pong" in (result.final_text or "").lower()
     assert len(usages) == 1

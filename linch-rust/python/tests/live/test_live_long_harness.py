@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 from e2e_long_support import Tee, dump, msg_text
-from live_core_support import ONLY_VLLM, Live, live_server, make_config, needs_vllm
+from live_core_support import LIVE_KIND, ONLY_VLLM, Live, live_server, make_config, needs_vllm
 from live_sched_support import pg_dsn, query
 
 from linch_rust import (
@@ -69,7 +69,7 @@ async def test_the_ledger_is_kept_across_6_turns_a_compaction_and_a_fresh_sessio
         tasks=True,
         task_ledger={"list": LIST},
     )
-    config["provider"] = {"id": "vllm", "base_url": tee.url}
+    config["provider"] = {"id": LIVE_KIND, "base_url": tee.url}
     namespace = config["namespace"]
     try:
         async with live_server() as server:

@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 from e2e_long_support import MODEL, Tee, dump, load, msg_text
-from live_core_support import needs_vllm
+from live_core_support import LIVE_KIND, needs_vllm
 from live_sched_support import (
     TOKEN,
     live_config,
@@ -51,7 +51,7 @@ async def test_a_60s_heartbeat_and_a_cron_schedule_fire_on_time(vllm: str, pg_ds
     tenants = {"acme": {"tokens": [{"value": TOKEN}], "allow": allow}}
     out: dict[str, Any] = {"load_at_start": load(), "poll_interval_ms": 1000}
     config = live_config(vllm, "acme", pg_dsn, spec={"max_output_tokens": 60})
-    config["provider"] = {"id": "vllm", "base_url": tee.url}  # type: ignore[index]
+    config["provider"] = {"id": LIVE_KIND, "base_url": tee.url}  # type: ignore[index]
     try:
         async with (
             serving(pg_dsn, tenants=tenants, worker={"poll_interval_ms": 1000}) as live,
