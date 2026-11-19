@@ -61,6 +61,24 @@ platform.
 | **Sizing** | Count connections with the [connection budget](./stores.md#connection-budget). Every cap is per process. For throughput and memory, see below. |
 | **Isolation of commands** | `Bash` runs as the server's user by default. Choose a backend for what your agents run ([Sandbox](./sandbox.md), including [stronger isolation](./sandbox.md#isolation-levels)). |
 
+## Platform support
+
+- **Builds.** The release workflow builds wheels for Linux (x86_64 and aarch64)
+  and macOS (x86_64 and aarch64), installs each in a fresh environment and runs
+  the client tests against it. Windows is not supported: `linch-tools` and
+  `linch-mcp` are Unix-only (see the comment at the top of
+  `.github/workflows/rust-release.yml`).
+- **Linux only.** The `sandbox` backend (Landlock and seccomp; `server.info`
+  lists it only on Linux builds, [Sandbox](./sandbox.md)). On stdio the server
+  reopens its pipes non-blocking through `/proc/self/fd`, and `Server()` raises
+  the child's stdout pipe to 256 KiB; each falls back (tokio's own stdio, the
+  default pipe size) where it cannot apply ([RPC](../architecture/rpc.md),
+  [Server](./server.md)).
+- **Tested.** The pull-request CI job runs on Linux only. The live `docker`
+  cases run on Linux only, and the `docker` backend on macOS is untested.
+
+---
+
 ## Sizing: what was measured
 
 These numbers come from one run of the live checks in

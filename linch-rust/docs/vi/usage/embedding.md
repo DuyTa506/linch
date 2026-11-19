@@ -57,6 +57,24 @@ của bạn và nền tảng của nó.
 | **Định cỡ** | Hãy đếm kết nối bằng [ngân sách kết nối](./stores.md#ngân-sách-kết-nối). Mọi giới hạn đều tính theo từng tiến trình. Về throughput và bộ nhớ, xem bên dưới. |
 | **Cô lập lệnh** | `Bash` chạy với user của server theo mặc định. Hãy chọn một backend phù hợp với những gì agent của bạn chạy ([Sandbox](./sandbox.md), gồm cả [cô lập mạnh hơn](./sandbox.md#các-mức-cô-lập)). |
 
+## Nền tảng được hỗ trợ
+
+- **Bản build.** Workflow phát hành build wheel cho Linux (x86_64 và aarch64) và
+  macOS (x86_64 và aarch64), cài từng wheel vào môi trường mới và chạy test của
+  client trên wheel đó. Windows không được hỗ trợ: `linch-tools` và `linch-mcp`
+  chỉ chạy trên Unix (xem comment đầu `.github/workflows/rust-release.yml`).
+- **Chỉ Linux.** Backend `sandbox` (Landlock và seccomp; `server.info` chỉ liệt
+  kê nó trên bản build Linux, [Sandbox](./sandbox.md)). Trên stdio, server mở
+  lại pipe ở chế độ non-blocking qua `/proc/self/fd`, và `Server()` nâng pipe
+  stdout của tiến trình con lên 256 KiB; mỗi thứ đều có phương án dự phòng
+  (stdio của tokio, kích thước pipe mặc định) khi không áp dụng được
+  ([RPC](../architecture/rpc.md), [Server](./server.md)).
+- **Được kiểm thử.** Job CI của pull request chỉ chạy trên Linux. Các case live
+  của `docker` chỉ chạy trên Linux, và backend `docker` trên macOS chưa được
+  kiểm thử.
+
+---
+
 ## Định cỡ: những gì đã được đo
 
 Các con số này đến từ một lần chạy các live check trong
