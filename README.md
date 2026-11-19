@@ -1,83 +1,74 @@
-# linch
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.svg">
+  <img src="docs/assets/logo.svg" alt="linch" height="64">
+</picture>
 
 [Tiếng Việt](README.vi.md) · [Tài liệu tiếng Việt](docs/vi/usage/README.md)
 
-Linch 3.0 is a headless Python agent kernel. Applications embed its async agent
-loop, provide tools and permissions, and consume streamed events. The host owns
-the HTTP API and deployment.
+An embeddable, headless agent kernel with durable runs on Postgres; the host owns the HTTP API and deployment.
 
-Python 3.11+ is required. Linch 3.0 breaks compatibility with 2.x. See the
-[3.0 migration guide](docs/migration-3.0.md).
+[![PyPI linch](https://img.shields.io/pypi/v/linch?label=linch)](https://pypi.org/project/linch/)
+[![PyPI linch-rust](https://img.shields.io/pypi/v/linch-rust?label=linch-rust)](https://pypi.org/project/linch-rust/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](pyproject.toml)
 
-## Features
+</div>
 
-| Area | Implementation |
-|---|---|
-| Runtime | `Agent`, `Session`, typed event streams, tool scheduling, context compaction, and run budgets |
-| Plugins | [`agent.use(plugin, config)`](docs/architecture/kernel.md#plugins) mounts scoped plugins with dependency activation and reversible disposal |
-| Profiles | [Versioned domain profiles](docs/usage/profiles.md) compose configuration and pin each run's profile for resume |
-| Tool search | [Deferred tool and skill discovery](docs/usage/tools.md#tool-search-for-large-catalogs) loads schemas when needed above configurable thresholds |
-| Durable runs | Postgres session/run stores, leases with epoch fencing, checkpoints before guarded side effects, and event replay by sequence |
-| Worker fleet | Optional `linch.worker`: PgQueuer dispatch, lease renewal, recovery after worker death or transient database outages, and graceful drain |
-| Reliability | Default bounded response correction, optional tool prerequisites and completion gates, and a serial turn-stopping seam |
-| Permissions | Per-run `Principal`, tool/path/shell rules with role conditions, and durable approval decisions |
-| Retrieval and memory | `RagConnector`, citation grounding checks, scoped file memory, and virtual filesystem backends |
-| Providers | OpenAI Responses/Chat Completions, Anthropic, Gemini/Vertex AI through `google-genai`, DeepSeek, llama.cpp, and compatible endpoints |
-| Extensions | Explicit `linch.ext` packages for workflows, evals, deep agents, reports, loop runners, and scaffolding; hooks, MCP, skills, and subagents |
-| Telemetry | Direct OpenTelemetry traces and metrics; the host configures the SDK and exporter |
-| Lifecycle | [Typed lifecycle catalog and trace IDs](docs/architecture/events.md#typed-lifecycle-catalog) connect hooks, kernel seams, events, and host logs |
+Linch 3.0 is a headless agent kernel. Applications embed its async agent loop,
+provide tools and permissions, and consume streamed events. It breaks compatibility
+with 2.x; see the [3.0 migration guide](docs/migration-3.0.md).
 
-Postgres is the durable backend. InMemory stores are for tests and development.
-Read-scoped tools can run in parallel. An input-aware `parallel` predicate also
-allows read-only subagent calls; write/exec tools with boolean flags stay serial.
+## Why linch
 
-## linch-rust
+- **Durable runs.** Postgres session and run stores, leases with epoch fencing, checkpoints before guarded side effects, and event replay by sequence.
+- **Group-committed writes.** Pending events and checkpoints are durable before the next external effect (provider call, tool start, terminal).
+- **Tenant isolation.** Each agent owns its own `Context` scope; the Rust server gives each tenant its own tokens, allowlists and limits.
+- **Sandboxed execution.** `Bash` runs locally, in a Landlock and seccomp sandbox, in Docker, or on a host your client supplies (Rust kernel).
+- **Provider-agnostic.** OpenAI, Anthropic, Gemini and Vertex AI, DeepSeek, llama.cpp and compatible endpoints.
+- **OpenTelemetry.** Traces and metrics through the OpenTelemetry API; the host configures the SDK and exporter.
 
-The [`linch-rust/`](linch-rust/) directory holds a Rust kernel with the same agent model
-as this package. It runs as `linch-server` over JSON-RPC, and the Python client
-`linch_rust` starts and drives it. It provides Postgres-durable runs, a worker for
-schedules and background jobs, workflows, hooks, MCP, and OpenTelemetry. It is an SDK
-to embed, not a ready-made agent product: your application owns the HTTP API, TLS, and
-metrics, and chooses how commands are isolated.
+## Two ways to use it
 
-The two are developed side by side. The Python package stays supported; the Rust path
-is the direction for production scale. Start with the
-[usage guide](linch-rust/docs/usage/README.md)
-([Tiếng Việt](linch-rust/docs/vi/usage/README.md)), the
-[quickstart](linch-rust/docs/usage/quickstart.md), or the
-[architecture index](linch-rust/docs/architecture/README.md):
+| | `linch` (Python package) | `linch-rust` (client + `linch-server`) |
+|---|---|---|
+| What it is | The agent loop in your Python process | The same agent model as a Rust kernel; the `linch_rust` client starts and drives `linch-server` over JSON-RPC |
+| Pick it when | You want the loop in-process, or the full `linch.ext` extension set | You want the production-scale direction: many concurrent runs, a worker for schedules and background jobs, tenants and sandboxes |
+| Start with | [Usage guide](docs/usage/README.md) | [Usage guide](linch-rust/docs/usage/README.md) ([Tiếng Việt](linch-rust/docs/vi/usage/README.md)) |
+
+Both are developed side by side and the Python package stays supported. linch-rust is
+an SDK to embed, not a ready-made agent product: your application owns the HTTP API,
+TLS and metrics, and chooses how commands are isolated.
+
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/architecture-dark.svg">
+  <img src="docs/assets/architecture.svg" alt="Architecture of linch-rust: a Python app talks JSON-RPC to linch-server, which uses Postgres, provider APIs and exec backends" width="700">
+</picture>
+
+</div>
+
+*linch-rust: your Python app drives `linch-server` over JSON-RPC; runs are durable in Postgres. See the [architecture index](linch-rust/docs/architecture/README.md).*
+
+## Install
 
 ```sh
 pip install linch-rust              # the client and the linch-server binary
 pip install 'linch-rust[otel]'      # with OpenTelemetry spans and metrics
-linch-rust new my-agent             # a project that runs and tests offline
-linch-rust docs path                # where the installed docs are
 ```
 
-Status: linch-rust is at 0.1 (latest release 0.1.1), so read its
-[changelog](linch-rust/CHANGELOG.md) before each upgrade. The Python-versus-Rust
-benchmark, with its setup, method and known gaps, is on the
-[benchmarks page](linch-rust/docs/benchmarks.md)
-([Tiếng Việt](linch-rust/docs/vi/benchmarks.md)); the SDK's own sizing numbers are in
-[Embedding](linch-rust/docs/usage/embedding.md#sizing-what-was-measured).
-
-## Install
-
-From a checkout:
+The `linch` package, from a checkout:
 
 ```sh
 pip install ./linch-rust/crates/linch-python   # native extension; needs a Rust toolchain
 pip install -e .
+pip install -e '.[postgres,worker,anthropic,gemini,mcp]'   # the extras you use
 ```
 
-Install the extras your application uses:
-
-```sh
-pip install -e '.[postgres,worker,anthropic,gemini,mcp]'
-```
-
-OpenTelemetry's API is included in core. Install `opentelemetry-sdk` and an
-exporter in the host to collect telemetry.
+OpenTelemetry's API is included in core. Install `opentelemetry-sdk` and an exporter
+in the host to collect telemetry.
 
 ## Quickstart
 
@@ -116,18 +107,66 @@ hosts configure both session and run stores explicitly; the
 [production guide](docs/usage/production.md) covers workers, streaming, resume,
 and shutdown.
 
+For linch-rust, start a project that runs and tests offline, or read its
+[quickstart](linch-rust/docs/usage/quickstart.md):
+
+```sh
+linch-rust new my-agent             # a project that runs and tests offline
+linch-rust docs path                # where the installed docs are
+```
+
+## Measured
+
+Python Linch against linch-rust, one shared 64-thread host, 2026-11-19. The
+[benchmarks page](linch-rust/docs/benchmarks.md) ([Tiếng Việt](linch-rust/docs/vi/benchmarks.md))
+has the setup, method and known gaps.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/memory-dark.svg">
+  <img src="docs/assets/memory.svg" alt="Bar chart of peak memory at 500, 1000 and 2000 concurrent sessions, Python and linch-rust" width="700">
+</picture>
+
+Rust uses more memory per concurrent session than Python from 1000 sessions up
+(411 MB against 244 MB at 2000); it is lower at 500. The page also reports that
+through the client it completes 351 turns per second at 500 sessions and 686 at 2000, against
+89 for Python, whose event loop saturates, and that after a forced kill right after
+`run.start` it now finds all 160 runs (before a fix it lost 70 of 160). It has
+no Python figure for that kill test, so no comparison is claimed.
+
+## More features of the Python package
+
+| Area | Implementation |
+|---|---|
+| Runtime | `Agent`, `Session`, typed event streams, tool scheduling, context compaction, and run budgets |
+| Plugins and profiles | [`agent.use(plugin, config)`](docs/architecture/kernel.md#plugins) mounts scoped plugins; [versioned profiles](docs/usage/profiles.md) pin each run's profile for resume |
+| Tool search | [Deferred tool and skill discovery](docs/usage/tools.md#tool-search-for-large-catalogs) loads schemas when needed |
+| Worker fleet | Optional `linch.worker`: PgQueuer dispatch, lease renewal, recovery after worker death, and graceful drain |
+| Reliability | Bounded response correction, optional tool prerequisites and completion gates |
+| Permissions | Per-run `Principal`, tool/path/shell rules with role conditions, and durable approval decisions |
+| Retrieval and memory | `RagConnector`, citation grounding checks, scoped file memory, and virtual filesystem backends |
+| Extensions | Explicit `linch.ext` packages for workflows, evals, deep agents, reports, loop runners, and scaffolding; hooks, MCP, skills, and subagents |
+| Lifecycle | [Typed lifecycle catalog and trace IDs](docs/architecture/events.md#typed-lifecycle-catalog) connect hooks, kernel seams, events, and host logs |
+
+Postgres is the durable backend. InMemory stores are for tests and development.
+Read-scoped tools can run in parallel. An input-aware `parallel` predicate also
+allows read-only subagent calls; write/exec tools with boolean flags stay serial.
+
 ## Documentation
 
 - [Usage index](docs/usage/README.md): setup and examples for each feature.
 - [Architecture index](docs/architecture/README.md): module boundaries, contracts, and invariants.
+- [linch-rust usage guide](linch-rust/docs/usage/README.md) and [architecture](linch-rust/docs/architecture/README.md).
 - [Migration from 2.x](docs/migration-3.0.md): removed APIs and replacement imports.
 - [Versioning](docs/versioning.md): public API, prereleases, and persisted formats.
 - [Examples](examples/): runnable examples grouped by subsystem.
 - [Contributing](docs/contributing.md): development and review rules.
+- [Changelog of linch](CHANGELOG.md) and [of linch-rust](linch-rust/CHANGELOG.md).
 
 Kernel imports come from `linch.__all__`. Import extensions explicitly, for
 example `from linch.ext.workflow import run_workflow`; they are absent from the
-kernel's top-level exports.
+kernel's top-level exports. Status: linch-rust is at 0.1 (latest release 0.1.1), so
+read its changelog before each upgrade; its own sizing numbers are in
+[Embedding](linch-rust/docs/usage/embedding.md#sizing-what-was-measured).
 
 ## Build with a coding agent
 
