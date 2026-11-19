@@ -108,7 +108,7 @@ event loop của nó ở khoảng 85 đến 90 lượt mỗi giây từ M=500 tr
 ### Giải mã stream, case 6 (lần chạy final, 3 lượt x 20 lần lặp)
 
 Một server loopback phát lại cùng một stream SSE có dạng đã ghi cho mỗi vendor; con số là wall
-time của một lần lặp. Các phía Rust chuyển giữa một mức nhanh và một mức chậm trong một ô (xem
+time của một lần lặp. Một ô có thể chuyển giữa một mức nhanh và một mức chậm; hai mức đó là mức tần số CPU (xem
 [Chưa giải thích được](#chưa-giải-thích-được)), nên bảng liệt kê 3 trung vị theo từng lượt.
 
 | Vendor | py (ms) | rs-client (ms) | rs-kernel (ms) |
@@ -120,8 +120,11 @@ time của một lần lặp. Các phía Rust chuyển giữa một mức nhanh 
 | Anthropic | 291, 282, 336 | 579, 607, 594 | 295, 292, 296 |
 
 Rust giải mã các stream DeepSeek, OpenAI và Gemini nhanh hơn Python khoảng 2.7x đến 8.5x trong
-harness này. Anthropic là ngoại lệ: kernel trong tiến trình ngang Python, nhưng qua client và
-sidecar nó chậm khoảng gấp đôi (594 so với 291 ms). Xem [Khoảng trống đã biết](#khoảng-trống-đã-biết).
+harness này. Anthropic là ngoại lệ: kernel trong tiến trình ngang Python, và qua client và
+sidecar nó chậm hơn kernel. Con số 594 so với 295 ms trong bảng so một lần chạy 2.0 GHz với một lần
+chạy 3.4 GHz. Ở cùng tần số CPU, đường client bằng 1.15 đến 1.25 lần kernel với pipe stdio 64 KiB mặc
+định và 1.0 đến 1.08 lần với pipe 1 MiB (362 đến 368 ms so với 292 đến 314 ms ở 3.4 GHz; 313 đến
+317 ms với pipe 1 MiB). Xem [Khoảng trống đã biết](#khoảng-trống-đã-biết).
 
 ## Bộ nhớ theo session
 
@@ -279,12 +282,33 @@ cache gì trên model này (block của nó là 2176 token), nên không có k�
   ở 4 trong 12 ô của lần chạy earlier, trên `py` và `rs-kernel`, và không có ở `rs-client`.
   Ở lần chạy final: 0 trên 720 lần lặp vượt quá 5x trung vị của ô của nó. Chưa giải thích được;
   host và Postgres không được đặt công cụ đo trong các lần đứng hình của earlier.
-- Case 6 trên các phía Rust chuyển giữa hai mức trong một ô, cách nhau khoảng 1.7x (`rs-kernel`
-  Anthropic 290 so với 510 ms, `rs-client` 380 so với 580 ms). Ở lần chạy final nó xuất hiện
-  trong chuỗi của cả ba phía: `py` Anthropic chạy ở khoảng 480 ms trong 4 đến 10 lần lặp đầu
-  ở 3 trên 4 lượt không ghim, `rs-kernel` chuyển qua lại trong một lượt 60 lần lặp, `rs-client`
-  một lần. Khi ghim vào 4 core, `py` giữ ở 282 ms suốt 60 lần lặp và `rs-kernel` vẫn chuyển.
-  Vậy nguyên nhân không riêng của kernel Rust, và chưa tìm ra.
+- Case 6 chuyển giữa hai mức trong một ô, cách nhau khoảng 1.7x (`rs-kernel` Anthropic 290 so với
+  510 ms, `rs-client` 380 so với 580 ms), ở cả ba phía. Hai mức là mức tần số CPU: governor là
+  `powersave` với `intel_pstate` và HWP, base 2.0 GHz, turbo 3.4 GHz, tỉ lệ 1.70. Trong một lần profile
+  60 lần lặp client đã ghim với công việc giống hệt, 48 lần dùng 507 đến 626 ms CPU của server với
+  core đọc được trung vị 1998 MHz, và 12 lần liên tiếp dùng 304 đến 313 ms ở trung vị 3358 MHz. Ghim
+  không chọn được mức: một core bận vẫn ở 2.0 GHz hàng chục giây trong một microbenchmark giải mã.
+  Lần chạy final không ghi tần số, nên 594 so với 295 ms của nó trộn hai mức. Vì sao HWP giữ một
+  core bận ở base trong nhiều giây chưa xác định được (cần công cụ root: MSR, `turbostat`).
+- Phương pháp: mỗi ô benchmark phải ghi mức tần số CPU của từng lần lặp và so sánh ở cùng mức.
+- Đường client của case 6 so với kernel, đã profile (3.4 GHz, pipe 64 KiB, 30 lần lặp mỗi nấc, trung
+  vị). Giả thuyết trước đó rằng chi phí theo số message JSON-RPC bị bác bỏ ở case này. Một run gửi
+  khoảng 61 dòng cho 20 006 envelope, vì server nối các envelope đang xếp hàng của một run thành một
+  dòng tối đa 64 KiB. `orjson.loads` ở client khoảng 12 ms trong khoảng 365 ms. Phần lớn khoảng cách
+  còn lại là server chờ pipe stdout 64 KiB đầy: 43 lần chuyển ngữ cảnh tự nguyện mỗi run và bị chặn 39 đến
+  56 ms, so với 2 lần và 7 đến 10 ms với pipe 1 MiB. Một stream có nhịp (100 delta/s) gửi một envelope
+  mỗi dòng và tốn CPU client, khoảng 3% một core mỗi stream, không tốn wall time. Kích thước pipe không
+  được đổi ở client hay server.
+- Định dạng message trên stdio: msgpack, protobuf và nén đã được đánh giá và bị loại. `python-msgpack`
+  dùng nhiều hơn 5 đến 11% CPU client so với orjson cho ít hơn 19% byte. Nén thua trên pipe cục bộ:
+  zstd mức 1 cần 1.5 ms để nén stream 3.7 MB, còn pipe chuyển nó trong 1.6 ms. Liên kết WebSocket từ xa
+  chưa được đo.
+- Case 14 (nhiều session trên Postgres): `rs-client` chậm hơn `rs-kernel` khoảng 1.7x ở M=2000 (10.5 s
+  so với 6.25 s), và các kết quả case 6 ở trên không giải thích được điều này. Nó chỉ xuất hiện với
+  Postgres trong một sidecar: 4 sidecar mất 5.76 s. Với memory store, một sidecar đạt 1272 đến
+  1487 turn/s ở M=2000 (cửa sổ 5.38 đến 6.29 s) và client dùng dưới 20% một core, nên cả message
+  JSON-RPC lẫn giải mã ở client đều không giải thích được. Nguyên nhân chưa được đo (lần profile không
+  được cấp database); thread server duy nhất và pool của một tiến trình là ứng viên, không phải kết quả.
 - Số thread của server: các lần chạy DeepSeek đạt 110 thread ở N=2500 (server stdio nếu không
   thì dùng một thread). Cùng một stub loopback (không có provider thật), các run N=1000, memory
   store: khi địa chỉ hóa bằng IP literal server có 1 thread ở 4 trên 4 lần chạy; khi địa chỉ
@@ -295,9 +319,7 @@ cache gì trên model này (block của nó là 2176 token), nên không có k�
 
 ### Chưa đo hoặc còn yếu
 
-- Giải mã stream Anthropic qua client và sidecar có tốc độ khoảng một nửa của Python (594 so
-  với 291 ms). Kernel trong tiến trình ngang Python, DeepSeek, OpenAI và Gemini qua sidecar
-  không cho thấy khoảng cách, và nó chưa được profile.
+- Các ô case 6 của lần chạy final không ghi mức tần số CPU, nên trung vị theo lượt của chúng trộn các mức. Các tỉ lệ cùng điều kiện đến từ lần profile sau đó (xem [Chưa giải thích được](#chưa-giải-thích-được)), chạy dưới tải host 2.3 đến 27 và không build lại các binary.
 - Loop, tool, khởi động, throughput 16 session và các provider giải mã khác là một lượt từ lần chạy earlier.
 - Bảng agent nhàn rỗi chỉ có memory store; các ô bộ nhớ của kho Postgres (backend cho mỗi
   agent, kích thước pool) không được lặp lại trong lần chạy final. Bộ nhớ của một run đang
