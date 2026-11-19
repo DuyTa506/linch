@@ -60,6 +60,8 @@ from .errors import (
     AgentNotFound,
     ConnectionClosed,
     ContractMismatch,
+    HandshakeTimeout,
+    IncompatibleServer,
     InvalidAnswer,
     InvalidOutputSchema,
     InvalidSchedule,
@@ -144,6 +146,7 @@ from .events import (
     WorkflowEvent,
 )
 from .exec_host import ExecChunk, ExecStart, ExecutionHost, SubprocessHost
+from .info import ServerInfo
 from .monitor import (
     CaseResult,
     CustomScorer,
@@ -229,6 +232,8 @@ __all__ = [
     "ContextBuildEvent",
     "DroppedContext",
     "ContractMismatch",
+    "HandshakeTimeout",
+    "IncompatibleServer",
     "DETAILED_COMPACTION_PROMPT",
     "Decision",
     "ContextBudget",
@@ -318,6 +323,7 @@ __all__ = [
     "SchemaVersion",
     "Scope",
     "Server",
+    "ServerInfo",
     "SessionBusy",
     "Skipped",
     "ModelRates",

@@ -59,6 +59,7 @@ tới handler của nó. Các kiểu params từ chối trường không biết;
 | Method | Params | Handler | Kết quả |
 |---|---|---|---|
 | `connection.auth` | `AuthParams` (`protocol.rs:73`) | `login` (`crates/linch-rpc/src/server/login.rs:24`), chỉ là message đầu tiên trên socket; ở nơi khác là `-32600` | `Authenticated` `{tenant}` |
+| `server.info` | `InfoParams` `{client_version?, client_protocol?}` (`crates/linch-rpc/src/protocol/info.rs`); cả hai chỉ được ghi log ở mức debug, `client_version` dài tối đa 64 byte văn bản, không có ký tự điều khiển | `server_info` (`server.rs`), không kiểm tra tenant: câu trả lời là các hằng của bản build, giống nhau cho client local và mọi tenant | `ServerInfo` `{server_version, protocol, contract_version, capabilities, backends, limits: {max_message_bytes, default_max_runs}}`; khác các result khác, nó không nghiêm ngặt với member lạ |
 | `agent.open` | `OpenParams` | `Server::open` (`crates/linch-rpc/src/server/agents.rs:20-49`) | `AgentOpened` `{agent, contract, skipped?}` |
 | `agent.close` | `CloseParams` | `agents.rs:52-80`; `-32002` khi kết nối đang điều khiển một run của nó | `{}` sau khi các MCP server của nó đã tắt |
 | `session.close` | `SessionCloseParams` | `agents.rs:81-92`: `Agent::close_session` (quên các lần đọc của session, kill các lệnh `Bash` chạy nền của nó) | `{}` |
@@ -464,6 +465,47 @@ kết nối này tiếp quản nó thay vì lấy một chỗ mới (`run.rs:84-
 Dù cách nào, run chỉ giữ một chỗ, nên các run đang chạy của một tenant có tối đa
 `max_runs × (1 + max_background)` provider stream.
 
+## Bắt tay phiên bản
+
+`server.info` cho client và server biết phiên bản của nhau ngay lúc kết nối và
+từ chối ngay khi không khớp, thay vì lỗi ở method đầu tiên có hình dạng đã đổi.
+
+```json
+{"server_version": "0.1.1", "protocol": 1, "contract_version": 1,
+ "capabilities": ["cache_isolation", "provider_info", "run_steer", "schedule", "workflow"],
+ "backends": ["local", "sandbox", "docker", "remote"],
+ "limits": {"max_message_bytes": 16777216, "default_max_runs": 16}}
+```
+
+| Member | Ý nghĩa | Đổi khi |
+|---|---|---|
+| `server_version` | Bản phát hành (`CARGO_PKG_VERSION`) | Mỗi bản phát hành |
+| `protocol` | `PROTOCOL_VERSION` (`protocol/info.rs`) | Một thay đổi mà client cũ sẽ đọc sai: member bị bỏ hoặc đổi kiểu, nghĩa bị đổi. Thêm method, member, capability hoặc param tùy chọn không làm tăng nó |
+| `contract_version` | `linch::CONTRACT_VERSION` (`linch-core/src/agent/spec.rs`) | Digest run contract của một agent không đổi bị đổi, nên các run đã lưu không resume được nữa. Nó không là đầu vào của digest; một test golden (`the_contract_version_names_the_golden_digest`) ghép nó với một digest cố định |
+| `capabilities` | Tên các tính năng tùy chọn (`CAPABILITIES`) | Thêm một tính năng; một tên không bao giờ được dùng lại cho hành vi khác |
+| `backends` | Các execution backend mà bản build cài đặt (`BACKENDS`: `sandbox` chỉ trên Linux) | Thêm một backend. Backend có chạy được trên host hay được cấp cho tenant hay không được quyết định ở `agent.open` |
+| `limits` | `max_message_bytes` (`MAX_LINE_BYTES`), `default_max_runs` (`DEFAULT_MAX_RUNS`) | Các hằng đổi |
+
+Các lựa chọn:
+
+- **Mọi người nhận cùng một câu trả lời.** Method không kiểm tra tenant và không
+  đọc tenant: `max_runs` riêng của tenant, các danh sách `allow`, tên, DSN, host và
+  đường dẫn không có trong đó (`crates/linch-rpc/tests/server_info.rs` so câu trả
+  lời của tenant với của client local). Tenant biết giới hạn của chính nó từ các lần
+  bị từ chối `-32005`, như trước.
+- **Params của lời gọi đầu tiên được cố định.** Client chưa biết server, nên
+  `{client_version?, client_protocol?}` là tùy chọn và chỉ được ghi log ở mức debug;
+  server không bao giờ đổi hành vi theo chúng. Param lạ là `-32602`, như mọi method.
+- **Result mở.** `ServerInfo` không dùng `deny_unknown_fields`, và client bỏ qua
+  member và tên capability lạ, nên server sau này có thể thêm chúng mà không tăng
+  protocol.
+- **Client nêu dải mà nó nói được.** Client Python nói các protocol từ
+  `PROTOCOL_MIN` đến `PROTOCOL_MAX` (`python/src/linch_rust/info.py`) và ném
+  `IncompatibleServer` (đồng thời đóng kết nối) với bất kỳ giá trị nào khác. Server
+  không có `server.info` trả `-32601`, client báo thành cùng lỗi đó với `protocol`
+  là `None`, không phải một `ProtocolError` trần; server không bao giờ trả lời là
+  `HandshakeTimeout` sau 15 giây.
+
 ## Các client
 
 `Client` Rust (`client.rs:97-101`) có một method tổng quát,
@@ -498,6 +540,10 @@ và `close`, `close_session` và `events` (`agent.py:159-201`).
 Một trường được thêm vào `AgentConfig` đến được `agent.open` mà không cần đổi gì ở đây;
 `python/tests/test_config.py:53` kiểm tra rằng cấu hình có kiểu của Python nêu tên
 mọi trường mà server đọc.
+
+Một thay đổi wire mà client cũ sẽ đọc sai thì tăng `PROTOCOL_VERSION` và
+`PROTOCOL_MIN`/`PROTOCOL_MAX` trong client Python ngay trong cùng thay đổi; một
+thay đổi chỉ thêm thì thêm một tên capability và giữ nguyên cả hai.
 
 ## Ví dụ
 

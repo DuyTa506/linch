@@ -29,6 +29,13 @@ use crate::verification::VerificationSpec;
 /// Domain separator for the run contract digest.
 const CONTRACT_DOMAIN: &str = "linch.agent.contract";
 
+/// Version of the run contract digest, reported by `server.info`. It is not
+/// an input of the digest, so it changes no stored digest. Bump it, together
+/// with the golden digest in this file's tests, whenever the digest of an
+/// agent that did not change would change: a run stored under the old digest
+/// then no longer resumes.
+pub const CONTRACT_VERSION: u32 = 1;
+
 fn default_concurrency() -> u32 {
     4
 }
@@ -386,6 +393,22 @@ mod tests {
         let mut features = JsonObject::new();
         features.insert("skills".into(), json!([]));
         assert_ne!(base, contract_digest(&spec, &[], hooks, &features).unwrap());
+    }
+
+    /// The golden digest and the contract version change together: a digest
+    /// that moves under an unchanged agent strands every stored run, so it
+    /// must come with a new version.
+    #[test]
+    fn the_contract_version_names_the_golden_digest() {
+        let hooks = crate::hooks::Hooks::default().policy_digest();
+        let digest = contract_digest(&AgentSpec::new("m"), &[], hooks, &JsonObject::new()).unwrap();
+        assert_eq!(
+            (CONTRACT_VERSION, digest.to_string().as_str()),
+            (
+                1,
+                "a80570d2a77d5d1600656180319cb890b0a31a879948779ba862b3303bfec300"
+            )
+        );
     }
 
     /// The contract of a spec with no output schema is the one it had
