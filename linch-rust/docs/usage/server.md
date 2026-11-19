@@ -272,6 +272,7 @@ async with Server.connect(SOCKET, token=TOKEN) as server:
     info.protocol            # 1: the wire protocol; this client speaks 1 to 1
     info.contract_version    # 1: the run contract digest's version
     info.has("cache_isolation")   # an optional feature, by name
+    info.has("exec_idempotency_key")   # exec.start carries the call's key
     info.backends            # ("local", "sandbox", "docker", "remote")
     info.max_message_bytes   # 16777216
     info.default_max_runs    # 16

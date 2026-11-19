@@ -24,6 +24,7 @@ fn expected() -> Value {
         "contract_version": 1,
         "capabilities": [
             "cache_isolation",
+            "exec_idempotency_key",
             "provider_info",
             "run_steer",
             "schedule",

@@ -46,7 +46,9 @@ the host, and optional `details` for the host: an object reaches the call's
 `ToolContext` (`tool.rs:117`) carries the session id, run id, `tool_use_id`,
 the caller's `principal`, a `cancel` token (cancelled on run abort or when the
 call ends) and the call's `deadline` when the agent sets a call timeout.
-`idempotency_key()` is `run_id:tool_use_id` (`tool.rs:182-192`). A resumed
+`idempotency_key()` is `run_id:tool_use_id` (`tool.rs:182-192`); `Bash` hands
+it to a `remote` host in `exec.start` (`Launch::idempotency_key`) and to no other
+backend. A resumed
 run never re-runs a call whose start was durable but whose end was not: it
 reports it as interrupted. `Subagent` and `SubagentContinue` are the
 exception: they are planned again and resume their durable child run

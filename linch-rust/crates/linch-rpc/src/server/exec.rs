@@ -73,6 +73,7 @@ impl RemoteExec for HostExec {
             background: command.background,
             session_id: command.session,
             principal: command.principal,
+            idempotency_key: command.idempotency_key,
         };
         self.call(method::EXEC_START, params).await.map(|_| ())
     }
@@ -155,6 +156,7 @@ mod tests {
                 background: false,
                 session: "s".into(),
                 principal: None,
+                idempotency_key: None,
             };
             host.start(command).await
         });

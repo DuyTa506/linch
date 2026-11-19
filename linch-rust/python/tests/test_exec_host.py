@@ -185,3 +185,19 @@ async def test_a_command_sees_only_the_hosts_identity_and_the_servers_allowed_va
     allowed = {"PATH", "HOME", "USER", "SHELL", "TMPDIR", "LANG", "PWD", "OLDPWD", "SHLVL", "_"}
     assert names <= allowed, names
     assert "sentinel" not in out
+
+
+async def test_a_start_without_a_key_reaches_the_host_with_none() -> None:
+    """A server without `exec_idempotency_key` sends no field: the host still starts."""
+    from linch_rust._rpc import _exec
+
+    seen: list[ExecStart] = []
+
+    class Host:
+        async def start(self, request: ExecStart) -> None:
+            seen.append(request)
+
+    params = {"exec_id": "e1", "command": "true", "session_id": "s1"}
+    await _exec(Host(), "exec.start", params, "a")  # type: ignore[arg-type]
+    await _exec(Host(), "exec.start", {**params, "idempotency_key": "r1:c1"}, "a")  # type: ignore[arg-type]
+    assert [start.idempotency_key for start in seen] == [None, "r1:c1"]

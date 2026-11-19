@@ -48,7 +48,8 @@ gọi như `metadata` của nó (`tool.rs:42-83`).
 `ToolContext` (`tool.rs:117`) mang session id, run id, `tool_use_id`,
 `principal` của bên gọi, một token `cancel` (bị hủy khi run abort hoặc khi
 lời gọi kết thúc) và `deadline` của lời gọi khi agent đặt call timeout.
-`idempotency_key()` là `run_id:tool_use_id` (`tool.rs:182-192`). Một run đã resume
+`idempotency_key()` là `run_id:tool_use_id` (`tool.rs:182-192`); `Bash` đưa nó cho host
+`remote` trong `exec.start` (`Launch::idempotency_key`) và không đưa cho backend nào khác. Một run đã resume
 không bao giờ chạy lại một lời gọi có phần bắt đầu đã bền vững mà phần kết thúc thì chưa:
 nó báo lời gọi đó là bị gián đoạn. `Subagent` và `SubagentContinue` là
 ngoại lệ: chúng được plan lại và resume run con bền vững của chúng

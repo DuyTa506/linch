@@ -572,6 +572,7 @@ mod tests {
             env,
             session: &SESSION,
             principal: None,
+            idempotency_key: None,
             lifeline,
         }
     }

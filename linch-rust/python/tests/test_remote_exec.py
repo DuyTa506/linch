@@ -115,6 +115,23 @@ async def test_the_host_gets_the_principal_of_the_run_that_made_each_command(
     assert [start.session_id for start in host.starts] == ["s1", "s2", "s3"]
 
 
+async def test_the_host_gets_a_stable_key_per_tool_call(tmp_path: Path) -> None:
+    turns = [
+        tool_turn("c1", "Bash", {"command": "true"}),
+        tool_turn("c2", "Bash", {"command": "true"}),
+        text_turn("done"),
+    ]
+    host = Recording()
+    async with Server() as server:
+        assert server.info.has("exec_idempotency_key")
+        agent = await server.open_agent(agent_config(tmp_path, turns), execution=host)
+        run = await agent.run("s1", "go")
+        [_ async for _ in run]
+    keys = [start.idempotency_key for start in host.starts]
+    assert keys == [f"{run.id}:c1", f"{run.id}:c2"]
+    assert len({start.exec_id for start in host.starts}) == 2
+
+
 @pytest.mark.source
 def test_the_typed_policy_names_every_field_the_server_reads() -> None:
     body = (CORE / "remote.rs").read_text().split("pub struct RemotePolicy {", 1)[1]
