@@ -6,6 +6,10 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ## Unreleased
 
+## 0.2.0 - 2026-11-19
+
+0.1.1 was uploaded to PyPI from commit `e102d938` and never tagged; this is the first tagged release. The Python client of this build refuses a server without `server.info` (`IncompatibleServer`), so ship the client and the `linch-server` binary together.
+
 The entries below are condensed to one line per area. The full text of each item is in the git history of this file (`git log -p -- linch-rust/CHANGELOG.md`), and most of the behavior it describes is in the usage and architecture docs. The Upgrading notes are in full.
 
 ### Fixed
