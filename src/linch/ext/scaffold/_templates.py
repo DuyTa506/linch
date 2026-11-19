@@ -43,7 +43,7 @@ README = Template(
     """\
 # ${project}
 
-A [Linch](https://github.com/DuyTa506/linch) agent scaffolded by `linch new`.
+A [Linch](https://github.com/Intramind-Labs/linch) agent scaffolded by `linch new`.
 
 ## Install
 

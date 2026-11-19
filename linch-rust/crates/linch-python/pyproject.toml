@@ -12,8 +12,8 @@ authors = [{ name = "CallMeZuy", email = "duyfaker01@gmail.com" }]
 dynamic = ["version"]
 
 [project.urls]
-Homepage = "https://github.com/DuyTa506/linch"
-Repository = "https://github.com/DuyTa506/linch"
+Homepage = "https://github.com/Intramind-Labs/linch"
+Repository = "https://github.com/Intramind-Labs/linch"
 
 [tool.maturin]
 module-name = "_linch_native"

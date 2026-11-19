@@ -20,8 +20,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/DuyTa506/linch"
-Repository = "https://github.com/DuyTa506/linch"
+Homepage = "https://github.com/Intramind-Labs/linch"
+Repository = "https://github.com/Intramind-Labs/linch"
 
 [project.scripts]
 linch = "linch.ext.scaffold:main"

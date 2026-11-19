@@ -176,7 +176,7 @@ Cài skill `build-agent-with-linch` cho Claude Code, Codex hoặc coding agent k
 biết docs đã cài nằm ở đâu và cách build, test trên Linch.
 
 ```sh
-npx skills add DuyTa506/linch   # cài từ GitHub
+npx skills add Intramind-Labs/linch   # cài từ GitHub
 linch skill install             # offline, khớp với bản Linch đã cài
 ```
 
