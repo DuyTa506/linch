@@ -307,8 +307,17 @@ cache gì trên model này (block của nó là 2176 token), nên không có k�
   so với 6.25 s), và các kết quả case 6 ở trên không giải thích được điều này. Nó chỉ xuất hiện với
   Postgres trong một sidecar: 4 sidecar mất 5.76 s. Với memory store, một sidecar đạt 1272 đến
   1487 turn/s ở M=2000 (cửa sổ 5.38 đến 6.29 s) và client dùng dưới 20% một core, nên cả message
-  JSON-RPC lẫn giải mã ở client đều không giải thích được. Nguyên nhân chưa được đo (lần profile không
-  được cấp database); thread server duy nhất và pool của một tiến trình là ứng viên, không phải kết quả.
+  JSON-RPC lẫn giải mã ở client đều không giải thích được. Hàng 10.5 s là giới hạn của một thread: một
+  sidecar tốn khoảng 1 ms CPU cho mỗi lượt ở 2.1 GHz trên một thread duy nhất của nó (khoảng 700 đến
+  750 lượt/s), thêm kết nối pool trên thread đó không được gì (64 kết nối 9.2 s, 80 kết nối 10.1 s, so
+  với 9.7 s với 32), còn thêm thread thì có. Đo ở M=2000 với 32 kết nối (run wall p50, trung vị của 3 đến
+  4 vòng ở 2.1 đến 2.3 GHz): một thread 9.7 s; một sidecar với 2 worker 9.1 s, 4 worker 7.4 s, 8 worker
+  6.9 s, 16 worker 6.4 s; 2 sidecar mỗi sidecar 16 kết nối 7.5 s; 4 sidecar mỗi sidecar 8 kết nối 6.3 s;
+  kernel trong tiến trình 6.3 s. CPU của server là 7.8 s với một thread, 13.2 s với 4 worker và 17.1 s
+  với 16. Chênh lệch so với kernel là 0.8 s ở M=500, 1.3 s ở 1000 và 3.4 s ở 2000. Việc thời gian chờ
+  trong các rào bền vững (khoảng 4.5 s mỗi run, gần như toàn bộ là chờ một kết nối pool) là do một
+  thread xoay vòng các kết nối được suy ra, không được profile. `LINCH_STDIO_THREADS` và việc chia sidecar
+  được mô tả ở [Chạy server](usage/server.md#nhiều-run-trên-một-sidecar-stdio).
 - Số thread của server: các lần chạy DeepSeek đạt 110 thread ở N=2500 (server stdio nếu không
   thì dùng một thread). Cùng một stub loopback (không có provider thật), các run N=1000, memory
   store: khi địa chỉ hóa bằng IP literal server có 1 thread ở 4 trên 4 lần chạy; khi địa chỉ

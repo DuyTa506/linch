@@ -242,6 +242,15 @@ before an upgrade, and let suspended runs finish first.
     database's limit minus headroom) / N, for example 20 for four sidecars on
     a limit of 100. Raise `stores.max_connections` past 32 only after raising
     the database's limit, or put a pooler such as PgBouncer in front.
+- One stdio sidecar on Postgres serves about 700 to 750 turns per second:
+  it spends about 1 ms of its own CPU per turn at 2.1 GHz, all of it on one
+  thread. Above about 500 runs in flight per sidecar, either start N sidecars
+  and split `stores.max_connections` between them as above, or give the sidecar
+  worker threads with `LINCH_STDIO_THREADS`
+  ([Running the server](./server.md#many-runs-on-one-stdio-sidecar)). A larger
+  pool pays only once more than one thread serves it: on one thread, 64 or 80
+  connections instead of 32 did not shorten the 2000-session run. Each extra
+  sidecar adds memory and one lease connection per agent; threads cost CPU.
 - A call that finds every connection of its pool busy waits 30 seconds, then
   fails with `pool timed out after 30s: raise max_pool_connections or lower
   concurrent runs; a run already created stays at its last durable state:

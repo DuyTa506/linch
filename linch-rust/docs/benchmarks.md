@@ -296,8 +296,16 @@ The `cache_salt` field itself was not captured on the wire; the evidence is the 
   against 6.25 s), and the case 6 findings above do not explain it. It appears only with Postgres in a single
   sidecar: 4 sidecars take 5.76 s. With memory stores one sidecar did 1272 to 1487 turns/s at M=2000 (window 5.38 to
   6.29 s) and the client used under 20% of one core, so neither JSON-RPC messages nor client decode account for
-  it. The cause is not yet measured (no database was assigned to the profile); the single server thread and
-  the pool of one process are candidates, not findings.
+  it. The 10.5 s row is a one-thread limit: a sidecar spends about 1 ms of CPU per turn at 2.1 GHz on its one
+  thread (about 700 to 750 turns/s), more pool connections on that thread gain nothing (64 connections 9.2 s,
+  80 connections 10.1 s, against 9.7 s with 32), and more threads do. Measured at M=2000 with 32 connections
+  (run wall p50, medians of 3 to 4 rounds at 2.1 to 2.3 GHz): one thread 9.7 s; one sidecar with 2 workers 9.1 s,
+  4 workers 7.4 s, 8 workers 6.9 s, 16 workers 6.4 s; 2 sidecars of 16 connections 7.5 s; 4 sidecars of 8
+  connections 6.3 s; the in-process kernel 6.3 s. Server CPU was 7.8 s on one thread, 13.2 s with 4 workers and
+  17.1 s with 16. The gap to the kernel is 0.8 s at M=500, 1.3 s at 1000 and 3.4 s at 2000. That the wait inside
+  durability barriers (about 4.5 s per run, almost all of it waiting for a pool connection) is the one thread
+  turning connections around is inferred, not profiled. `LINCH_STDIO_THREADS` and the sidecar split are described
+  in [Running the server](usage/server.md#many-runs-on-one-stdio-sidecar).
 - Server thread count: the DeepSeek runs reached 110 threads at N=2500 (the stdio server uses one thread otherwise).
   The same loopback stub (no live provider), N=1000 runs, memory stores: addressed by IP literal the server had 1 thread
   in 4 of 4 runs; addressed by the host name `localhost`, 7, 17, 6 and 5 threads. So the extra threads come with host

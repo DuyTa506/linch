@@ -532,6 +532,34 @@ silently instead:
 
 ---
 
+## Many runs on one stdio sidecar
+
+The stdio server runs on one thread. With Postgres stores it spends about 1 ms
+of its own CPU per turn at 2.1 GHz, so one sidecar serves about 700 to 750
+turns per second. Against the in-process kernel, with a pool of 32 on both,
+the gap in run wall time (4 turns, a 1 s provider delay per turn) is 0.8 s at
+500 concurrent sessions, 1.3 s at 1000 and 3.4 s at 2000
+([Benchmarks](../benchmarks.md)). Above about 500 runs in flight per sidecar:
+
+- Start N sidecars and split `stores.max_connections` between them
+  ([Stores](./stores.md#connections-and-pools)), or
+- set `LINCH_STDIO_THREADS=N` in the server's environment (N from 2 to 256) to
+  run the stdio server on N worker threads. Unset or `1` keeps the one-thread
+  runtime. Any other value (not a number, `0`, above 256) stops the server at
+  startup with an error naming the variable. The Python client passes it on
+  when it is in `Server(env=...)`, or in this process's environment when `env`
+  is absent. The variable has no effect on `--config` servers, which already
+  use a thread per core.
+
+At 2000 concurrent sessions, 4 turns each, with the same 32 connections: one
+thread 9.7 s, 2 workers 9.1 s, 4 workers 7.4 s, 8 workers 6.9 s, 16 workers
+6.4 s; 2 sidecars of 16 connections 7.5 s, 4 sidecars of 8 connections 6.3 s.
+Threads cost CPU (the sidecar used 7.8 CPU-s on one thread, 13.2 with 4
+workers and 17.1 with 16) and 1 to 3 ms per small run, which is why the
+default stays one thread; each extra sidecar adds memory and one lease
+connection per agent. More pool connections help only once more than one
+thread serves them.
+
 ## Logging
 
 The server's `tracing` records (the worker's failed jobs, retries and
