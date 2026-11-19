@@ -1,78 +1,70 @@
-# linch
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.svg">
+  <img src="docs/assets/logo.svg" alt="linch" height="64">
+</picture>
 
 [Bản gốc tiếng Anh](README.md)
 
-Linch 3.0 là một kernel agent Python không có giao diện. Ứng dụng nhúng vòng lặp
-agent bất đồng bộ của Linch, cung cấp tool và quyền, đồng thời tiếp nhận các event
-qua streaming. Ứng dụng chủ quản lý HTTP API và việc triển khai.
+Một kernel agent không giao diện, có thể nhúng, với run bền vững trên Postgres; ứng dụng chủ quản lý HTTP API và việc triển khai.
 
-Yêu cầu Python 3.11+. Linch 3.0 không tương thích với 2.x. Xem
-[hướng dẫn chuyển đổi sang 3.0](docs/migration-3.0.md).
+[![PyPI linch](https://img.shields.io/pypi/v/linch?label=linch)](https://pypi.org/project/linch/)
+[![PyPI linch-rust](https://img.shields.io/pypi/v/linch-rust?label=linch-rust)](https://pypi.org/project/linch-rust/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](pyproject.toml)
 
-## Tính năng
+</div>
 
-| Mảng | Cách triển khai |
-|---|---|
-| Runtime | `Agent`, `Session`, luồng event có kiểu, lập lịch tool, nén context và budget cho run |
-| Plugin | [`agent.use(plugin, config)`](docs/vi/architecture/kernel.md#plugin) gắn plugin có phạm vi, kích hoạt dependency và cho phép tháo gỡ để hoàn tác |
-| Profile | [Profile miền nghiệp vụ có phiên bản](docs/vi/usage/profiles.md) kết hợp cấu hình và cố định profile của mỗi run để resume |
-| Tìm kiếm tool | [Khám phá tool và skill theo cơ chế trì hoãn](docs/vi/usage/tools.md#toolsearchplugin--danh-mục-lớn) tải schema khi cần, khi vượt các ngưỡng có thể cấu hình |
-| Run bền vững | Kho lưu trữ session/run dùng Postgres, lease có cơ chế fencing theo epoch, checkpoint trước các tác động phụ được bảo vệ và phát lại event theo số thứ tự |
-| Cụm worker | `linch.worker` tùy chọn: điều phối bằng PgQueuer, gia hạn lease, khôi phục sau khi worker ngừng hoạt động hoặc cơ sở dữ liệu tạm thời gián đoạn và dừng tiếp nhận việc mới để hoàn tất việc đang chạy |
-| Độ tin cậy | Mặc định sửa phản hồi với số lần giới hạn, tùy chọn điều kiện tiên quyết cho tool và điều kiện hoàn tất, cùng điểm tích hợp dừng lượt chạy tuần tự |
-| Quyền | `Principal` cho từng run, quy tắc tool/đường dẫn/shell có điều kiện theo vai trò và quyết định phê duyệt được lưu bền vững |
-| Truy xuất và bộ nhớ | `RagConnector`, kiểm tra căn cứ trích dẫn, bộ nhớ tệp có phạm vi và backend hệ thống tệp ảo |
-| Provider | OpenAI Responses/Chat Completions, Anthropic, Gemini/Vertex AI qua `google-genai`, DeepSeek, llama.cpp và các endpoint tương thích |
-| Phần mở rộng | Các package `linch.ext` tường minh cho workflow, eval, deep agent, báo cáo, trình chạy vòng lặp và khởi tạo dự án; hook, MCP, skill và subagent |
-| Telemetry | Trace và metric OpenTelemetry trực tiếp; ứng dụng chủ cấu hình SDK và exporter |
-| Vòng đời | [Danh mục vòng đời có kiểu và trace ID](docs/vi/architecture/events.md#danh-mục-vòng-đời-có-kiểu) kết nối hook, điểm tích hợp kernel, event và log của ứng dụng chủ |
+Linch 3.0 là một kernel agent không có giao diện. Ứng dụng nhúng vòng lặp agent bất đồng bộ
+của Linch, cung cấp tool và quyền, đồng thời tiếp nhận các event qua streaming. Linch 3.0
+không tương thích với 2.x; xem [hướng dẫn chuyển đổi sang 3.0](docs/migration-3.0.md).
 
-Postgres là backend lưu trữ bền vững. Các kho InMemory dành cho kiểm thử và phát triển.
-Tool có phạm vi đọc có thể chạy song song. Predicate `parallel` xét đầu vào còn
-cho phép gọi subagent chỉ đọc; tool ghi/thực thi dùng cờ boolean vẫn chạy tuần tự.
+## Vì sao chọn linch
 
-## linch-rust
+- **Run bền vững.** Kho lưu trữ session và run dùng Postgres, lease có cơ chế fencing theo epoch, checkpoint trước các tác động phụ được bảo vệ và phát lại event theo số thứ tự.
+- **Ghi theo nhóm (group commit).** Các event và checkpoint đang chờ được ghi bền vững trước tác động bên ngoài kế tiếp (gọi provider, bắt đầu tool, trạng thái kết thúc).
+- **Cô lập tenant.** Mỗi agent có phạm vi `Context` riêng; server Rust cấp cho mỗi tenant token, danh sách cho phép và giới hạn riêng.
+- **Thực thi trong sandbox.** `Bash` chạy cục bộ, trong sandbox Landlock và seccomp, trong Docker, hoặc trên máy do client của bạn cung cấp (kernel Rust).
+- **Không phụ thuộc provider.** OpenAI, Anthropic, Gemini và Vertex AI, DeepSeek, llama.cpp và các endpoint tương thích.
+- **OpenTelemetry.** Trace và metric qua API OpenTelemetry; ứng dụng chủ cấu hình SDK và exporter.
 
-Thư mục [`linch-rust/`](linch-rust/) chứa một kernel Rust có cùng mô hình agent với
-package này. Kernel chạy dưới dạng `linch-server` qua JSON-RPC, và client Python
-`linch_rust` khởi động và điều khiển nó. Kernel cung cấp run bền vững trên Postgres,
-worker cho lịch và job nền, workflow, hook, MCP và OpenTelemetry. Đây là một SDK để
-nhúng, không phải sản phẩm agent làm sẵn: ứng dụng của bạn quản lý HTTP API, TLS và
+## Hai cách sử dụng
+
+| | `linch` (package Python) | `linch-rust` (client + `linch-server`) |
+|---|---|---|
+| Là gì | Vòng lặp agent chạy trong tiến trình Python của bạn | Cùng mô hình agent dưới dạng kernel Rust; client `linch_rust` khởi động và điều khiển `linch-server` qua JSON-RPC |
+| Chọn khi | Bạn muốn vòng lặp chạy trong tiến trình, hoặc cần đủ bộ phần mở rộng `linch.ext` | Bạn muốn hướng dành cho quy mô production: nhiều run đồng thời, worker cho lịch và job nền, tenant và sandbox |
+| Bắt đầu với | [Hướng dẫn sử dụng](docs/vi/usage/README.md) | [Hướng dẫn sử dụng](linch-rust/docs/vi/usage/README.md) ([English](linch-rust/docs/usage/README.md)) |
+
+Cả hai được phát triển song song và package Python vẫn được hỗ trợ. linch-rust là một SDK
+để nhúng, không phải sản phẩm agent làm sẵn: ứng dụng của bạn quản lý HTTP API, TLS và
 metrics, đồng thời chọn cách cô lập các lệnh.
 
-Hai bản được phát triển song song. Package Python vẫn được hỗ trợ; hướng Rust là hướng
-dành cho quy mô production. Bắt đầu với
-[hướng dẫn sử dụng](linch-rust/docs/vi/usage/README.md)
-([English](linch-rust/docs/usage/README.md)),
-[quickstart](linch-rust/docs/vi/usage/quickstart.md) hoặc
-[mục lục kiến trúc](linch-rust/docs/vi/architecture/README.md):
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/architecture-dark.svg">
+  <img src="docs/assets/architecture.svg" alt="Kiến trúc linch-rust: ứng dụng Python nói JSON-RPC với linch-server, server dùng Postgres, API provider và các backend thực thi" width="700">
+</picture>
+
+</div>
+
+*linch-rust: ứng dụng Python điều khiển `linch-server` qua JSON-RPC; run được lưu bền vững trên Postgres. Xem [mục lục kiến trúc](linch-rust/docs/vi/architecture/README.md).*
+
+## Cài đặt
 
 ```sh
 pip install linch-rust              # client và binary linch-server
 pip install 'linch-rust[otel]'      # kèm span và metric OpenTelemetry
-linch-rust new my-agent             # dự án chạy và kiểm thử ngoại tuyến
-linch-rust docs path                # nơi cài đặt tài liệu
 ```
 
-Trạng thái: linch-rust đang ở phiên bản 0.1 (bản phát hành mới nhất là 0.1.1), nên hãy
-đọc [changelog](linch-rust/CHANGELOG.md) của nó trước mỗi lần nâng cấp. Benchmark so
-sánh Python và Rust, cùng cách đo và các khoảng trống đã biết, nằm ở
-[trang benchmark](linch-rust/docs/vi/benchmarks.md)
-([English](linch-rust/docs/benchmarks.md)); số liệu định cỡ của chính SDK nằm ở
-[Embedding](linch-rust/docs/vi/usage/embedding.md#định-cỡ-những-gì-đã-được-đo).
-
-## Cài đặt
-
-Từ một bản checkout:
+Package `linch`, từ một bản checkout:
 
 ```sh
+pip install ./linch-rust/crates/linch-python   # extension native; cần toolchain Rust
 pip install -e .
-```
-
-Cài các extra mà ứng dụng của bạn sử dụng:
-
-```sh
-pip install -e '.[postgres,worker,anthropic,gemini,mcp]'
+pip install -e '.[postgres,worker,anthropic,gemini,mcp]'   # các extra bạn dùng
 ```
 
 API của OpenTelemetry được tích hợp trong phần lõi. Cài `opentelemetry-sdk` và
@@ -115,18 +107,67 @@ kho lưu trữ bền vững, làm theo [hướng dẫn bắt đầu nhanh](docs/
 [hướng dẫn production](docs/vi/usage/production.md) trình bày worker, streaming, resume
 và tắt hệ thống.
 
+Với linch-rust, tạo một dự án chạy và kiểm thử ngoại tuyến, hoặc đọc
+[quickstart](linch-rust/docs/vi/usage/quickstart.md):
+
+```sh
+linch-rust new my-agent             # dự án chạy và kiểm thử ngoại tuyến
+linch-rust docs path                # nơi cài đặt tài liệu
+```
+
+## Số đo
+
+Python Linch so với linch-rust, một host chung 64 thread, 2026-11-19.
+[Trang benchmark](linch-rust/docs/vi/benchmarks.md) ([English](linch-rust/docs/benchmarks.md))
+có thiết lập, cách đo và các khoảng trống đã biết.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/memory-dark.svg">
+  <img src="docs/assets/memory.svg" alt="Biểu đồ cột bộ nhớ đỉnh với 500, 1000 và 2000 session đồng thời, Python và linch-rust" width="700">
+</picture>
+
+Rust dùng nhiều bộ nhớ hơn Python cho mỗi session đồng thời từ 1000 session trở lên
+(411 MB so với 244 MB ở 2000); ở 500 thì Rust thấp hơn. Trang benchmark còn ghi rằng qua client
+Rust hoàn tất 351 lượt mỗi giây ở 500 session và 686 ở 2000, so với 89 của Python, vốn
+làm vòng lặp event bão hòa, và rằng sau một lần kill cưỡng bức ngay sau `run.start` nó tìm
+thấy đủ 160 run (trước khi sửa lỗi là mất 70 trên 160). Trang không có số liệu của Python
+cho bài kiểm tra kill này, nên không đưa ra phép so sánh nào.
+
+## Thêm tính năng của package Python
+
+| Mảng | Cách triển khai |
+|---|---|
+| Runtime | `Agent`, `Session`, luồng event có kiểu, lập lịch tool, nén context và budget cho run |
+| Plugin và profile | [`agent.use(plugin, config)`](docs/vi/architecture/kernel.md#plugin) gắn plugin có phạm vi; [profile có phiên bản](docs/vi/usage/profiles.md) cố định profile của mỗi run để resume |
+| Tìm kiếm tool | [Khám phá tool và skill theo cơ chế trì hoãn](docs/vi/usage/tools.md#toolsearchplugin--danh-mục-lớn) tải schema khi cần |
+| Cụm worker | `linch.worker` tùy chọn: điều phối bằng PgQueuer, gia hạn lease, khôi phục sau khi worker ngừng hoạt động và dừng tiếp nhận việc mới để hoàn tất việc đang chạy |
+| Độ tin cậy | Sửa phản hồi với số lần giới hạn, tùy chọn điều kiện tiên quyết cho tool và điều kiện hoàn tất |
+| Quyền | `Principal` cho từng run, quy tắc tool/đường dẫn/shell có điều kiện theo vai trò và quyết định phê duyệt được lưu bền vững |
+| Truy xuất và bộ nhớ | `RagConnector`, kiểm tra căn cứ trích dẫn, bộ nhớ tệp có phạm vi và backend hệ thống tệp ảo |
+| Phần mở rộng | Các package `linch.ext` tường minh cho workflow, eval, deep agent, báo cáo, trình chạy vòng lặp và khởi tạo dự án; hook, MCP, skill và subagent |
+| Vòng đời | [Danh mục vòng đời có kiểu và trace ID](docs/vi/architecture/events.md#danh-mục-vòng-đời-có-kiểu) kết nối hook, điểm tích hợp kernel, event và log của ứng dụng chủ |
+
+Postgres là backend lưu trữ bền vững. Các kho InMemory dành cho kiểm thử và phát triển.
+Tool có phạm vi đọc có thể chạy song song. Predicate `parallel` xét đầu vào còn
+cho phép gọi subagent chỉ đọc; tool ghi/thực thi dùng cờ boolean vẫn chạy tuần tự.
+
 ## Tài liệu
 
 - [Mục lục hướng dẫn sử dụng](docs/vi/usage/README.md): thiết lập và ví dụ cho từng tính năng.
 - [Mục lục kiến trúc](docs/vi/architecture/README.md): ranh giới module, hợp đồng và các bất biến.
+- [Hướng dẫn sử dụng linch-rust](linch-rust/docs/vi/usage/README.md) và [kiến trúc](linch-rust/docs/vi/architecture/README.md).
 - [Chuyển đổi từ 2.x](docs/migration-3.0.md): các API đã bị loại bỏ và cách import thay thế.
 - [Quản lý phiên bản](docs/versioning.md): API công khai, bản phát hành thử và định dạng lưu trữ bền vững.
 - [Ví dụ](examples/): các ví dụ có thể chạy, được nhóm theo hệ thống con.
 - [Đóng góp](docs/contributing.md): quy tắc phát triển và review.
+- [Changelog của linch](CHANGELOG.md) và [của linch-rust](linch-rust/CHANGELOG.md).
 
 Các thành phần kernel được import từ `linch.__all__`. Import phần mở rộng một cách
 tường minh, ví dụ `from linch.ext.workflow import run_workflow`; chúng không có
-trong các export ở cấp cao nhất của kernel.
+trong các export ở cấp cao nhất của kernel. Trạng thái: linch-rust đang ở phiên bản 0.1
+(bản phát hành mới nhất là 0.1.1), nên hãy đọc changelog của nó trước mỗi lần nâng cấp;
+số liệu định cỡ của chính SDK nằm ở
+[Embedding](linch-rust/docs/vi/usage/embedding.md#định-cỡ-những-gì-đã-được-đo).
 
 ## Xây dựng bằng coding agent
 
@@ -143,6 +184,7 @@ linch skill install             # offline, khớp với bản Linch đã cài
 ## Phát triển
 
 ```sh
+pip install ./linch-rust/crates/linch-python   # extension native; cần toolchain Rust
 pip install -e '.[dev,postgres,worker,mcp,anthropic,gemini]'
 python -m pytest -q
 ruff check . && ruff format --check .
