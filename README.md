@@ -122,14 +122,15 @@ Python Linch against linch-rust, one shared 64-thread host, 2026-11-19. The
 has the setup, method and known gaps.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/memory-dark.svg">
-  <img src="docs/assets/memory.svg" alt="Bar chart of peak memory at 500, 1000 and 2000 concurrent sessions, Python and linch-rust" width="700">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/scale-dark.svg">
+  <img src="docs/assets/scale.svg" alt="Two bar charts for 500, 1000 and 2000 concurrent sessions: peak memory in MB and throughput in turns per second, Python Linch and linch-rust" width="700">
 </picture>
 
-Rust uses more memory per concurrent session than Python from 1000 sessions up
-(411 MB against 244 MB at 2000); it is lower at 500. The page also reports that
-through the client it completes 351 turns per second at 500 sessions and 686 at 2000, against
-89 for Python, whose event loop saturates, and that after a forced kill right after
+The left panel is peak memory: linch-rust (client plus sidecar) is lower at 500 sessions
+(136 MB against 159 MB for Python) and higher from 1000 up (227 against 186 MB, and 411
+against 244 MB at 2000). The right panel is throughput: through the client linch-rust
+completes 351, 484 and 686 turns per second at 500, 1000 and 2000 sessions, against 89, 85
+and 89 for Python, whose event loop saturates. The page also reports that after a forced kill right after
 `run.start` it now finds all 160 runs (before a fix it lost 70 of 160). It has
 no Python figure for that kill test, so no comparison is claimed.
 
