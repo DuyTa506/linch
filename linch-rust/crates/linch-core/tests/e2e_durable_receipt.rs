@@ -555,32 +555,32 @@ const EXPECTED_WITHOUT_HOOKS: &[(&[&str], Option<&str>)] = &[
     (
         &["model_call_receipt", "assistant", "usage"],
         Some(
-            r#"{"turn":0,"usage":{"input_tokens":10,"output_tokens":5,"cache_read_tokens":0,"cache_creation_tokens":0},"usage_complete":true,"cost_usd":0.02,"session_len":2,"phase":{"phase":"assistant_received","message":{"role":"assistant","content":[{"type":"text","text":"working"},{"type":"tool_use","id":"call_0_0","name":"Read","input":{"value":"v0.0"}}]},"stop_reason":"tool_use"}}"#,
+            r#"{"turn":0,"usage":{"input_tokens":10,"output_tokens":5,"cache_read_tokens":0,"cache_creation_tokens":0},"usage_complete":true,"cost_usd":0.02,"usage_by_model":{"scripted-model":{"input_tokens":10,"output_tokens":5,"cache_read_tokens":0,"cache_creation_tokens":0}},"session_len":2,"phase":{"phase":"assistant_received","message":{"role":"assistant","content":[{"type":"text","text":"working"},{"type":"tool_use","id":"call_0_0","name":"Read","input":{"value":"v0.0"}}]},"stop_reason":"tool_use"}}"#,
         ),
     ),
     (
         &["tool_call_start"],
         Some(
-            r#"{"turn":0,"usage":{"input_tokens":10,"output_tokens":5,"cache_read_tokens":0,"cache_creation_tokens":0},"usage_complete":true,"cost_usd":0.02,"session_len":3,"phase":{"phase":"tool_batch","decisions":[{"tool_use_id":"call_0_0","decision":{"type":"allow"}}],"after_seq":7}}"#,
+            r#"{"turn":0,"usage":{"input_tokens":10,"output_tokens":5,"cache_read_tokens":0,"cache_creation_tokens":0},"usage_complete":true,"cost_usd":0.02,"usage_by_model":{"scripted-model":{"input_tokens":10,"output_tokens":5,"cache_read_tokens":0,"cache_creation_tokens":0}},"session_len":3,"phase":{"phase":"tool_batch","decisions":[{"tool_use_id":"call_0_0","decision":{"type":"allow"}}],"after_seq":7}}"#,
         ),
     ),
     (&["tool_call_end"], None),
     (
         &["user"],
         Some(
-            r#"{"turn":0,"usage":{"input_tokens":10,"output_tokens":5,"cache_read_tokens":0,"cache_creation_tokens":0},"usage_complete":true,"cost_usd":0.02,"session_len":3,"phase":{"phase":"tool_results","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_0_0","content":[{"type":"text","text":"v0.0"}]}]}}}"#,
+            r#"{"turn":0,"usage":{"input_tokens":10,"output_tokens":5,"cache_read_tokens":0,"cache_creation_tokens":0},"usage_complete":true,"cost_usd":0.02,"usage_by_model":{"scripted-model":{"input_tokens":10,"output_tokens":5,"cache_read_tokens":0,"cache_creation_tokens":0}},"session_len":3,"phase":{"phase":"tool_results","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_0_0","content":[{"type":"text","text":"v0.0"}]}]}}}"#,
         ),
     ),
     (
         &["context_build", "model_call_delivery"],
         Some(
-            r#"{"turn":1,"usage":{"input_tokens":10,"output_tokens":5,"cache_read_tokens":0,"cache_creation_tokens":0},"usage_complete":true,"cost_usd":0.02,"session_len":4,"phase":{"phase":"provider_pending","attempt":1}}"#,
+            r#"{"turn":1,"usage":{"input_tokens":10,"output_tokens":5,"cache_read_tokens":0,"cache_creation_tokens":0},"usage_complete":true,"cost_usd":0.02,"usage_by_model":{"scripted-model":{"input_tokens":10,"output_tokens":5,"cache_read_tokens":0,"cache_creation_tokens":0}},"session_len":4,"phase":{"phase":"provider_pending","attempt":1}}"#,
         ),
     ),
     (
         &["model_call_receipt", "assistant", "usage"],
         Some(
-            r#"{"turn":1,"usage":{"input_tokens":20,"output_tokens":10,"cache_read_tokens":0,"cache_creation_tokens":0},"usage_complete":true,"cost_usd":0.04,"session_len":4,"phase":{"phase":"assistant_received","message":{"role":"assistant","content":[{"type":"text","text":"done"}]},"stop_reason":"end_turn"}}"#,
+            r#"{"turn":1,"usage":{"input_tokens":20,"output_tokens":10,"cache_read_tokens":0,"cache_creation_tokens":0},"usage_complete":true,"cost_usd":0.04,"usage_by_model":{"scripted-model":{"input_tokens":20,"output_tokens":10,"cache_read_tokens":0,"cache_creation_tokens":0}},"session_len":4,"phase":{"phase":"assistant_received","message":{"role":"assistant","content":[{"type":"text","text":"done"}]},"stop_reason":"end_turn"}}"#,
         ),
     ),
     (&["result"], None),

@@ -112,7 +112,7 @@ class UsageEvent:
     cost_usd: float | None = None
     cumulative_cost_usd: float | None = None
     actual_model: str | None = None
-    cumulative_by_model: dict[str, JsonObject] = field(default_factory=dict)
+    cumulative_by_model: dict[str, JsonObject] = field(default_factory=dict[str, JsonObject])
 
 
 @dataclass(frozen=True)
@@ -566,7 +566,7 @@ class SubagentUsage:
     total_usage: JsonObject
     usage_complete: bool
     subagent_type: str | None = None
-    usage_by_model: dict[str, JsonObject] = field(default_factory=dict)
+    usage_by_model: dict[str, JsonObject] = field(default_factory=dict[str, JsonObject])
     total_cost_usd: float | None = None
 
 
@@ -599,8 +599,8 @@ class ResultEvent:
     structured_error: str | None = None
     trace_id: str | None = None
     total_cost_usd: float | None = None
-    usage_by_model: dict[str, JsonObject] = field(default_factory=dict)
-    subagent_usage: dict[str, SubagentUsage] = field(default_factory=dict)
+    usage_by_model: dict[str, JsonObject] = field(default_factory=dict[str, JsonObject])
+    subagent_usage: dict[str, SubagentUsage] = field(default_factory=dict[str, SubagentUsage])
 
 
 @dataclass(frozen=True)
