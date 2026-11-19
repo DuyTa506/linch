@@ -38,6 +38,9 @@ problem with its file and line. Do not edit anything.
 | `description` | yes | Listed in the `Subagent` tool's description |
 | `name` | no | What the model passes as `subagent_type`; the file name when absent |
 | `tools` | no | The tools the child may use, as a list or a comma-separated string; `Read(...)` counts as `Read`; absent or `*` means all of the parent's |
+| `max_tokens` | no | A cap on each run of this agent, in tokens (all four usage buckets), a positive integer; see [Cap a subagent](#cap-a-subagent) |
+| `max_cost_usd` | no | The same cap in USD, a positive number; it needs a price for the model, as a run's `budget.max_cost_usd` does |
+| `warn_ratio` | no | Where the cap's one warning fires, above 0 and at most 1 (default 0.9); it needs a cap |
 
 The body is the child's instructions. Two definitions come built in:
 `verification`, which tries to break completed work with `Read`, `Glob`,
@@ -59,6 +62,34 @@ What a child gets:
 | Approval | It cannot suspend: a call that needs approval is denied, unless a permission rule or a `permission_request` callback allows it |
 
 ---
+
+## Cap a subagent
+
+A definition with `max_tokens` or `max_cost_usd` caps each child run of it,
+with the same meter and units as a run [`budget`](./agent.md#budget):
+
+- The child's spend still counts against the parent's own `budget`, which is
+  checked first: an exhausted parent refuses the child's next call with the
+  run's own `BudgetExceededError` (`run budget exhausted`).
+- A child that reaches its own cap stops before its next provider call, ends
+  `failed` with `BudgetExceededError` (`subagent budget exhausted (N tokens,
+  $X spent)`), and the parent's `Subagent` call returns that as an error
+  result (`Subagent encountered an error: BudgetExceededError: ...`, with the
+  child's last text as partial output). The parent's run goes on, and the
+  model can retry or answer without it.
+- The cap is per child run. A `SubagentContinue` call starts a new child run,
+  so it has a fresh cap; the parent's `budget` bounds the total.
+- The child's `budget` events say which: its warning at `warn_ratio` of its
+  own cap fires once per child run, beside the tree's one warning.
+- The cap is part of the child's run contract. It survives a crash: a resumed
+  child counts the receipts its own log already holds, so it never makes a
+  call past the cap. A crash that left a call of unknown use fails the child
+  with `BudgetAccountingError`, as it does a run budget.
+- A cap never widens anything: the child has the same tools, permissions and
+  approval rule as an uncapped one. A value in the frontmatter that is not a
+  positive number skips the file (listed in `Agent.skipped`), never loads it
+  uncapped. A definition without these keys behaves as before and keeps its
+  run contract.
 
 ## Run a subagent
 

@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use tokio_util::sync::CancellationToken;
 
 use crate::ask_user::AskUserAnswer;
+use crate::budget::RunBudget;
 use crate::canonical::Digest;
 use crate::coordination::Mailbox;
 use crate::events::kinds::ScheduleFireEvent;
@@ -223,6 +224,10 @@ pub(crate) struct AgentInner {
     /// Whether this is a subagent's agent: its runs cannot suspend, so a
     /// call that needs approval is denied.
     pub(crate) child: bool,
+    /// The cap of the subagent definition this agent runs (see
+    /// [`SubagentDefinition::budget`]); its runs charge a meter within
+    /// their tree's.
+    pub(crate) cap: Option<RunBudget>,
     /// Prices each paid call; `None` reports no cost.
     pub(crate) pricing: Option<Pricing>,
     /// The cap on concurrent provider calls this agent's runs share, its
@@ -344,6 +349,36 @@ pub(crate) fn first_unpriced<'a>(
     };
     let models = std::iter::once(&spec.model).chain(&spec.fallback_models);
     models.map(String::as_str).find(|model| !priced(model))
+}
+
+/// Why a definition's cap in `definitions` cannot run under `spec` and
+/// `pricing`, if one cannot: a cap that is not a finite number, or a cost
+/// cap on a model (the spec's, or a fallback) with no price.
+pub(crate) fn subagent_budget_problem(
+    pricing: Option<&Pricing>,
+    spec: &AgentSpec,
+    definitions: &[crate::subagents::SubagentDefinition],
+) -> Option<String> {
+    for definition in definitions {
+        let Some(budget) = &definition.budget else {
+            continue;
+        };
+        let name = &definition.name;
+        if let Some(problem) = budget.problem() {
+            return Some(format!("subagent {name:?}: {problem}"));
+        }
+        if budget.max_cost_usd.is_none() {
+            continue;
+        }
+        if let Some(model) = first_unpriced(pricing, spec) {
+            return Some(format!(
+                "subagent {name:?}: budget.max_cost_usd needs a price for the model \
+                 {model:?}, which has none: set `pricing` for it or cap budget.max_tokens \
+                 instead"
+            ));
+        }
+    }
+    None
 }
 
 impl Agent {

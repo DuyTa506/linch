@@ -58,7 +58,7 @@ encoding.
 | `compaction` | `CompactionEvent`, `kinds/control.rs:64` | yes | yes | |
 | `loop_guard` | `LoopGuardEvent`, `kinds/control.rs:123` | yes | yes | |
 | `policy` | `PolicyEvent`, `kinds/policy.rs` | yes | yes | A spec `policy` (`crates/linch-core/src/gates.rs`): a refusal with its batch's `ToolBatch` write, a correction with its notification and checkpoint, a stop in the terminal write |
-| `budget` | `BudgetEvent`, `kinds/control.rs:145` | yes | yes | A spec `budget` (`crates/linch-core/src/budget.rs`): `warning` right after the `usage` that crossed the ratio, once per run tree; `exceeded` in the terminal write, before its `error` |
+| `budget` | `BudgetEvent`, `kinds/control.rs:145` | yes | yes | A spec `budget` (`crates/linch-core/src/budget.rs`): `warning` right after the `usage` that crossed the ratio, once per run tree; `exceeded` in the terminal write, before its `error`; a subagent definition's `budget` adds the same two events to a child run's own log, once per child run, and its `exceeded` ends only that child |
 | `provider_retry` | `ProviderRetryEvent`, `kinds/reliability.rs:13` | yes | yes | A spec `provider_retry` (`crates/linch-core/src/reliability.rs`): before the wait, in one write with the failed receipt |
 | `model_fallback` | `ModelFallbackEvent`, `kinds/reliability.rs:31` | yes | yes | A spec's `fallback_models`: with the failed receipt, on the fallback's dispatch barrier |
 | `prompt_cache_advisory` | `PromptCacheAdvisoryEvent`, `kinds/control.rs:186` | yes | yes | Not emitted at this revision |

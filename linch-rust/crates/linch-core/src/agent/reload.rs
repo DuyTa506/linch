@@ -10,7 +10,7 @@
 
 use std::sync::{Arc, OnceLock, PoisonError};
 
-use super::{Agent, AgentInner, BuildError};
+use super::{Agent, AgentInner, BuildError, subagent_budget_problem};
 use crate::catalog::LiveSkill;
 use crate::message::SystemBlock;
 use crate::registration::Registration;
@@ -67,6 +67,11 @@ impl Agent {
     ) -> Result<Registration, BuildError> {
         let versions = (self.inner.subagents.as_ref())
             .ok_or_else(|| BuildError::Invalid("this agent has no subagents".into()))?;
+        let inner = &self.inner;
+        let problem = subagent_budget_problem(inner.pricing.as_ref(), &inner.spec, &definitions);
+        if let Some(problem) = problem {
+            return Err(BuildError::Invalid(problem));
+        }
         let roster = Arc::new(Roster::new(definitions));
         let handle = Arc::new(OnceLock::from(Arc::downgrade(&self.inner)));
         let tool = SubagentTool::new(Arc::clone(&roster), handle, self.inner.workers);

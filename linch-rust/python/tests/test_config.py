@@ -124,6 +124,37 @@ async def test_a_spec_budget_caps_the_run_and_its_children(tmp_path: Path) -> No
     assert (final(envelopes).subtype, final(envelopes).stop_reason) == ("error", "error")
 
 
+async def test_a_subagent_file_caps_its_child_and_a_bad_cap_skips_the_file(
+    tmp_path: Path,
+) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    (agents / "capped.md").write_text(
+        "---\ndescription: A capped helper.\nmax_tokens: 4\n---\nHelp.\n", encoding="utf-8"
+    )
+    (agents / "broken.md").write_text(
+        "---\ndescription: A broken cap.\nmax_tokens: lots\n---\nHelp.\n", encoding="utf-8"
+    )
+    spawn = tool_turn(
+        "c1", "Subagent", {"description": "Check", "prompt": "Check", "subagent_type": "capped"}
+    )
+    # The child's one call spends its whole cap of 4 tokens: its next call is refused.
+    turns = [spawn, tool_turn("k1", "Missing", {}), text_turn("done")]
+    cfg = config(turns, mode="skip_dangerous", subagents=True, config_dir=str(tmp_path))
+    async with Server() as server:
+        agent = await server.open_agent(cfg)
+        assert [(Path(s.path).name, s.reason) for s in agent.skipped] == [
+            ("broken.md", "invalid_frontmatter")
+        ]
+        envelopes = [e async for e in await agent.run("s1", "go")]
+
+    [end] = [r for r in results(envelopes) if "BudgetExceededError" in r]
+    assert "subagent budget exhausted (4 tokens" in end
+    assert final(envelopes).subtype == "success" and final(envelopes).final_text == "done"
+    [(_, child)] = final(envelopes).subagent_usage.items()
+    assert child.subagent_type == "capped" and child.total_usage["output_tokens"] == 1
+
+
 def overloaded() -> dict[str, Any]:
     """A scripted call that fails with a retryable 529 before any event."""
     return {"error": {"type": "status", "status": 529, "message": "overloaded"}}

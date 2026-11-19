@@ -95,6 +95,8 @@ mod workers;
 
 use serde::{Deserialize, Serialize};
 
+use crate::budget::RunBudget;
+
 pub(crate) use background::{Completion, reattach};
 pub(crate) use control::{ContinueTool, Handle, StopTool};
 pub(crate) use tool::SubagentTool;
@@ -144,7 +146,7 @@ pub const CONTINUE_TOOL: &str = "SubagentContinue";
 pub const STOP_TOOL: &str = "TaskStop";
 
 /// A kind of subagent the model can ask for.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SubagentDefinition {
     /// Name the model passes as `subagent_type`.
     pub name: String,
@@ -155,6 +157,15 @@ pub struct SubagentDefinition {
     pub tools: Option<Vec<String>>,
     /// Instructions appended to the child's system prompt.
     pub body: String,
+    /// A cap on each child run of this definition, counted in the units of
+    /// a run [`RunBudget`] (tokens and USD) and reached the same way, with
+    /// a `BudgetExceededError` that ends the child run and reaches the
+    /// parent as an error result of the call. What the child spends still
+    /// counts against the parent's own budget, which is checked first.
+    /// `None` (the default) caps nothing, and stays off the wire, so the
+    /// run contract of a definition without a cap does not change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget: Option<RunBudget>,
 }
 
 impl SubagentDefinition {
@@ -169,6 +180,7 @@ impl SubagentDefinition {
             description: description.into(),
             tools: None,
             body: body.into(),
+            budget: None,
         }
     }
 }

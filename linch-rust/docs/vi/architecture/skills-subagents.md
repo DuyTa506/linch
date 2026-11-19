@@ -486,6 +486,20 @@ async fn main() {
 | Một đối tượng `RunBudget` trên cấu hình agent (hoặc các tùy chọn run), dùng chung bởi mọi run dùng nó và được cây subagent kế thừa | Một `budget` của spec cho mỗi run gốc một bộ đo riêng (`crates/linch-core/src/budget.rs`), mà family của run giao cho mọi run con; một run gốc được resume cộng các receipt bền vững của chính nó và của các run con. Tổng của agent cha vẫn chỉ đếm các lời gọi của chính nó, như `ResultEvent` của Python |
 | Một coordinator mất các tool nặng của nó | Không áp dụng: kernel đưa cho agent cha mọi tool mà các subagent của nó có thể dùng |
 
+## Giới hạn cho mỗi subagent
+
+`SubagentDefinition::budget` (frontmatter `max_tokens`, `max_cost_usd`, `warn_ratio`) là một
+`RunBudget` cho mỗi run con của định nghĩa đó; khi không đặt thì không xuất hiện trên wire,
+nên phần của định nghĩa trong contract run không đổi. `AgentInner::child` sao chép nó sang
+agent của run con (`cap`), và `runner/start.rs` (`capped`) đưa cho mỗi run của agent đó một
+`Meter::within` bộ đếm của cây: một lần tính phí được đếm cho cả hai, cây từ chối trước
+(`BudgetExceededError` của chính run), rồi đến giới hạn (`Refusal::SubagentExceeded`, cùng tên
+lỗi với `subagent budget exhausted`), chỉ làm run con đó thất bại. Resume khởi tạo bộ đếm của
+giới hạn từ các receipt bền vững của chính run con (`Spent::of`), nên không ghi thêm gì, và
+kiểm tra giá cho giới hạn chi phí chạy trong `AgentBuilder::build` và `reload_subagents`
+(`subagent_budget_problem`). `crates/linch-core/tests/e2e_subagent_budget.rs` bao phủ giới hạn,
+việc agent cha đếm, crash ở mọi lần ghi và đường của host (`Agent::subagent`).
+
 ## Test
 
 | Test | Cố định điều gì |
