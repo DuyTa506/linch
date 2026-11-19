@@ -298,6 +298,21 @@ trường của server khi inference server được khởi động cùng một 
 `{"type": "disabled"}` trong `spec.thinking` gửi công tắc tắt thinking của server
 đó; mọi giá trị khác để lại mặc định của chat template.
 
+<a id="running-linch-against-an-sglang-server"></a>
+
+### Chạy linch với server SGLang
+
+Mỗi điểm dưới đây được quan sát trên SGLang 0.5.23 phục vụ Qwen3.6-35B-A3B (NVFP4) với một `linch-server` bản release.
+
+- **Reasoning parser.** Khởi động server với `--reasoning-parser` (ví dụ `qwen3`). Không có nó, phần thinking nằm trong `content`, kết thúc bằng thẻ `</think>`, nên linch chỉ thấy các delta text và `reasoning_tokens` là 0.
+- **Báo cáo cache.** Khởi động với `--enable-cache-report`. Không có nó `prompt_tokens_details` là null, nên linch báo `cache_read_tokens` 0 ở mọi run và tính cả prompt là input, không có lỗi hay cảnh báo nào (ba run đều tính 4352 token input).
+- **Tên model.** `model` không biết hoặc rỗng vẫn trả lời 200 và được trả lại nguyên văn (vLLM trả lời 404), nên server không bắt lỗi gõ sai tên model; một run qua linch với model `no-such-model` đã thành công.
+- **Trường usage.** Ở chế độ thinking, `usage.reasoning_tokens` và `completion_tokens_details.reasoning_tokens` cùng được đặt với một giá trị (372 và 372); `completion_tokens` đã gồm reasoning (377 = 372 + 5); `completion_tokens_details` là null khi reasoning bằng 0; chunk usage của stream (`include_usage`) mang cùng các trường.
+- **API key.** Với `--api-key`, key sai hoặc thiếu trả lời 401 kèm `{"error":"Unauthorized"}`, không theo dạng lỗi của OpenAI. Linch báo `kind` `status`, status 401, không thử lại, và key không xuất hiện trong thông báo; `/health` không cần key.
+- **Lỗi giữa stream.** Một frame lỗi giữa stream (HTTP 200, rồi `data: {"error": {... "code": 503}}`) được báo là 503 có thể thử lại. `finish_reason` là `abort` (server tự hủy) được thử lại như lỗi transport, và token của lời gọi bị hủy không được tính.
+- **Chat template.** Template chỉ dựng lại reasoning trước đó sau lượt user cuối; linch gửi lại `reasoning_content` (đã kiểm bằng một proxy ghi log). SGLang thêm `"defer_loading": null` vào mỗi tool khi dựng prompt, điều này giải thích chênh 6 token so với template của Hugging Face, nên đừng coi chênh lệch ước lượng token của prompt là lỗi.
+- **Xu hướng gọi tool.** Khác nhau theo engine với cùng model và prompt: một request nguyên văn cho 0 trên 40 lần gọi tool ở SGLang và 40 trên 40 ở vLLM, với bốn mức sampling. Vì vậy một bộ test live thất bại kiểu "model trả lời thay vì gọi tool" trên SGLang là khác biệt của engine, không phải lỗi của linch; `LINCH_LIVE_KIND` (ở trên) chọn loại SGLang cho các bộ test.
+
 <a id="the-scripted-provider"></a>
 
 ## Provider scripted

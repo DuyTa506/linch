@@ -305,6 +305,19 @@ server's environment only when the inference server was started with one.
 switch for turning thinking off; every other value leaves the chat template's
 default.
 
+### Running linch against an SGLang server
+
+Each point was observed on SGLang 0.5.23 serving Qwen3.6-35B-A3B (NVFP4) against a release `linch-server`.
+
+- **Reasoning parser.** Start the server with `--reasoning-parser` (for example `qwen3`). Without it the thinking text lands in `content`, ending with a `</think>` tag, so linch sees only text deltas and `reasoning_tokens` is 0.
+- **Cache report.** Start it with `--enable-cache-report`. Without it `prompt_tokens_details` is null, so linch reports `cache_read_tokens` 0 on every run and bills the whole prompt as input, with no error or warning (three runs each billed 4352 input tokens).
+- **Model name.** An unknown or empty `model` answers 200 and is echoed back (vLLM answers 404), so the server does not catch a typo in the model name; a run through linch with the model `no-such-model` succeeded.
+- **Usage fields.** In thinking mode `usage.reasoning_tokens` and `completion_tokens_details.reasoning_tokens` are both set to the same value (372 and 372); `completion_tokens` includes the reasoning (377 = 372 + 5); `completion_tokens_details` is null when reasoning is 0; the stream usage chunk (`include_usage`) carries the same fields.
+- **API key.** With `--api-key`, a wrong or missing key answers 401 with `{"error":"Unauthorized"}`, not the OpenAI error shape. Linch reports `kind` `status`, status 401, not retryable, and the key does not appear in the message; `/health` needs no key.
+- **Stream failures.** A mid-stream error frame (HTTP 200, then `data: {"error": {... "code": 503}}`) is reported as a retryable 503. A `finish_reason` of `abort` (a server-side abort) is retried as a transport error, and the aborted call's tokens are not counted.
+- **Chat template.** The template renders earlier reasoning only after the last user turn; linch sends `reasoning_content` back (checked with a logging proxy). SGLang adds `"defer_loading": null` to each tool when it renders them, which explains a 6-token prompt difference against the Hugging Face template, so do not treat the prompt-token estimate difference as a defect.
+- **Tool-call propensity.** It differs by engine on the same model and prompt: one verbatim request gave 0 of 40 tool calls on SGLang and 40 of 40 on vLLM, at four sampling settings. A live-suite failure of "the model answered instead of calling the tool" on SGLang is therefore an engine difference, not a linch defect; `LINCH_LIVE_KIND` (above) selects the SGLang kind for the suites.
+
 ## The scripted provider
 
 `scripted` replays a list of turns, one per provider call in call order,
