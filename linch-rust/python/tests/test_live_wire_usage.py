@@ -1,8 +1,12 @@
 """The live suites read a server's reasoning-token count from its raw usage object.
 
 vLLM reports it at `usage.completion_tokens_details.reasoning_tokens`; SGLang at
-`usage.reasoning_tokens` and leaves `completion_tokens_details` null. The payloads are
-trimmed from recorded live runs (no prompt text, no keys).
+`usage.reasoning_tokens` and leaves `completion_tokens_details` null when the turn did not
+reason. `SGLANG` is the usage object of a recorded SGLang run (a one-word reply, thinking off).
+The two thinking payloads are constructed from the recorded effort run (`completion_tokens` 217,
+`reasoning_tokens` 213, 212 thinking deltas). That dump read the count from
+`completion_tokens_details`, so SGLang fills the details when it reasons; whether it also fills the
+top-level field then is not recorded, so both placements are covered.
 """
 
 from __future__ import annotations
@@ -32,12 +36,17 @@ SGLANG = {
     "reasoning_tokens": 0,
     "completion_tokens_details": None,
 }
-SGLANG_THINKING = {**SGLANG, "completion_tokens": 250, "reasoning_tokens": 248}
+SGLANG_THINKING = {**SGLANG, "completion_tokens": 217, "reasoning_tokens": 213}
+SGLANG_THINKING_DETAILS = {
+    **SGLANG,
+    "completion_tokens": 217,
+    "completion_tokens_details": {"reasoning_tokens": 213},
+}
 VLLM = {
     "prompt_tokens": 36,
-    "total_tokens": 66,
-    "completion_tokens": 30,
-    "completion_tokens_details": {"reasoning_tokens": 28},
+    "total_tokens": 253,
+    "completion_tokens": 217,
+    "completion_tokens_details": {"reasoning_tokens": 213},
 }
 
 
@@ -45,8 +54,9 @@ VLLM = {
     ("usage", "expected"),
     [
         (SGLANG, 0),
-        (SGLANG_THINKING, 248),
-        (VLLM, 28),
+        (SGLANG_THINKING, 213),
+        (SGLANG_THINKING_DETAILS, 213),
+        (VLLM, 213),
         ({"completion_tokens": 3}, None),
         (None, None),
     ],
