@@ -14,6 +14,7 @@ use crate::openai_compat::stream::{self, Translator};
 
 mod cache_usage;
 mod fixtures;
+mod reasoning_usage;
 
 const ALL: [Server; 3] = [Server::Vllm, Server::SgLang, Server::LlamaCpp];
 
