@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 LAYOUT = (
     "docs/usage",
     "docs/architecture",
+    "docs/assets",
     "docs/architecture.md",
     "docs/usage.md",
     "docs/migration-3.0.md",

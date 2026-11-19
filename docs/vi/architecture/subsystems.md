@@ -57,33 +57,16 @@ Vòng lặp được chia theo trách nhiệm:
 6. `loop/checkpoint.py` và `loop/runtime.py` lưu bền vững các giai đoạn, event,
    biên nhận gọi mô hình, trạng thái extension và con trỏ resume.
 
-```mermaid
-sequenceDiagram
-    participant Caller as Host caller
-    participant S as Session
-    participant R as RunStore
-    participant P as Provider
-    participant T as Scheduler
+<div align="center">
 
-    Caller->>S: run(prompt) or resume(run_id)
-    S->>R: create/load run + initial checkpoint
-    loop each turn
-        S->>R: checkpoint provider_pending
-        S->>P: stream ProviderRequest
-        P-->>S: normalized text/tool events
-        alt tool calls
-            Note over S,R: tool_batch_pending is held, but exact-input runs write it at once
-            S->>R: commit tool_executing + pending events
-            S->>T: resolve, authorize, execute tools
-            T-->>S: ToolCallStart/End events
-            S->>R: append tool results + checkpoint
-        else terminal candidate
-            S->>S: dispatch TurnStopping
-            S->>R: append result + completed checkpoint
-        end
-        S-->>Caller: typed event stream
-    end
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../../assets/py-subsystems-a-dark.svg">
+  <img src="../../assets/py-subsystems-a.svg" alt="Sơ đồ tuần tự của một run bền vững giữa host caller, Session, RunStore, Provider và Scheduler" width="700">
+</picture>
+
+</div>
+
+*Một run bền vững: session checkpoint vào run store trước mỗi lần gọi provider và mỗi lô tool.*
 
 Khi run được lưu bền vững, checkpoint được ghi trước thao tác có kết quả cần
 khôi phục. Vì vậy, tích hợp tool nhận một `ToolContext.idempotency_key` ổn định
@@ -240,18 +223,16 @@ lại thông qua `DatabaseRetryEntrypointExecutor`.
 `scheduler.py` là điểm kiểm soát duy nhất cho việc thực thi tool. Với mỗi khối
 sử dụng tool từ provider, nó thực hiện pipeline theo thứ tự sau:
 
-```mermaid
-flowchart LR
-    Resolve["resolve + validate"] --> Offered["offered-tool boundary"]
-    Offered --> Pre["PreToolUse / middleware"]
-    Pre --> Revalidate["validate transformed input"]
-    Revalidate --> Permit["PermissionEngine"]
-    Permit --> Checkpoint["tool_executing checkpoint"]
-    Checkpoint --> Batch["resource-aware batches"]
-    Batch --> Execute["tool.execute(ctx)"]
-    Execute --> Post["PostToolUse"]
-    Post --> Result["ToolCallEndEvent"]
-```
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../../assets/py-subsystems-b-dark.svg">
+  <img src="../../assets/py-subsystems-b.svg" alt="Pipeline của scheduler gồm mười bước có thứ tự, từ resolve và validate đến ToolCallEndEvent" width="700">
+</picture>
+
+</div>
+
+*Pipeline có thứ tự của scheduler cho mỗi khối sử dụng tool.*
 
 Ranh giới tool được cung cấp từ chối tool đã đăng ký nhưng không có trong yêu
 cầu provider hiện tại. `PreToolUse` là điểm duy nhất cho phép thay đổi đầu vào;

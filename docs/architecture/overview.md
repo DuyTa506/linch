@@ -23,50 +23,16 @@ For an embedded single-process use, the host creates an `Agent`, obtains a
 processes execute them. Postgres is the durable source of truth for sessions,
 runs, checkpoints, leases, and sequenced run events.
 
-```mermaid
-flowchart LR
-    subgraph Host["Host service"]
-        API["HTTP/API process"]
-        OTel["OpenTelemetry SDK/exporter"]
-        Deps["RunOptions(deps=...)\ntenant services"]
-    end
+<div align="center">
 
-    subgraph Dispatch["Optional linch.worker"]
-        Queue["PgQueuer"]
-        Worker["Worker\nclaim / renew / release"]
-    end
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../assets/py-overview-dark.svg">
+  <img src="../assets/py-overview.svg" alt="Runtime shape of Linch: a host service, an optional worker, the headless kernel and Postgres as the source of truth" width="700">
+</picture>
 
-    subgraph Kernel["Linch headless kernel"]
-        Agent["Agent\nContext + registries"]
-        Session["Session\nappend-only SessionLog"]
-        Loop["loop/runner.py\nturn phases"]
-        Guard["turn_stopping\nreliability listeners"]
-        Scheduler["scheduler.py\npermission + tool execution"]
-        Provider["providers/*\nnormalized provider stream"]
-    end
+</div>
 
-    subgraph Durable["Postgres source of truth"]
-        Sessions["PostgresSessionStore"]
-        Runs["PostgresRunStore\nruns + leases + checkpoints"]
-        Events["run_events\n(run_id, seq)"]
-    end
-
-    API -->|"enqueue_run"| Queue
-    Queue --> Worker
-    Worker -->|"RunLease(epoch)"| Runs
-    Worker --> Agent
-    API -->|"embedded run"| Agent
-    Agent --> Session --> Loop
-    Loop --> Provider
-    Loop --> Scheduler
-    Loop --> Guard
-    Scheduler --> Deps
-    Session <-->|"messages / snapshots"| Sessions
-    Loop <-->|"checkpoint before side effects"| Runs
-    Runs --> Events
-    Events -->|"load_events(after_seq=...)"| API
-    Agent -.->|"tracer + meter resolved from Context"| OTel
-```
+*The host service enqueues runs or runs the agent embedded; the Linch kernel checkpoints to Postgres, which stays the source of truth.*
 
 ## Boundaries and invariants
 

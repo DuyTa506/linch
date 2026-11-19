@@ -8,70 +8,16 @@ terminal result handling.
 
 One complete agent turn — from receiving the prompt to deciding whether to continue looping.
 
-```mermaid
-sequenceDiagram
-    actor Caller
-    participant RL as run_loop()
-    participant SK as _re_inject_skill_context()
-    participant CB as ContextInjectionHook
-    participant PR as Provider
-    participant PE as PermissionEngine
-    participant SC as Scheduler
-    participant LG as LoopGuard
+<div align="center">
 
-    Caller->>RL: session.run(prompt, RunOptions?)
-    RL-->>Caller: SystemEvent
-    RL-->>Caller: UserEvent
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../assets/py-turn-lifecycle-dark.svg">
+  <img src="../assets/py-turn-lifecycle.svg" alt="Sequence diagram of one agent turn from session.run through context, provider, tools and LoopGuard" width="700">
+</picture>
 
-    loop Each turn
-        RL->>SK: re-inject retained skill context after compaction/recovery (if needed)
-        Note over RL: at the turn boundary sync_catalog compares the live catalog,<br/>native existing-snapshot sync waits for context selection
-        RL->>CB: build_context(session, turn_index)
-        CB-->>RL: ContextBuildResult
-        RL-->>Caller: ContextBuildEvent
+</div>
 
-        Note over RL: assemble ProviderRequest<br/>+ apply_provider_capabilities() (capability downgrade)
-
-        RL->>PR: stream(ProviderRequest)
-        PR-->>Caller: PartialAssistantEvent (streaming)
-        PR-->>RL: AssistantAssembly(message, stop_reason, usage)
-
-        RL-->>Caller: AssistantEvent + UsageEvent
-
-        alt stop_reason = end_turn
-            RL-->>Caller: ResultEvent(success)
-        else stop_reason = tool_use
-            RL->>SC: resolve + validate tool calls
-            SC->>SC: enforce offered-tool boundary
-            SC->>SC: PreToolUse transform/block/resolve
-            SC->>SC: revalidate canonical input
-            SC->>PE: evaluate final permissions
-            PE-->>Caller: PermissionRequestEvent (if pending)
-            PE-->>SC: approved or denied canonical calls
-
-            SC-->>Caller: ToolCallStartEvent x N
-            SC-->>Caller: ToolProgressEvent (optional, stream-only)
-            Note over SC: with filesystem enabled and a configured backend/offload,<br/>maybe_offload() writes results over the threshold to the session store<br/>and replaces provider-facing content with a preview
-            SC-->>Caller: ToolCallEndEvent x N (preview when offloaded, tool_result=full)
-            SC-->>RL: provider-facing result_blocks (offload preview when applicable)
-
-            RL->>LG: evaluate_loop_guard(state, tool_blocks, result_blocks)
-
-            alt action = stop
-                LG-->>RL: LoopGuardDecision(stop)
-                RL-->>Caller: LoopGuardEvent
-                RL-->>Caller: ResultEvent(error)
-            else action = force_final
-                LG-->>RL: LoopGuardDecision(force_final)
-                RL-->>Caller: LoopGuardEvent
-                Note over RL: inject reminder message<br/>strip tools next turn
-            else action = continue
-                LG-->>RL: LoopGuardDecision(continue)
-                Note over RL: append results to provider_view<br/>loop back to top
-            end
-        end
-    end
-```
+*One turn of `Session.run()`: events flow to the caller, and `LoopGuard` decides whether the loop stops, forces a final answer, or continues.*
 
 ## Typed lifecycle points
 

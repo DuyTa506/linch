@@ -75,6 +75,7 @@ only-include = [
   "src/linch",
   "docs/usage",
   "docs/architecture",
+  "docs/assets",
   "docs/architecture.md",
   "docs/usage.md",
   "docs/migration-3.0.md",
