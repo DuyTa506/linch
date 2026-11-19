@@ -6,7 +6,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import logging
 import os
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from types import TracebackType
 from typing import TYPE_CHECKING, Any
@@ -28,6 +30,24 @@ if TYPE_CHECKING:
     from .otel import Telemetry
 
 _EXIT_TIMEOUT = 10.0
+# The server joins queued events into lines of up to 64 KiB, so the default 64 KiB
+# stdout pipe blocks it on a burst; 256 KiB fits several lines.
+_STDOUT_PIPE_SIZE = 256 * 1024
+_log = logging.getLogger(__name__)
+
+
+def _enlarge_stdout_pipe(process: asyncio.subprocess.Process) -> None:
+    """Raise the child's stdout pipe to 256 KiB on Linux; a refusal keeps the default."""
+    if sys.platform != "linux":
+        return
+    import fcntl
+
+    try:
+        stream: Any = process.stdout
+        pipe: Any = stream._transport.get_extra_info("pipe")
+        fcntl.fcntl(int(pipe.fileno()), fcntl.F_SETPIPE_SZ, _STDOUT_PIPE_SIZE)
+    except (OSError, AttributeError) as error:
+        _log.debug("keeping the default stdout pipe size: %s", error)
 
 
 class Server:
@@ -181,6 +201,7 @@ class Server:
             limit=LINE_LIMIT,
         )
         assert self._process.stdout is not None and self._process.stdin is not None
+        _enlarge_stdout_pipe(self._process)
         self._conn = Connection(StreamTransport(self._process.stdout, self._process.stdin))
 
     async def close(self) -> None:
