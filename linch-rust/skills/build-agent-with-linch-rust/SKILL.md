@@ -183,9 +183,12 @@ host tool in `asyncio.to_thread`. The server logs warnings to stderr; set `LINCH
 - **A timing number can be a frequency level.** On a host with a `powersave` governor the same work
   ran at 2.0 or 3.4 GHz, 1.7x apart. Record the CPU frequency per iteration, compare cells from one
   run, and say when a gap was not explained (`benchmarks.md`, "Known gaps").
-- **Upgrading.** Run `migrate` with the new binary, start new servers, drain the old, and let
-  suspended runs finish first. A rollback past a migration needs a restored database, so finish the
-  later build's runs first (`usage/stores.md`, "Rolling deploy").
+- **Upgrading.** Run `migrate` with the new binary, start new servers and drain the old with
+  SIGTERM (it releases leases; `kill -9` waits a lease). Let suspended runs finish first. The later
+  build resumes what the earlier wrote, but the earlier build cannot read a run the later wrote
+  (`RunError` -32020, `unknown field 'usage_by_model'`), so a rollback needs the later build's runs
+  finished first; a migration needs a restored database (`usage/stores.md`, "Upgrading and rolling
+  back", "Rolling deploy").
 
 ## Platform support
 
