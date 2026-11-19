@@ -96,6 +96,10 @@ The entries below are condensed to one line per area. The full text of each item
 
 - Runs of workspace agents started before this release cannot be resumed: the workspace tool list gained `BashOutput` and `BashKill`, so the run contract changed and a resume ends with `ContractMismatch`. Let those runs finish on the old binary, or start new runs.
 
+### Docs
+
+- **Benchmarks, case 6 correction.** The two timing levels of case 6 are CPU frequency levels (2.0 and 3.4 GHz), so the 594 against 295 ms Anthropic comparison mixed two levels; at equal level the client path is 1.15 to 1.25 times the kernel (1.0 to 1.08 with a 1 MiB stdio pipe). The message-count hypothesis is refuted for case 6, msgpack and compression are rejected for stdio, and the case 14 client gap on Postgres stays an open gap with its evidence (English and Vietnamese).
+
 ## 0.1.1 - 2026-11-07
 
 ### Fixed
