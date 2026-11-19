@@ -124,6 +124,31 @@ async def test_a_spec_budget_caps_the_run_and_its_children(tmp_path: Path) -> No
     assert (final(envelopes).subtype, final(envelopes).stop_reason) == ("error", "error")
 
 
+async def test_a_result_splits_its_usage_by_model_and_by_subagent(tmp_path: Path) -> None:
+    turns = [subagent_call(), text_turn("child answer", model="child-model"), text_turn("done")]
+    cfg = config(turns, mode="skip_dangerous", subagents=True, config_dir=str(tmp_path))
+    envelopes = await run_once(cfg)
+
+    call = {
+        "input_tokens": 3,
+        "output_tokens": 1,
+        "cache_read_tokens": 0,
+        "cache_creation_tokens": 0,
+    }
+    both = {**call, "input_tokens": 6, "output_tokens": 2}
+    result = final(envelopes)
+    # The parent's own two calls; its child's call is reported apart.
+    assert result.total_usage == both
+    assert result.usage_by_model == {MODEL: both}
+    [(child_id, child)] = result.subagent_usage.items()
+    assert child_id.endswith(":c1")
+    assert child.total_usage == call and child.usage_complete
+    assert child.usage_by_model == {"child-model": call}
+    assert child.subagent_type is None
+    running = [e.event for e in envelopes if isinstance(e.event, UsageEvent)]
+    assert [u.cumulative_by_model for u in running] == [{MODEL: call}, {MODEL: both}]
+
+
 def overloaded() -> dict[str, Any]:
     """A scripted call that fails with a retryable 529 before any event."""
     return {"error": {"type": "status", "status": 529, "message": "overloaded"}}
