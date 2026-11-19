@@ -201,6 +201,31 @@ chối với -32016. Vì vậy:
 3. Để rollback một bản phát hành đã thêm một migration, hãy khôi phục cơ sở dữ liệu từ trước
    bước 1: một binary cũ hơn từ chối một schema mới hơn. Không có gì xóa một migration.
 
+### Nâng cấp và rollback
+
+Hai bản build có thể dùng chung một cơ sở dữ liệu trong lúc rolling deploy. Các test trong
+`python/tests/test_mixed_binary.py` chạy cả hai trên Postgres; đặt `LINCH_OTHER_SERVER_BIN`
+là bản build còn lại, cùng với `LINCH_TEST_PG_DSN` và `LINCH_SERVER_BIN` như thường lệ
+(chúng bị bỏ qua khi thiếu một biến hoặc khi cả hai cùng chỉ vào một tệp).
+
+- **Drain bằng SIGTERM trước.** Server nhả các lease của run, nên bản build sau nhận các run
+  ngay. Sau một `kill -9`, nó nhận chúng khi lease hết hạn.
+- **Bản build sau resume được mọi thứ bản build trước đã ghi.** Nó giữ nguyên lịch sử,
+  không chạy lại một lệnh gọi tool mà phần bắt đầu đã bền, và kết thúc run ở trạng thái
+  `completed` với số thứ tự sự kiện liên tục. Một hàng đợi job do worker của cả hai bản build
+  xử lý chạy mỗi job một lần.
+- **Bản build trước không đọc hay resume được một run mà bản build sau đã ghi.** Một
+  checkpoint hoặc sự kiện `usage` mang `usage_by_model` hoặc `cumulative_by_model` không giải
+  mã được trên bản build trước: `run.resume` và `agent.events` trả về `RunError` mã -32020
+  với thông báo nêu tên trường (`unknown field 'usage_by_model'`). Lỗi giống nhau ở mỗi lần
+  thử lại, trả về ngay, và không đổi hàng của run. Vì vậy rollback cần các run của bản build
+  sau kết thúc trước (hoặc để chúng không resume cho đến khi bản build sau quay lại).
+- **Client Python bản sau từ chối một server không có `server.info`.** Một bản build trước
+  gây `IncompatibleServer` với `.protocol` là `None`.
+- **Cơ sở dữ liệu mới hơn bản build bị từ chối** với -32016 (xem cổng phiên bản ở trên). Hai
+  bản build trong các test này có danh sách migration giống hệt nhau, nên trường hợp này
+  chưa được thực thi.
+
 Một bản phát hành thay đổi mô tả của một tool dựng sẵn, danh sách tool của một MCP server,
 hoặc phiên bản chính sách của một hook sẽ thay đổi [hợp đồng của
 run](./agent.md#hợp-đồng-của-run), và một run đã lưu chưa kết thúc (run chờ một phê duyệt

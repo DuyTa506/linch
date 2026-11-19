@@ -205,6 +205,35 @@ a new tenant's pool, or restarts, finds the newer schema and refuses with
    before step 1: an older binary refuses a newer schema. Nothing deletes a
    migration.
 
+### Upgrading and rolling back
+
+Two builds can share one database during a rolling deploy. The tests in
+`python/tests/test_mixed_binary.py` run both against Postgres; set
+`LINCH_OTHER_SERVER_BIN` to the other build, with `LINCH_TEST_PG_DSN` and
+`LINCH_SERVER_BIN` as usual (they skip when one is unset or both name the same
+file).
+
+- **Drain with SIGTERM first.** The server releases its run leases, so the
+  later build takes the runs over at once. After a `kill -9` it takes them
+  when the lease expires.
+- **The later build resumes anything the earlier build wrote.** It keeps the
+  history, does not rerun a tool call whose start was durable, and ends the
+  run `completed` with contiguous event numbers. A job queue worked by
+  workers of both builds runs each job once.
+- **The earlier build cannot read or resume a run the later build wrote.** A
+  checkpoint or `usage` event that carries `usage_by_model` or
+  `cumulative_by_model` fails to decode on the earlier build: `run.resume` and
+  `agent.events` answer a `RunError` with code -32020 whose message names the
+  field (`unknown field 'usage_by_model'`). The error is the same on every
+  retry, returns at once, and leaves the run row unchanged. So a rollback
+  needs the later build's runs finished first (or left unresumed until the
+  later build is back).
+- **The later Python client refuses a server without `server.info`.** An
+  earlier build raises `IncompatibleServer` with `.protocol` `None`.
+- **A database ahead of the build is refused** with -32016 (see the version
+  gate above). The two builds in these tests have identical migration lists,
+  so this case was not exercised.
+
 A release that changes a built-in tool's description, the tool list of an MCP
 server, or a hook's policy version changes the [run
 contract](./agent.md#the-run-contract), and a stored run that has not
