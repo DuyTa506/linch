@@ -107,7 +107,7 @@ There were 0 failed runs in every cell of every round.
 ### Stream decoding, case 6 (final run, 3 passes of 20 iterations)
 
 A loopback server replays the same recorded-shape SSE stream per vendor; the figure is the wall time of
-one iteration. The Rust sides switch between a fast and a slow level inside a cell (see
+one iteration. A cell can switch between a fast and a slow level; the levels are CPU frequency levels (see
 [Unexplained](#unexplained)), so the table lists the 3 per-pass medians.
 
 | Vendor | py (ms) | rs-client (ms) | rs-kernel (ms) |
@@ -119,8 +119,11 @@ one iteration. The Rust sides switch between a fast and a slow level inside a ce
 | Anthropic | 291, 282, 336 | 579, 607, 594 | 295, 292, 296 |
 
 Rust decodes DeepSeek, OpenAI and Gemini streams about 2.7x to 8.5x faster than Python in this harness.
-Anthropic is the exception: the in-process kernel ties Python, but through the client and sidecar it is
-about twice as slow (594 against 291 ms). See [Known gaps](#known-gaps).
+Anthropic is the exception: the in-process kernel ties Python, and through the client and sidecar it is
+slower than the kernel. The 594 against 295 ms in the table compares a 2.0 GHz run with a 3.4 GHz run. At equal
+CPU frequency the client path is 1.15 to 1.25 times the kernel with the default 64 KiB stdio pipe and 1.0 to 1.08
+times with a 1 MiB pipe (362 to 368 ms against 292 to 314 ms at 3.4 GHz; 313 to 317 ms with the 1 MiB pipe). See
+[Known gaps](#known-gaps).
 
 ## Memory per session
 
@@ -270,11 +273,31 @@ The `cache_salt` field itself was not captured on the wire; the evidence is the 
 - Case 3 Postgres cells had runs of iterations of 3 to 22 s (against 0.1 to 1 s) in 4 of the 12 cells of the
   earlier run, on `py` and `rs-kernel`, and none on `rs-client`. In the final run: 0 of 720 iterations exceeded 5x their cell's median. Not explained; the host and
   Postgres were not instrumented during the earlier stalls.
-- Case 6 on the Rust sides moves between two levels inside one cell, about 1.7x apart (`rs-kernel` Anthropic 290 against
-  510 ms, `rs-client` 380 against 580 ms). In the final run it appeared in all three sides' series: `py` Anthropic ran
-  at about 480 ms for the first 4 to 10 iterations in 3 of 4 unpinned passes, `rs-kernel` switched back and forth
-  in a 60-iteration pass, `rs-client` once. Pinned to 4 cores, `py` stayed at 282 ms through 60 iterations and
-  `rs-kernel` still switched. So the cause is not specific to the Rust kernel, and it is not found.
+- Case 6 moves between two levels inside one cell, about 1.7x apart (`rs-kernel` Anthropic 290 against
+  510 ms, `rs-client` 380 against 580 ms), on all three sides. The levels are CPU frequency levels: the governor is
+  `powersave` with `intel_pstate` and HWP, base 2.0 GHz, turbo 3.4 GHz, ratio 1.70. In a profile of 60 pinned client
+  iterations of identical work, 48 used 507 to 626 ms of server CPU with the core read at a median of 1998 MHz,
+  and 12 consecutive ones used 304 to 313 ms at a median of 3358 MHz. Pinning does not select the level: a busy
+  core stayed at 2.0 GHz for tens of seconds in a decode microbenchmark. The final run did not record the
+  frequency, so its 594 against 295 ms mixes the two levels. Why HWP holds a busy core at base for seconds is not
+  determined (it needs root tooling: MSRs, `turbostat`).
+- Method: a benchmark cell must record the CPU frequency level per iteration and compare at equal level.
+- Case 6 client path against the kernel, profiled (3.4 GHz, 64 KiB pipe, 30 iterations per rung, medians). The
+  earlier hypothesis that the cost follows the number of JSON-RPC messages is refuted for this case. A run sends
+  about 61 lines for 20 006 envelopes, because the server joins the queued envelopes of a run into one line of up
+  to 64 KiB. Client `orjson.loads` is about 12 ms of roughly 365 ms. Most of the remaining gap is the server
+  waiting on a full 64 KiB stdout pipe: 43 voluntary context switches per run and 39 to 56 ms blocked, against 2
+  switches and 7 to 10 ms with a 1 MiB pipe. A paced stream (100 deltas/s) sends one envelope per line and costs
+  client CPU, about 3% of a core per stream, not wall time. The pipe size is not changed in the client or server.
+- Message format on stdio: msgpack, protobuf and compression were evaluated and rejected. `python-msgpack` used 5 to
+  11% more client CPU than orjson for 19% fewer bytes. Compression loses on a local pipe: zstd level 1 needs
+  1.5 ms to compress the 3.7 MB stream, and the pipe moves it in 1.6 ms. Remote WebSocket links were not measured.
+- Case 14 (many sessions on Postgres): `rs-client` is slower than `rs-kernel` by about 1.7x at M=2000 (10.5 s
+  against 6.25 s), and the case 6 findings above do not explain it. It appears only with Postgres in a single
+  sidecar: 4 sidecars take 5.76 s. With memory stores one sidecar did 1272 to 1487 turns/s at M=2000 (window 5.38 to
+  6.29 s) and the client used under 20% of one core, so neither JSON-RPC messages nor client decode account for
+  it. The cause is not yet measured (no database was assigned to the profile); the single server thread and
+  the pool of one process are candidates, not findings.
 - Server thread count: the DeepSeek runs reached 110 threads at N=2500 (the stdio server uses one thread otherwise).
   The same loopback stub (no live provider), N=1000 runs, memory stores: addressed by IP literal the server had 1 thread
   in 4 of 4 runs; addressed by the host name `localhost`, 7, 17, 6 and 5 threads. So the extra threads come with host
@@ -283,8 +306,7 @@ The `cache_salt` field itself was not captured on the wire; the evidence is the 
 
 ### Not measured or weak
 
-- Anthropic stream decode through the client and sidecar is about half of Python's speed (594 against 291 ms). The in-process
-  kernel ties Python, DeepSeek, OpenAI and Gemini through the sidecar do not show the gap, and it has not been profiled.
+- Case 6 cells of the final run have no recorded CPU frequency level, so their per-pass medians mix levels. The like-for-like ratios come from the later profile (see [Unexplained](#unexplained)), which ran under host load of 2.3 to 27 and did not rebuild the binaries.
 - Loop, tools, startup, 16-session throughput and the other decode providers are one pass from the earlier run.
 - The idle-agent table is memory stores only; the Postgres-store memory cells (backends per agent, pool size) were not repeated in the final run. The memory of a run in flight and of an agent that has run once cannot be told apart in these data: the peak equals the after-runs figure.
 - Single-sample cells: vLLM and SGLang ramps at N=512 and 1024, every DeepSeek and vLLM load point, the cache-salt check (one run per row), the `SIGTERM` and fault rows (one pass).
