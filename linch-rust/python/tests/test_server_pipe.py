@@ -6,13 +6,15 @@ full batch does not fit even in an empty pipe and the server blocks on every wri
 
 from __future__ import annotations
 
-import fcntl
+import logging
 import sys
 from typing import Any
 
 import pytest
 
 from linch_rust import Server, find_server
+
+fcntl = pytest.importorskip("fcntl")
 
 PIPE_SIZE = 256 * 1024
 F_GETPIPE_SZ = 1032
@@ -39,7 +41,9 @@ async def test_stdout_pipe_holds_a_full_batch() -> None:
         assert fcntl.fcntl(_stdout_fd(server), F_GETPIPE_SZ) >= PIPE_SIZE
 
 
-async def test_refused_resize_keeps_the_default_and_starts(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_refused_resize_keeps_the_default_and_starts(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     real = fcntl.fcntl
 
     def refuse(fd: int, op: int, *args: Any) -> Any:
@@ -48,6 +52,8 @@ async def test_refused_resize_keeps_the_default_and_starts(monkeypatch: pytest.M
         return real(fd, op, *args)
 
     monkeypatch.setattr(fcntl, "fcntl", refuse)
+    caplog.set_level(logging.DEBUG, logger="linch_rust.server")
     async with Server(binary=_binary()) as server:
         assert fcntl.fcntl(_stdout_fd(server), F_GETPIPE_SZ) == 64 * 1024
         assert server.info is not None
+    assert "keeping the default stdout pipe size" in caplog.text
