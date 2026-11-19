@@ -122,8 +122,8 @@ time của một lần lặp. Một ô có thể chuyển giữa một mức nha
 Rust giải mã các stream DeepSeek, OpenAI và Gemini nhanh hơn Python khoảng 2.7x đến 8.5x trong
 harness này. Anthropic là ngoại lệ: kernel trong tiến trình ngang Python, và qua client và
 sidecar nó chậm hơn kernel. Con số 594 so với 295 ms trong bảng so một lần chạy 2.0 GHz với một lần
-chạy 3.4 GHz. Ở cùng tần số CPU, đường client bằng 1.15 đến 1.25 lần kernel với pipe stdio 64 KiB mặc
-định và 1.0 đến 1.08 lần với pipe 1 MiB (362 đến 368 ms so với 292 đến 314 ms ở 3.4 GHz; 313 đến
+chạy 3.4 GHz. Ở cùng tần số CPU, đường client bằng 1.15 đến 1.25 lần kernel với pipe stdio 64 KiB và
+1.0 đến 1.08 lần với pipe 1 MiB (362 đến 368 ms so với 292 đến 314 ms ở 3.4 GHz; 313 đến
 317 ms với pipe 1 MiB). Xem [Khoảng trống đã biết](#khoảng-trống-đã-biết).
 
 ## Bộ nhớ theo session
@@ -297,8 +297,12 @@ cache gì trên model này (block của nó là 2176 token), nên không có k�
   dòng tối đa 64 KiB. `orjson.loads` ở client khoảng 12 ms trong khoảng 365 ms. Phần lớn khoảng cách
   còn lại là server chờ pipe stdout 64 KiB đầy: 43 lần chuyển ngữ cảnh tự nguyện mỗi run và bị chặn 39 đến
   56 ms, so với 2 lần và 7 đến 10 ms với pipe 1 MiB. Một stream có nhịp (100 delta/s) gửi một envelope
-  mỗi dòng và tốn CPU client, khoảng 3% một core mỗi stream, không tốn wall time. Kích thước pipe không
-  được đổi ở client hay server.
+  mỗi dòng và tốn CPU client, khoảng 3% một core mỗi stream, không tốn wall time. Client Python nới pipe stdout của tiến trình con lên 256 KiB sau khi spawn (`F_SETPIPE_SZ`, Linux; bị từ
+  chối thì giữ 64 KiB). Đo qua client thật, xen kẽ, 4 core, n=34 và 36 lần chạy ở 2.0 GHz trên cả core server
+  lẫn core client: wall trung vị 566 ms với 64 KiB và 535 ms với 256 KiB (ít hơn 5.6%), số lần chuyển ngữ cảnh
+  tự nguyện của server là 44 và 6 mỗi run. Ở core server 3.4 GHz (core client 2.0 GHz) chỉ có n=3 và n=5 lần
+  chạy: 375 và 325 ms, chỉ mang tính tham khảo. Pipe từ client sang server không đổi: một run gửi một request
+  119 byte.
 - Định dạng message trên stdio: msgpack, protobuf và nén đã được đánh giá và bị loại. `python-msgpack`
   dùng nhiều hơn 5 đến 11% CPU client so với orjson cho ít hơn 19% byte. Nén thua trên pipe cục bộ:
   zstd mức 1 cần 1.5 ms để nén stream 3.7 MB, còn pipe chuyển nó trong 1.6 ms. Liên kết WebSocket từ xa

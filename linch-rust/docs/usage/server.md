@@ -293,6 +293,14 @@ async with Server.connect(SOCKET, token=TOKEN) as server:
   or the tenant may use; `default_max_runs` is the default cap, not the
   tenant's own.
 
+Over stdio on Linux, `Server()` enlarges the child's stdout pipe from 64 KiB to
+256 KiB right after the spawn (`F_SETPIPE_SZ`). The server joins queued events
+into lines of up to 64 KiB, so with the default pipe a burst of events made it
+block on almost every write. If the kernel refuses the resize (for example over
+`fs.pipe-user-pages-soft`), the pipe keeps its default size, a debug log line
+says so, and the start goes on. Nothing changes on the wire, and the Unix
+socket and WebSocket transports are not affected.
+
 ---
 
 ## The protocol on each transport

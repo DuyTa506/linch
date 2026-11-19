@@ -121,7 +121,7 @@ one iteration. A cell can switch between a fast and a slow level; the levels are
 Rust decodes DeepSeek, OpenAI and Gemini streams about 2.7x to 8.5x faster than Python in this harness.
 Anthropic is the exception: the in-process kernel ties Python, and through the client and sidecar it is
 slower than the kernel. The 594 against 295 ms in the table compares a 2.0 GHz run with a 3.4 GHz run. At equal
-CPU frequency the client path is 1.15 to 1.25 times the kernel with the default 64 KiB stdio pipe and 1.0 to 1.08
+CPU frequency the client path is 1.15 to 1.25 times the kernel with a 64 KiB stdio pipe and 1.0 to 1.08
 times with a 1 MiB pipe (362 to 368 ms against 292 to 314 ms at 3.4 GHz; 313 to 317 ms with the 1 MiB pipe). See
 [Known gaps](#known-gaps).
 
@@ -288,7 +288,12 @@ The `cache_salt` field itself was not captured on the wire; the evidence is the 
   to 64 KiB. Client `orjson.loads` is about 12 ms of roughly 365 ms. Most of the remaining gap is the server
   waiting on a full 64 KiB stdout pipe: 43 voluntary context switches per run and 39 to 56 ms blocked, against 2
   switches and 7 to 10 ms with a 1 MiB pipe. A paced stream (100 deltas/s) sends one envelope per line and costs
-  client CPU, about 3% of a core per stream, not wall time. The pipe size is not changed in the client or server.
+  client CPU, about 3% of a core per stream, not wall time. The Python client raises the child's stdout pipe to
+  256 KiB after the spawn (`F_SETPIPE_SZ`, Linux; a refusal keeps 64 KiB). Measured through the real client,
+  interleaved, 4 cores, n=34 and 36 runs at 2.0 GHz on both the server and client cores: median wall 566 ms with 64
+  KiB and 535 ms with 256 KiB (5.6% less), server voluntary context switches 44 and 6 per run. At a 3.4 GHz server
+  core (client core at 2.0 GHz) only n=3 and n=5 runs were reached: 375 and 325 ms, indicative only. The client to
+  server pipe is not changed: a run sends one 119-byte request.
 - Message format on stdio: msgpack, protobuf and compression were evaluated and rejected. `python-msgpack` used 5 to
   11% more client CPU than orjson for 19% fewer bytes. Compression loses on a local pipe: zstd level 1 needs
   1.5 ms to compress the 3.7 MB stream, and the pipe moves it in 1.6 ms. Remote WebSocket links were not measured.

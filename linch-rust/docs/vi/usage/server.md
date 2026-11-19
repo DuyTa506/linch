@@ -292,6 +292,14 @@ async with Server.connect(SOCKET, token=TOKEN) as server:
   hay tenant được dùng; `default_max_runs` là mức giới hạn mặc định, không phải của
   riêng tenant.
 
+Qua stdio trên Linux, `Server()` nới pipe stdout của tiến trình con từ 64 KiB lên
+256 KiB ngay sau khi spawn (`F_SETPIPE_SZ`). Server nối các event đang chờ thành
+dòng tối đa 64 KiB, nên với pipe mặc định, một đợt event dồn dập làm nó bị chặn ở
+gần như mọi lần ghi. Nếu kernel từ chối việc đổi kích thước (ví dụ vượt
+`fs.pipe-user-pages-soft`), pipe giữ kích thước mặc định, một dòng log mức debug
+ghi lại điều đó và việc khởi động vẫn tiếp tục. Không có gì thay đổi trên dây, và
+transport Unix socket và WebSocket không bị ảnh hưởng.
+
 ---
 
 ## Giao thức trên từng transport
