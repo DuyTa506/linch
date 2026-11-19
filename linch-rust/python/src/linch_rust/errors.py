@@ -14,6 +14,39 @@ class ConnectionClosed(LinchError):
     arrived, or a remote server refused the WebSocket upgrade."""
 
 
+class IncompatibleServer(LinchError):
+    """The server cannot be spoken to: its `server.info` names a protocol this
+    client does not support, has no usable `protocol`, or the server has no
+    `server.info` at all (it predates the handshake).
+
+    Nothing was started; the connection is closed. Use a client and a server
+    of the same release.
+
+    Attributes:
+        protocol: The server's protocol version, or `None` when it named none.
+        server_version: The server's release, when it named one.
+        supported: The `(oldest, newest)` protocol versions this client speaks.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        protocol: int | None,
+        server_version: str | None,
+        supported: tuple[int, int],
+    ) -> None:
+        super().__init__(message)
+        self.protocol = protocol
+        self.server_version = server_version
+        self.supported = supported
+
+
+class HandshakeTimeout(LinchError):
+    """The server did not answer `server.info` in time, so it is not a server
+    this client can use (or it is stuck). The connection is closed."""
+
+
 class RpcError(LinchError):
     """An error object the server answered with.
 
