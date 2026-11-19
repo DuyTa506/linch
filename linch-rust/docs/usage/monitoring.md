@@ -127,7 +127,8 @@ other names Python reads (`cache_read_tokens`, `prompt_cache_hit_tokens`) and
 `timings.cache_n`. vLLM and SGLang report none unless started with
 `--enable-prompt-tokens-details` or `--enable-cache-report`: then
 `cache_read_tokens` is 0 because it is unknown, not because nothing was
-cached.
+cached. On SGLang 0.5.23 a server started without `--enable-cache-report` sent no `prompt_tokens_details` and linch reported `cache_read_tokens` 0 on every run, with no error or warning
+([running linch against an SGLang server](providers.md#running-linch-against-an-sglang-server)).
 
 ---
 

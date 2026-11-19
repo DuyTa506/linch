@@ -218,7 +218,7 @@ A test that replaces the part you depend on proves nothing about that part. Fake
    SGLang, and the `docker` backend cases also need `LINCH_LIVE_DOCKER=1` (`usage/sandbox.md`).
    A local SGLang server needs `--reasoning-parser` for reasoning and `--enable-cache-report`
    for cache usage: without the latter `cache_read_tokens` is 0 because it is unknown
-   (`usage/monitoring.md`).
+   (`usage/monitoring.md`). The SGLang server facts are in `usage/providers.md#running-linch-against-an-sglang-server`.
 
 ## 5. Debug
 

@@ -127,7 +127,8 @@ cấp cao nhất của SGLang khi nó không gửi details; và với llama.cpp 
 khác mà Python đọc (`cache_read_tokens`, `prompt_cache_hit_tokens`) cùng
 `timings.cache_n`. vLLM và SGLang không báo gì trừ khi được khởi động với
 `--enable-prompt-tokens-details` hoặc `--enable-cache-report`: khi đó
-`cache_read_tokens` là 0 vì chưa biết, không phải vì không có gì được cache.
+`cache_read_tokens` là 0 vì chưa biết, không phải vì không có gì được cache. Trên SGLang 0.5.23, server khởi động không có `--enable-cache-report` không gửi `prompt_tokens_details` và linch báo `cache_read_tokens` 0 ở mọi run, không có lỗi hay cảnh báo
+([chạy linch với server SGLang](providers.md#running-linch-against-an-sglang-server)).
 
 ---
 
