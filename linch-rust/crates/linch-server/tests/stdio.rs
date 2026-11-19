@@ -298,3 +298,48 @@ async fn the_binary_leaves_the_pipes_it_shares_blocking() {
     let answer: Value = serde_json::from_str(text.trim()).unwrap();
     assert_eq!(answer["result"], json!({"cancelled": false}), "{text}");
 }
+
+/// Threads of the server process, from `/proc`; `None` off Linux.
+fn thread_count(server: &Sidecar) -> Option<usize> {
+    let pid = server.child.id()?;
+    let tasks = std::fs::read_dir(format!("/proc/{pid}/task")).ok()?;
+    Some(tasks.count())
+}
+
+#[tokio::test]
+async fn stdio_threads_env_selects_worker_threads() {
+    let mut server = Sidecar::spawn_with(&[("LINCH_STDIO_THREADS", "4")]);
+    server.call("server.info", json!({})).await;
+    let Some(threads) = thread_count(&server) else {
+        return;
+    };
+    assert!(threads >= 5, "{threads} threads");
+}
+
+#[tokio::test]
+async fn stdio_without_the_variable_keeps_one_runtime_thread() {
+    for env in [&[][..], &[("LINCH_STDIO_THREADS", "1")][..]] {
+        let mut server = Sidecar::spawn_with(env);
+        server.call("server.info", json!({})).await;
+        let Some(threads) = thread_count(&server) else {
+            return;
+        };
+        assert!(threads <= 2, "{env:?}: {threads} threads");
+    }
+}
+
+#[tokio::test]
+async fn a_bad_stdio_threads_value_fails_at_startup_naming_the_variable() {
+    for bad in ["many", "0", "257", "-3", ""] {
+        let mut server = Sidecar::spawn_with(&[("LINCH_STDIO_THREADS", bad)]);
+        let status = timeout(Duration::from_secs(20), server.child.wait())
+            .await
+            .expect("server kept running")
+            .unwrap();
+        assert!(!status.success(), "{bad:?}: {status}");
+        let mut stderr = String::new();
+        let mut pipe = server.child.stderr.take().unwrap();
+        pipe.read_to_string(&mut stderr).await.unwrap();
+        assert!(stderr.contains("LINCH_STDIO_THREADS"), "{bad:?}: {stderr}");
+    }
+}

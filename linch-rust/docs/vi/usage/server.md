@@ -548,6 +548,29 @@ nào và không mang key nào mà server tự đọc. Dưới systemd hoặc run
 thu thập; với `Server()` của client Python, thứ khởi động binary cho bạn, nó là stderr của
 process cha.
 
+## Nhiều run trên một sidecar stdio
+
+Server stdio chạy trên một thread. Với store Postgres nó tốn khoảng 1 ms CPU của chính nó cho
+mỗi lượt ở 2.1 GHz, nên một sidecar phục vụ khoảng 700 đến 750 lượt mỗi giây. So với kernel
+trong tiến trình, với pool 32 ở cả hai, chênh lệch về wall time của run (4 lượt, provider trễ
+1 s mỗi lượt) là 0.8 s ở 500 session đồng thời, 1.3 s ở 1000 và 3.4 s ở 2000
+([Benchmarks](../benchmarks.md)). Trên khoảng 500 run đang chạy cho mỗi sidecar:
+
+- Khởi động N sidecar và chia `stores.max_connections` giữa chúng
+  ([Stores](./stores.md#kết-nối-và-pool)), hoặc
+- đặt `LINCH_STDIO_THREADS=N` trong môi trường của server (N từ 2 đến 256) để chạy server stdio
+  trên N worker thread. Không đặt hoặc `1` giữ runtime một thread. Mọi giá trị khác (không phải
+  số, `0`, trên 256) làm server dừng lúc khởi động với lỗi nêu tên biến. Client Python chuyển
+  biến này đi khi nó nằm trong `Server(env=...)`, hoặc trong môi trường của tiến trình này khi
+  không có `env`. Biến không ảnh hưởng server `--config`, vốn đã dùng một thread mỗi core.
+
+Ở 2000 session đồng thời, mỗi session 4 lượt, cùng 32 kết nối: một thread 9.7 s, 2 worker 9.1 s,
+4 worker 7.4 s, 8 worker 6.9 s, 16 worker 6.4 s; 2 sidecar mỗi sidecar 16 kết nối 7.5 s,
+4 sidecar mỗi sidecar 8 kết nối 6.3 s. Thread tốn CPU (sidecar dùng 7.8 CPU-s với một thread,
+13.2 với 4 worker và 17.1 với 16) và 1 đến 3 ms cho mỗi run nhỏ, nên mặc định vẫn là một thread;
+mỗi sidecar thêm làm tăng bộ nhớ và thêm một kết nối lease cho mỗi agent. Thêm kết nối pool chỉ
+có lợi khi có nhiều hơn một thread phục vụ chúng.
+
 ## Server nào điều khiển một run
 
 Một run trên Postgres chỉ do một server điều khiển tại một thời điểm. Một resume, approve

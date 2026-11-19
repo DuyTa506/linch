@@ -234,6 +234,14 @@ thúc trước.
     khoảng (giới hạn của cơ sở dữ liệu trừ phần dự phòng) / N, ví dụ 20 cho bốn sidecar với
     giới hạn 100. Chỉ tăng `stores.max_connections` quá 32 sau khi đã tăng giới hạn của cơ sở
     dữ liệu, hoặc đặt một pooler như PgBouncer phía trước.
+- Một sidecar stdio trên Postgres phục vụ khoảng 700 đến 750 lượt mỗi giây: nó tốn khoảng 1 ms CPU
+  của chính nó cho mỗi lượt ở 2.1 GHz, toàn bộ trên một thread. Trên khoảng 500 run đang chạy
+  cho mỗi sidecar, hoặc khởi động N sidecar và chia `stores.max_connections` giữa chúng như
+  trên, hoặc cho sidecar thêm worker thread bằng `LINCH_STDIO_THREADS`
+  ([Chạy server](./server.md#nhiều-run-trên-một-sidecar-stdio)). Pool lớn hơn chỉ có lợi khi
+  có nhiều hơn một thread phục vụ nó: trên một thread, 64 hay 80 kết nối thay vì 32 không làm
+  run 2000 session ngắn hơn. Mỗi sidecar thêm làm tăng bộ nhớ và thêm một kết nối lease cho
+  mỗi agent; thread tốn CPU.
 - Một lệnh gọi thấy mọi kết nối của pool đều bận sẽ chờ 30 giây, rồi lỗi với `pool timed out
   after 30s: raise max_pool_connections or lower concurrent runs; a run already created
   stays at its last durable state: resume it`. Một run gặp lỗi này dừng ở

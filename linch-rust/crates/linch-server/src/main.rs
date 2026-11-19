@@ -110,8 +110,25 @@ fn main() -> ExitCode {
     // One client on stdio: its runs share one thread, so handing an
     // envelope or an answer between tasks wakes no other thread. The
     // listeners serve many clients and keep a thread per core.
+    // `LINCH_STDIO_THREADS` opts stdio into worker threads for a sidecar
+    // that serves more runs than one thread can turn around.
     let mut runtime = match config {
-        None => tokio::runtime::Builder::new_current_thread(),
+        None => match stdio_threads(
+            std::env::var_os(STDIO_THREADS)
+                .map(|value| value.to_string_lossy().into_owned())
+                .as_deref(),
+        ) {
+            Ok(None) => tokio::runtime::Builder::new_current_thread(),
+            Ok(Some(workers)) => {
+                let mut builder = tokio::runtime::Builder::new_multi_thread();
+                builder.worker_threads(workers);
+                builder
+            }
+            Err(message) => {
+                eprintln!("linch-server: {message}");
+                return ExitCode::from(2);
+            }
+        },
         Some(_) => tokio::runtime::Builder::new_multi_thread(),
     };
     match runtime.enable_all().build() {
@@ -120,6 +137,24 @@ fn main() -> ExitCode {
             eprintln!("linch-server: cannot start the runtime: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Environment variable that gives a stdio server worker threads.
+const STDIO_THREADS: &str = "LINCH_STDIO_THREADS";
+
+/// Worker threads for stdio: `None` keeps the current-thread runtime (unset
+/// or 1), `Some(n)` selects the multi-thread runtime with n workers.
+fn stdio_threads(value: Option<&str>) -> Result<Option<usize>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    match value.parse::<usize>() {
+        Ok(1) => Ok(None),
+        Ok(workers @ 2..=256) => Ok(Some(workers)),
+        _ => Err(format!(
+            "{STDIO_THREADS} must be a whole number from 1 to 256, got {value:?}"
+        )),
     }
 }
 
