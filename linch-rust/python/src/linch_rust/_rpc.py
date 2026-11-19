@@ -127,6 +127,7 @@ async def _exec(host: ExecutionHost, method: str, params: JsonObject, agent: str
                 background=bool(params.get("background", False)),
                 session_id=str(params.get("session_id", "")),
                 principal=params.get("principal"),
+                idempotency_key=params.get("idempotency_key"),
             )
         )
         return {}

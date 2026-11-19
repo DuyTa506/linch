@@ -421,7 +421,9 @@
 //! [`ExecReadParams`](protocol::ExecReadParams),
 //! [`ExecKillParams`](protocol::ExecKillParams)); the config is all the
 //! declaration there is. `exec.start` `{agent, exec_id, command, cwd?,
-//! env?, background?, session_id, principal?}` starts a command; `principal` is
+//! env?, background?, session_id, principal?, idempotency_key?}` starts a command;
+//! `idempotency_key` is the call's `<run_id>:<tool_use_id>`, the key a host
+//! tool reads, the same after a resume (capability `exec_idempotency_key`); `principal` is
 //! the `principal` of the run that made the call, absent when it has none
 //! (runs of several principals on one agent share the client's host, and a
 //! host that serves more than one scopes or denies by it), `cwd` is the policy's

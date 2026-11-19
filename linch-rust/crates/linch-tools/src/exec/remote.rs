@@ -119,6 +119,9 @@ pub struct RemoteCommand {
     /// Who the run acts for, when the host that started it named one. A host
     /// that serves several principals scopes or denies the command by it.
     pub principal: Option<Principal>,
+    /// The call's `ToolContext::idempotency_key`: stable across a resume,
+    /// unique per tool call, so a host can tell a repeat from a new command.
+    pub idempotency_key: Option<String>,
 }
 
 /// Why the host did not do what the server asked.
@@ -269,6 +272,7 @@ impl Shell for RemoteShell {
             background: launch.lifeline,
             session: launch.session.clone(),
             principal: launch.principal.cloned(),
+            idempotency_key: launch.idempotency_key,
         };
         // Dropped while the host starts it: the host may have, so stop it.
         let mut run = RemoteRun::new(Arc::clone(&self.host), id);

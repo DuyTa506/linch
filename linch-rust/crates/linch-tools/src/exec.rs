@@ -280,7 +280,7 @@ impl fmt::Debug for ExecutionBackend {
 }
 
 /// One command to start.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct Launch<'a> {
     /// The shell command.
     pub command: &'a str,
@@ -294,6 +294,8 @@ pub(crate) struct Launch<'a> {
     pub session: &'a SessionId,
     /// Who the run acts for; only a remote host is told.
     pub principal: Option<&'a Principal>,
+    /// The call's idempotency key; only a remote host is told.
+    pub idempotency_key: Option<String>,
     /// Whether the command runs under the lifeline wrapper (background).
     pub lifeline: bool,
 }

@@ -45,7 +45,8 @@ class ServerInfo:
         contract_version: The run contract digest's version; runs stored
             under another one do not resume.
         capabilities: Names of the optional features the server has, such as
-            `cache_isolation`; ask with `has`.
+            `cache_isolation` or `exec_idempotency_key`; ask with
+            `has`.
         backends: The execution backends the build implements (`local`,
             `sandbox`, `docker`, `remote`). Whether one works on that host,
             or is allowed to a tenant, is decided when an agent opens.
