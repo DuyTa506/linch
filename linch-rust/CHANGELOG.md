@@ -10,6 +10,7 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 - The catalog change notice escapes `<`, `>` and `&` in the tool and skill names and descriptions it lists, so a description cannot close the notice's wrapper.
 - One provider response holds at most 32 MiB (`MAX_RESPONSE_BYTES`) and 4096 tool calls (`MAX_RESPONSE_TOOL_CALLS`); a stream that passes either fails with `StreamError::ResponseTooLarge` or `TooManyToolCalls`.
 - `mcp_urls` entries are matched on origin and path: an entry with a path allows that path and what lies below it, one without allows every path of its origin (`provider_base_urls` still allows its path alone).
+- `eval.run` takes at most 256 cases from a tenant (`-32602` beyond that), and its runs are claimed under the server id instead of `linch` (`run_eval_as`).
 
 ## 0.2.0 - 2026-11-19
 

@@ -22,6 +22,8 @@ of every child run its `Subagent` calls made. A run that suspends for approval
 is left suspended. Because the cases run in order, a `ScriptedProvider`
 consumes its turns in case order; a subagent's child run takes the turns
 between its parent's `Subagent` call and the parent's next turn.
+`run_eval_as(agent, cases, scorers, owner)` does the same with `owner` as the
+lease owner of every run (`run_eval` uses `linch`); `linch-rpc` passes the server id.
 
 A case passes when its run records no error and no scorer returns
 `Some(false)`; `None` is an unknown verdict and does not fail it

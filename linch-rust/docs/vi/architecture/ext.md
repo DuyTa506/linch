@@ -24,6 +24,8 @@ của mọi run con mà các lời gọi `Subagent` của nó đã tạo. Một 
 duyệt được để nguyên trạng thái suspend. Vì các case chạy theo thứ tự, một
 `ScriptedProvider` tiêu thụ các lượt của nó theo thứ tự case; run con của một subagent
 lấy các lượt nằm giữa lời gọi `Subagent` của run cha và lượt kế tiếp của run cha.
+`run_eval_as(agent, cases, scorers, owner)` làm như vậy với `owner` là chủ lease của mọi run
+(`run_eval` dùng `linch`); `linch-rpc` truyền server id.
 
 Một case đạt khi run của nó không ghi nhận lỗi và không scorer nào trả về
 `Some(false)`; `None` là một kết luận không xác định và không làm nó thất bại
