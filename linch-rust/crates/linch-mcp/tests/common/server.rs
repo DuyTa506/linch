@@ -40,6 +40,9 @@ pub struct Fixture {
     legacy: bool,
     /// Whether every `tools/list` page holds one new tool and a next cursor.
     endless: bool,
+    /// Whether every `tools/list` answers a JSON-RPC error with a megabyte
+    /// of text.
+    fail_lists: bool,
 }
 
 impl Fixture {
@@ -55,6 +58,7 @@ impl Fixture {
             end_subscription: Arc::new(Notify::new()),
             legacy: false,
             endless: false,
+            fail_lists: false,
         }
     }
 
@@ -67,6 +71,12 @@ impl Fixture {
     /// A server whose tool list never ends: page `n` holds tool `p<n>`.
     pub fn endless(mut self) -> Self {
         self.endless = true;
+        self
+    }
+
+    /// A server whose `tools/list` fails with a megabyte-long message.
+    pub fn failing_lists(mut self) -> Self {
+        self.fail_lists = true;
         self
     }
 
@@ -149,6 +159,9 @@ impl ServerHandler for TestServer {
             self.0.hung.notify_one();
             context.ct.cancelled().await;
             return Err(ErrorData::internal_error("cancelled", None));
+        }
+        if self.0.fail_lists {
+            return Err(ErrorData::internal_error("e".repeat(1024 * 1024), None));
         }
         if self.0.endless {
             let page: u64 = request

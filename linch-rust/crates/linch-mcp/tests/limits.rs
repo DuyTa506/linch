@@ -221,3 +221,17 @@ async fn a_burst_of_list_changes_is_relisted_a_few_times() {
     );
     server.disconnect().await;
 }
+
+/// A JSON-RPC error on `tools/list` reaches the host in the connect error
+/// (and `agent.open` answers it), so its text is cut like a tool error's.
+#[tokio::test]
+async fn a_json_rpc_error_on_the_tool_list_is_capped() {
+    let duplex = Duplex::new(Fixture::new(standard_tools()).failing_lists());
+    let connected = McpServer::connect(config("t", duplex), Arc::new(ToolRegistry::new())).await;
+    let error = connected.err().expect("the listing fails");
+    assert!(
+        error.to_string().len() <= 31_000,
+        "the connect error is {} bytes",
+        error.to_string().len()
+    );
+}

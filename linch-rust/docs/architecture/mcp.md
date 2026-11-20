@@ -221,6 +221,14 @@ What one server can make the client hold or wait for
   its user name, password and query replaced by `redacted` (a string that is
   not a URL is shown as `[redacted]`), so logging a config does not leak a
   token.
+- **Errors.** reqwest names the URL in the text of a failed request, and the
+  userinfo and query of that URL often hold a token. The HTTP transport wraps
+  the client (`connector.rs`, `QuietClient`) so every error it raises leaves the
+  URL out (`reqwest::Error::without_url`); this holds for a failed connect, a
+  reconnect, and the text of a failed tool call. A JSON-RPC error message in
+  `ConnectError::Handshake`, `Listen` or `ListTools` is cut at 30 000 bytes like
+  a tool error's, and those variants have no `source`, so the message is not
+  repeated in full down the error chain.
 
 ## Example
 

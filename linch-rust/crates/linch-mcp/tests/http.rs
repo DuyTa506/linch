@@ -257,3 +257,35 @@ async fn a_redirect_does_not_take_the_client_off_the_configured_path() {
          tools listed from there: {listed:?}"
     );
 }
+
+fn chain(error: &dyn std::error::Error) -> String {
+    let mut text = format!("{error}");
+    let mut source = error.source();
+    while let Some(inner) = source {
+        text.push_str(&format!(" | {inner}"));
+        source = inner.source();
+    }
+    text
+}
+
+/// A failed connect is shown to hosts and answered by `agent.open`: it must
+/// not print the URL's query, which often holds a token.
+#[tokio::test]
+async fn a_connect_error_does_not_print_the_query_of_the_url() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let mut config = McpServerConfig::new(
+        "web",
+        McpTransport::http(format!("http://user:tok-pass@{address}/mcp?key=tok-query")),
+    );
+    config.reconnect.attempt_timeout = Duration::from_secs(5);
+    let error = McpServer::connect(config, Arc::new(ToolRegistry::new()))
+        .await
+        .err()
+        .expect("nothing listens there");
+    let shown = format!("{} || {error:?}", chain(&error));
+    for secret in ["tok-query", "tok-pass"] {
+        assert!(!shown.contains(secret), "{shown}");
+    }
+}

@@ -2,6 +2,7 @@
 //! handler every connection runs.
 
 use std::collections::{BTreeMap, HashMap};
+use std::fmt::Display;
 use std::future::Future;
 use std::pin::Pin;
 use std::process::ExitStatus;
@@ -9,20 +10,27 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::stream::BoxStream;
 use http::{HeaderName, HeaderValue};
 use process_wrap::tokio::{ChildWrapper, CommandWrap, CommandWrapper, ProcessGroup};
-use rmcp::model::{ClientCapabilities, ClientConfig, Implementation, ProtocolVersion};
+use rmcp::model::{
+    ClientCapabilities, ClientConfig, ClientJsonRpcMessage, Implementation, ProtocolVersion,
+};
 use rmcp::service::{
     ClientInitializeError, NotificationContext, RoleClient, RunningService, RxJsonRpcMessage,
     ServiceError, TxJsonRpcMessage,
 };
-use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+use rmcp::transport::streamable_http_client::{
+    SseError, StreamableHttpClient, StreamableHttpClientTransportConfig, StreamableHttpError,
+    StreamableHttpPostResponse,
+};
 use rmcp::transport::{IntoTransport, StreamableHttpClientTransport, TokioChildProcess, Transport};
 use rmcp::{ClientHandler, ClientLifecycleMode, ClientServiceExt};
 use thiserror::Error;
 use tokio::sync::Notify;
 
 use crate::config::{ConfigError, McpTransport};
+use crate::result::capped;
 
 /// Variables a stdio server inherits from this process; the MCP Python SDK
 /// uses the same list.
@@ -33,6 +41,12 @@ const INHERITED_ENV: [&str; 6] = ["HOME", "LOGNAME", "PATH", "SHELL", "TERM", "U
 /// after `SIGTERM`. This bound only cuts in when closing stdin itself hangs.
 const CLOSE_GRACE: Duration = Duration::from_secs(10);
 
+/// The text of a failure the server's own message can fill, cut like a tool
+/// error's.
+fn cut(error: &impl Display) -> String {
+    capped(error.to_string())
+}
+
 /// Why one connection attempt failed.
 #[derive(Debug, Error)]
 pub enum ConnectError {
@@ -40,14 +54,20 @@ pub enum ConnectError {
     #[error("could not start the MCP server process: {0}")]
     Spawn(#[source] std::io::Error),
     /// The MCP lifecycle (`server/discover` or `initialize`) failed.
-    #[error("MCP handshake failed: {0}")]
-    Handshake(#[source] Box<ClientInitializeError>),
-    /// The server offers tool list changes but refused the subscription.
-    #[error("could not subscribe to MCP tool list changes: {0}")]
-    Listen(#[source] ServiceError),
-    /// `tools/list` failed.
-    #[error("could not list the MCP server's tools: {0}")]
-    ListTools(#[source] ServiceError),
+    ///
+    /// The text is cut like a tool error's (30 000 bytes), and the error has
+    /// no `source`, so a server's JSON-RPC error message is not repeated in
+    /// full down the chain.
+    #[error("MCP handshake failed: {}", cut(.0))]
+    Handshake(Box<ClientInitializeError>),
+    /// The server offers tool list changes but refused the subscription. The
+    /// text is cut and the error has no `source`, as for `Handshake`.
+    #[error("could not subscribe to MCP tool list changes: {}", cut(.0))]
+    Listen(ServiceError),
+    /// `tools/list` failed. The text is cut and the error has no `source`,
+    /// as for `Handshake`.
+    #[error("could not list the MCP server's tools: {}", cut(.0))]
+    ListTools(ServiceError),
     /// The server's first tool alone is over the size bound, so none of the
     /// list is used.
     #[error("the MCP server's first tool is over {limit} bytes")]
@@ -288,7 +308,7 @@ impl Connector for Http {
     ) -> Result<RunningService<RoleClient, Handler>, ConnectError> {
         let config = StreamableHttpClientTransportConfig::with_uri(self.url.as_str())
             .custom_headers(self.headers.clone());
-        let client = http_client().map_err(ConnectError::HttpClient)?;
+        let client = QuietClient(http_client().map_err(ConnectError::HttpClient)?);
         handler
             .serve(StreamableHttpClientTransport::with_client(client, config))
             .await
@@ -308,6 +328,124 @@ fn http_client() -> reqwest::Result<reqwest::Client> {
         .redirect(reqwest::redirect::Policy::none())
         .pool_max_idle_per_host(0)
         .build()
+}
+
+/// reqwest's client with the URL left out of its errors. reqwest names the
+/// URL in the text of a failed request, and the URL's userinfo and query
+/// often hold a token; that text reaches the host in a connect error, in a
+/// reconnect's status and in the text of a failed tool call (which the
+/// model reads). Everything else is passed to the client as it is, so its
+/// limits on SSE events and error bodies stay in force.
+#[derive(Clone)]
+struct QuietClient(reqwest::Client);
+
+fn quiet<T>(
+    result: Result<T, StreamableHttpError<reqwest::Error>>,
+) -> Result<T, StreamableHttpError<reqwest::Error>> {
+    result.map_err(|error| match error {
+        StreamableHttpError::Client(error) => StreamableHttpError::Client(error.without_url()),
+        other => other,
+    })
+}
+
+impl StreamableHttpClient for QuietClient {
+    type Error = reqwest::Error;
+
+    async fn post_message(
+        &self,
+        uri: Arc<str>,
+        message: ClientJsonRpcMessage,
+        session_id: Option<Arc<str>>,
+        auth_header: Option<String>,
+        custom_headers: HashMap<HeaderName, HeaderValue>,
+    ) -> Result<StreamableHttpPostResponse, StreamableHttpError<reqwest::Error>> {
+        quiet(
+            self.0
+                .post_message(uri, message, session_id, auth_header, custom_headers)
+                .await,
+        )
+    }
+
+    async fn post_message_with_max_sse_event_size(
+        &self,
+        uri: Arc<str>,
+        message: ClientJsonRpcMessage,
+        session_id: Option<Arc<str>>,
+        auth_header: Option<String>,
+        custom_headers: HashMap<HeaderName, HeaderValue>,
+        max_sse_event_size: usize,
+    ) -> Result<StreamableHttpPostResponse, StreamableHttpError<reqwest::Error>> {
+        quiet(
+            self.0
+                .post_message_with_max_sse_event_size(
+                    uri,
+                    message,
+                    session_id,
+                    auth_header,
+                    custom_headers,
+                    max_sse_event_size,
+                )
+                .await,
+        )
+    }
+
+    async fn delete_session(
+        &self,
+        uri: Arc<str>,
+        session_id: Arc<str>,
+        auth_header: Option<String>,
+        custom_headers: HashMap<HeaderName, HeaderValue>,
+    ) -> Result<(), StreamableHttpError<reqwest::Error>> {
+        quiet(
+            self.0
+                .delete_session(uri, session_id, auth_header, custom_headers)
+                .await,
+        )
+    }
+
+    async fn get_stream(
+        &self,
+        uri: Arc<str>,
+        session_id: Option<Arc<str>>,
+        last_event_id: Option<String>,
+        auth_header: Option<String>,
+        custom_headers: HashMap<HeaderName, HeaderValue>,
+    ) -> Result<
+        BoxStream<'static, Result<sse_stream::Sse, SseError>>,
+        StreamableHttpError<reqwest::Error>,
+    > {
+        quiet(
+            self.0
+                .get_stream(uri, session_id, last_event_id, auth_header, custom_headers)
+                .await,
+        )
+    }
+
+    async fn get_stream_with_max_sse_event_size(
+        &self,
+        uri: Arc<str>,
+        session_id: Option<Arc<str>>,
+        last_event_id: Option<String>,
+        auth_header: Option<String>,
+        custom_headers: HashMap<HeaderName, HeaderValue>,
+        max_sse_event_size: usize,
+    ) -> Result<
+        BoxStream<'static, Result<sse_stream::Sse, SseError>>,
+        StreamableHttpError<reqwest::Error>,
+    > {
+        quiet(
+            self.0
+                .get_stream_with_max_sse_event_size(
+                    uri,
+                    session_id,
+                    last_event_id,
+                    auth_header,
+                    custom_headers,
+                    max_sse_event_size,
+                )
+                .await,
+        )
+    }
 }
 
 fn parse_headers(
