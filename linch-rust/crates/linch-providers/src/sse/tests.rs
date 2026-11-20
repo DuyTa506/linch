@@ -10,7 +10,7 @@ use futures::{Stream, StreamExt};
 use linch_core::{Message, Provider, ProviderError, ProviderEvent, ProviderRequest};
 use tokio_util::sync::CancellationToken;
 
-use super::{Decoder, Framer, MAX_EVENT_BYTES, events};
+use super::{Decoder, Framer, KEEP_BYTES, MAX_EVENT_BYTES, events};
 use crate::openai_compat::stream::{ReasoningField, Translator};
 use crate::request::MAX_ERROR_CHARS;
 use crate::test_server::serve_once;
@@ -569,4 +569,68 @@ fn the_recorded_streams_of_every_wire_frame_the_same_at_every_two_way_split() {
             );
         }
     }
+}
+
+// ---- the framer gives memory back
+
+#[test]
+fn a_large_event_does_not_keep_its_memory_for_the_rest_of_the_stream() {
+    let mut framer = Framer::default();
+    let mut out = VecDeque::new();
+    let mut body = b"data: ".to_vec();
+    body.resize(8 * 1024 * 1024, b'x');
+    body.extend_from_slice(b"\n\ndata: small\n\n");
+    let mut peak = 0;
+    for piece in body.chunks(64 * KIB) {
+        framer.push(piece, &mut out).unwrap();
+        peak = peak.max(framer.buf.capacity());
+    }
+    assert_eq!(out.len(), 2);
+    assert!(
+        framer.buf.capacity() <= KEEP_BYTES,
+        "{} bytes held after the event",
+        framer.buf.capacity()
+    );
+    assert!(
+        peak >= 8 * 1024 * 1024,
+        "the event was held while it was read"
+    );
+}
+
+#[test]
+fn the_buffer_does_not_double_past_the_bound() {
+    let mut framer = Framer::default();
+    let mut out = VecDeque::new();
+    let mut body = b"data: ".to_vec();
+    body.resize(MAX_EVENT_BYTES - 2, b'x');
+    let mut peak = 0;
+    for piece in body.chunks(64 * KIB) {
+        framer.push(piece, &mut out).unwrap();
+        peak = peak.max(framer.buf.capacity());
+    }
+    assert!(
+        peak <= MAX_EVENT_BYTES + 64 * KIB,
+        "{} MiB held for an event that may hold {} MiB",
+        peak / (KIB * KIB),
+        MAX_EVENT_BYTES / (KIB * KIB)
+    );
+}
+
+#[test]
+fn two_large_events_in_a_row_do_not_add_up() {
+    let mut framer = Framer::default();
+    let mut out = VecDeque::new();
+    let mut event = b"data: ".to_vec();
+    event.resize(12 * 1024 * 1024, b'x');
+    event.extend_from_slice(b"\n\n");
+    let body = [event.clone(), event].concat();
+    let mut peak = 0;
+    for piece in body.chunks(64 * KIB) {
+        framer.push(piece, &mut out).unwrap();
+        out.clear();
+        peak = peak.max(framer.buf.capacity() + framer.pending.data.capacity());
+    }
+    // One event is held twice at most: as the unread line and as its data.
+    assert!(peak <= 2 * MAX_EVENT_BYTES, "{} MiB", peak / (KIB * KIB));
+    assert!(framer.buf.capacity() <= KEEP_BYTES);
 }

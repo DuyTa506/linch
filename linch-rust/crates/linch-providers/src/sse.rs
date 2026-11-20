@@ -23,6 +23,13 @@ use crate::request::ErrorScrub;
 /// body that never ends an event.
 pub(crate) const MAX_EVENT_BYTES: usize = 16 * 1024 * 1024;
 
+/// A framer buffer larger than this, left mostly empty after a chunk, is
+/// given back: one large event must not keep its memory for the rest of
+/// the stream. It is above the largest chunk reqwest hands over on
+/// loopback (507 904 bytes in the bench), so ordinary streams never
+/// reallocate.
+const KEEP_BYTES: usize = 1024 * 1024;
+
 /// Why a body cannot be framed into events.
 #[derive(Debug, Error)]
 enum FrameError {
@@ -47,6 +54,17 @@ pub(crate) trait Decoder: Send + 'static {
     fn close(&mut self, out: &mut VecDeque<ProviderEvent>) -> Result<(), ProviderError>;
 }
 
+/// How many bytes to reserve so that `extra` more fit in a buffer of
+/// `capacity` holding `len`: the buffer doubles, but never past the bound,
+/// so a stream near it does not hold twice what it may use.
+fn room(capacity: usize, len: usize, extra: usize) -> usize {
+    let want = len + extra;
+    if want <= capacity {
+        return 0;
+    }
+    want.max(capacity * 2).min(MAX_EVENT_BYTES.max(want)) - len
+}
+
 /// The `data:` lines of the event being read.
 #[derive(Default)]
 struct Pending {
@@ -61,6 +79,8 @@ impl Pending {
         let (field, value) = line.split_once(':').unwrap_or((line, ""));
         if field == "data" {
             let value = value.strip_prefix(' ').unwrap_or(value);
+            self.data
+                .reserve_exact(room(self.data.capacity(), self.data.len(), value.len() + 1));
             if self.any {
                 self.data.push('\n');
             }
@@ -107,6 +127,8 @@ impl Framer {
     /// Add one body chunk; the data of each event it ends goes to `out`,
     /// also when the chunk fails.
     fn push(&mut self, chunk: &[u8], out: &mut VecDeque<String>) -> Result<(), FrameError> {
+        self.buf
+            .reserve_exact(room(self.buf.capacity(), self.buf.len(), chunk.len()));
         self.buf.extend_from_slice(chunk);
         let bad = match std::str::from_utf8(&self.buf[self.valid..]) {
             Ok(_) => {
@@ -126,6 +148,9 @@ impl Framer {
         self.scanned -= self.start;
         self.valid -= self.start;
         self.start = 0;
+        if self.buf.capacity() > KEEP_BYTES && self.buf.len() <= self.buf.capacity() / 4 {
+            self.buf.shrink_to(self.buf.len().max(KEEP_BYTES / 4));
+        }
         if self.event_bytes + self.buf.len() > MAX_EVENT_BYTES {
             return Err(FrameError::TooLarge);
         }

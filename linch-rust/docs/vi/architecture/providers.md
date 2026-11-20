@@ -357,7 +357,10 @@ cho biết response đã hoàn tất chưa; `close` xử lý một body kết th
   2 MiB cho một câu trả lời 128 000 token), và một byte không phải UTF-8 làm
   lời gọi thất bại ngay khi được đọc. Cả hai là lỗi `Transport` và đều đến sau các
   event mà cùng chunk đó đã hoàn tất trước lỗi, nên kết quả không phụ thuộc vào chỗ
-  chunk kết thúc;
+  chunk kết thúc. Bộ đệm tăng gấp đôi nhưng không bao giờ vượt quá giới hạn, và
+  một bộ đệm trên 1 MiB mà một chunk để lại gần như trống sẽ được trả lại
+  (`KEEP_BYTES`), nên một event lớn không giữ bộ nhớ của nó cho phần còn lại của
+  stream;
 - kiểm tra cancel token trước mỗi lần đọc và cho lần đọc chạy đua với nó;
 - khi response đã hoàn tất, yield những gì đang xếp hàng kể cả khi một lệnh hủy
   đến, để phần kết thúc và usage của nó không bị mất (`sse.rs:242`);

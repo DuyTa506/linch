@@ -6,6 +6,7 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ## Unreleased
 
+- The SSE framer gives its buffer back once a large event has been read (a buffer over 1 MiB that a chunk leaves under a quarter full), and grows it by doubling only up to the 16 MiB bound, so one large event no longer keeps 16 to 32 MiB for the rest of the stream.
 - The events a chunk completes before a byte that is not UTF-8, or before the 16 MiB bound, are delivered before the error, so a stream gives the same events and the same error wherever its chunks end (a complete response followed by a bad byte in the same chunk used to fail).
 - Error text is cleaned in one order for every error of a provider call, an HTTP error body or a frame inside a stream: the provider key and bearer tokens, then the configured header values and the cache salt, and only then the cut to 500 characters, so a secret that straddles the cut leaves no part of itself behind (the cut used to come first).
 - SSE framing reads the body in one pass and no longer depends on `eventsource-stream`: the cost is linear in the bytes whatever the chunk size (the 20 000-delta Anthropic stream decodes in about 12 ms at any chunk size, where it took 190 ms at 256 KiB chunks and 358 ms at 512 KiB; case 6 `rs-kernel`, median per iteration: Anthropic 313 to 25 ms, DeepSeek 221 to 27 ms), a leading byte order mark is dropped instead of panicking, and a body that is not UTF-8 fails the call at the first bad byte.

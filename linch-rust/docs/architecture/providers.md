@@ -362,7 +362,10 @@ early (a format with an end marker fails, one without finishes). The loop:
   output, about 2 MiB for a 128 000-token answer), and a byte that is not
   UTF-8 fails the call when it is read. Both are `Transport` errors, and both
   come after the events that the same chunk completed before the fault, so the
-  result does not depend on where chunks end;
+  result does not depend on where chunks end. The buffer grows by doubling
+  but never past the bound, and a buffer over 1 MiB that a chunk leaves mostly
+  empty is given back (`KEEP_BYTES`), so one large event does not keep its memory
+  for the rest of the stream;
 - checks the cancel token before each read and races the read against it;
 - once the response is complete, yields what is queued even if a cancel
   arrives, so the end and its usage are not lost (`sse.rs:242`);
