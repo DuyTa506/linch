@@ -355,7 +355,10 @@ Where the helper comes from:
   that on.
 - `LINCH_REAPER=/path/to/linch-reaper` turns on that program instead (the
   `linch-reaper` binary built with `linch-tools`; it is not in the wheel).
-  Empty turns it off.
+  The path must be absolute (a relative one would resolve in the command's own
+  directory) and name an executable file. Empty turns it off. Any other value
+  (`0`, `true`, a relative path), `1` where the host offers no helper, and a
+  helper that is not an executable file leave it off with one warning in the log.
 - A Rust host calls `linch_tools::reaper::register(ReaperCommand { program,
   args })` before its first command, which turns on its own helper, or
   `enter()` to use its own executable as `linch-server` does. The choice is
@@ -365,6 +368,21 @@ Where the helper comes from:
   executable that does not know `--linch-reaper`, say), is passed over with one
   warning in the log: the command runs as it does without one. A helper that
   does not answer in 5 s fails the call, since it may be running the command.
+- The server does not trust the pid line: before it signals that group it
+  reads `/proc/<pid>/stat` and requires a child of the helper that leads its
+  own group (or one that has already ended, which is not signalled). Any other
+  pid fails the call, with the helper's group killed and nothing else
+  signalled, so a replaced or buggy helper cannot make the server kill another
+  process group.
+- In the `sandbox`, the helper's executable must lie outside every directory
+  the command can write: the workspace root and the sandbox's private homes
+  (the read-only system paths and the temp directory are outside). Otherwise a
+  command could replace it. The path is resolved (symlinks included) and, if
+  it lies under one of them, or cannot be resolved, the sandbox warns once and
+  runs commands without a helper. `linch-server` inside a project's `.venv`
+  (under the workspace root) is therefore not used as the sandbox's helper:
+  install it outside the workspace. `local` has no such limit, since a local
+  command can write anything its user can.
 
 Starting a command under the helper waits for its first line, so
 `LocalShell::spawn` does it on a blocking thread, and the sandbox's own thread

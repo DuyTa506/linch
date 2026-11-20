@@ -184,11 +184,18 @@ không cần đặc quyền và không cần cgroup hay namespace. Bật nó b�
 `linch-server`, vốn tự chạy chính mình làm chương trình phụ trợ (không cần phân phối thêm
 gì), hoặc `LINCH_REAPER=/path/to/linch-reaper` để chỉ tới một chương trình; `LINCH_REAPER=`
 (rỗng) tắt nó, và một host Rust có thể bật chương trình phụ trợ của riêng mình bằng
-`linch_tools::reaper::register`. Nó tắt theo mặc định vì mỗi lệnh tốn thêm một process: một
+`linch_tools::reaper::register`. Đường dẫn phải là tuyệt đối; mọi giá trị khác (`0`,
+`true`, một đường dẫn tương đối) để nó tắt với một cảnh báo trong log. Nó tắt theo mặc định vì mỗi lệnh tốn thêm một process: một
 `true` `local` mất trung vị 0,6 đến 0,8 ms khi không có nó, 1,9 đến 2,7 ms với `linch-reaper`
 350 KB và 3,5 đến 4,2 ms với `linch-server` làm chương trình phụ trợ của chính nó (một tệp
 thực thi 30 MB phải nạp); sandbox đi từ 21,5 đến 22,9 ms lên 24 đến 26 ms và 25 đến 28 ms (bản
 release, 200 lần spawn mỗi vòng, CPU 0,8 đến 2,5 GHz trên một host dùng chung).
+
+Trong `sandbox`, tệp thực thi của chương trình phụ trợ phải nằm ngoài mọi thư mục lệnh ghi
+được (thư mục gốc workspace và các home riêng của sandbox), vì server tin những gì chương trình
+phụ trợ báo cáo: một chương trình phụ trợ nằm dưới chúng, chẳng hạn `linch-server` trong
+`.venv` của dự án bên trong workspace, bị từ chối với một cảnh báo trong log và lệnh chạy không
+có nó. Hãy cài nó ngoài workspace, tại một đường dẫn tuyệt đối.
 
 Khi chương trình phụ trợ bật, `$PPID` trong một lệnh là chương trình phụ trợ, và một lệnh có
 thể kill nó (nó chạy cùng user, trong cùng domain Landlock, và bộ lọc seccomp không chặn

@@ -202,12 +202,21 @@ holds what it leaves behind (a child subreaper, with the children list in
 Turn it on with `LINCH_REAPER=1` for `linch-server`, which runs itself as the
 helper (nothing extra to ship), or `LINCH_REAPER=/path/to/linch-reaper` to name
 a program; `LINCH_REAPER=` (empty) turns it off, and a Rust host can turn on its
-own helper with `linch_tools::reaper::register`. It is off by default because
+own helper with `linch_tools::reaper::register`. The path must be absolute; any other value
+(`0`, `true`, a relative path) leaves it off with one warning in the log. It is
+off by default because
 it costs a process per command: a `local` `true` takes a median of 0.6 to
 0.8 ms without it, 1.9 to 2.7 ms with the 350 KB `linch-reaper` and 3.5 to
 4.2 ms with `linch-server` as its own helper (a 30 MB executable to load); the
 sandbox goes from 21.5 to 22.9 ms to 24 to 26 ms and 25 to 28 ms (release
 build, 200 spawns a round, CPU at 0.8 to 2.5 GHz on a shared host).
+
+In the `sandbox` the helper's executable must lie outside every directory the
+command can write (the workspace root and the sandbox's private homes), because
+the server trusts what the helper reports: a helper that lies under them, for
+example `linch-server` in a project's `.venv` inside the workspace, is refused
+with one warning in the log and commands run without it. Install it outside the
+workspace, at an absolute path.
 
 With the helper on, `$PPID` inside a command is the helper, and a command can
 kill it (it runs as the same user, in the same Landlock domain, and the seccomp

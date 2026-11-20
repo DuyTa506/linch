@@ -422,14 +422,19 @@ async fn a_sandboxed_daemon_and_a_stubborn_process_end_with_the_call() {
     };
     let mut pids = Pids::default();
     let tool = Bash::in_backend(&backend);
-    let command = format!("{DAEMON}; {STUBBORN} & until [ -s pid ]; do sleep 0.02; done");
+    // Each writes its own file, and the command waits for both.
+    let stubborn = STUBBORN.replace("> pid;", "> pid2;");
+    let wait = "until [ -s pid ] && [ -s pid2 ]; do sleep 0.02; done";
+    let command = format!("{DAEMON}; {stubborn} & {wait}");
     let _ = call(&tool, json!({"command": command, "timeout_ms": 10_000})).await;
-    let pid = written(&ws.root(), "pid");
-    pids.0.push(pid);
-    assert!(
-        ends(pid).await,
-        "sandboxed process {pid} ran on after the call"
-    );
+    for name in ["pid", "pid2"] {
+        let pid = written(&ws.root(), name);
+        pids.0.push(pid);
+        assert!(
+            ends(pid).await,
+            "sandboxed process {pid} ({name}) ran on after the call"
+        );
+    }
 }
 
 #[tokio::test]

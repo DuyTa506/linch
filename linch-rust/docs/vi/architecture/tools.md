@@ -347,7 +347,11 @@ Chương trình phụ trợ đến từ đâu:
   thì nó chạy chương trình phụ trợ rồi thoát; nếu không thì nó đề xuất chính tệp thực thi của
   mình làm chương trình phụ trợ cho các lệnh nó khởi động. `LINCH_REAPER=1` bật việc đó.
 - `LINCH_REAPER=/path/to/linch-reaper` bật chương trình đó thay thế (binary `linch-reaper`
-  được build cùng `linch-tools`; nó không có trong wheel). Rỗng thì tắt.
+  được build cùng `linch-tools`; nó không có trong wheel). Đường dẫn phải là tuyệt đối (một
+  đường dẫn tương đối sẽ được phân giải trong thư mục của chính lệnh) và chỉ tới một tệp
+  thực thi được. Rỗng thì tắt. Mọi giá trị khác (`0`, `true`, một đường dẫn tương đối), `1`
+  ở nơi host không đề xuất chương trình phụ trợ, và một chương trình phụ trợ không phải tệp
+  thực thi được đều để nó tắt với một cảnh báo trong log.
 - Một host Rust gọi `linch_tools::reaper::register(ReaperCommand { program, args })` trước
   lệnh đầu tiên, việc này bật chương trình phụ trợ của chính host, hoặc gọi `enter()` để dùng
   tệp thực thi của mình như `linch-server`. Lựa chọn này áp dụng cho cả process vì nó chỉ tới
@@ -357,6 +361,19 @@ Chương trình phụ trợ đến từ đâu:
   thực thi không biết `--linch-reaper`, chẳng hạn), bị bỏ qua với một cảnh báo trong log: lệnh
   chạy như khi không có nó. Một chương trình phụ trợ không trả lời trong 5 s làm lời gọi thất
   bại, vì nó có thể đang chạy lệnh.
+- Server không tin dòng pid: trước khi gửi signal tới group đó nó đọc `/proc/<pid>/stat` và
+  yêu cầu một process con của chương trình phụ trợ, dẫn đầu group riêng (hoặc một process đã
+  kết thúc, không được gửi signal). Mọi pid khác làm lời gọi thất bại, group của chương trình
+  phụ trợ bị kill và không signal nào khác được gửi, nên một chương trình phụ trợ bị thay thế
+  hoặc có lỗi không thể khiến server kill một process group khác.
+- Trong `sandbox`, tệp thực thi của chương trình phụ trợ phải nằm ngoài mọi thư mục lệnh ghi
+  được: thư mục gốc workspace và các home riêng của sandbox (các đường dẫn hệ thống chỉ đọc và
+  thư mục temp nằm ngoài). Nếu không, một lệnh có thể thay thế nó. Đường dẫn được phân giải
+  (kể cả symlink) và, nếu nó nằm dưới một trong số đó, hoặc không phân giải được, sandbox cảnh
+  báo một lần và chạy lệnh không có chương trình phụ trợ. Vì vậy `linch-server` trong `.venv`
+  của một dự án (dưới thư mục gốc workspace) không được dùng làm chương trình phụ trợ của
+  sandbox: hãy cài nó ra ngoài workspace. `local` không có giới hạn đó, vì một lệnh cục bộ ghi
+  được mọi thứ user của nó ghi được.
 
 Khởi động một lệnh dưới chương trình phụ trợ phải chờ dòng đầu của nó, nên
 `LocalShell::spawn` làm việc đó trên một thread blocking, còn thread của sandbox vốn đã là

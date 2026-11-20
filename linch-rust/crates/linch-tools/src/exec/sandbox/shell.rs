@@ -32,6 +32,7 @@ use super::{ETC_READ_PATHS, SYSTEM_READ_PATHS, SandboxPolicy, seccomp};
 use crate::bash::process::{self, Spawned, Started};
 use crate::bash::supervisor;
 use crate::exec::{ExecutionError, Launch, Shell};
+use crate::reaper::ReaperCommand;
 
 /// Devices a command may read and write.
 const DEVICES: [&str; 5] = [
@@ -113,6 +114,8 @@ pub(in crate::exec) struct SandboxShell {
     policy: SandboxPolicy,
     prlimit: PathBuf,
     rules: Arc<Rules>,
+    /// The helper commands run under, if there is one the sandbox trusts.
+    helper: Option<ReaperCommand>,
     scratch: TempDir,
     homes: Mutex<HashMap<SessionId, PathBuf>>,
     next: AtomicU64,
@@ -150,16 +153,17 @@ impl SandboxShell {
         let mut read: Vec<PathBuf> = SYSTEM_READ_PATHS.iter().map(PathBuf::from).collect();
         read.extend(etc_read_paths(etc));
         read.extend(policy.read_paths.iter().cloned());
-        let rules = Arc::new(Rules {
-            network: policy.network,
-            root: root.to_path_buf(),
-            read,
-            reaper: supervisor::program().map(|helper| helper.program.clone()),
-        });
         let scratch = tempfile::Builder::new()
             .prefix("linch-sandbox-")
             .tempdir()
             .map_err(io)?;
+        let helper = trusted(supervisor::program(), &[root, scratch.path()]);
+        let rules = Arc::new(Rules {
+            network: policy.network,
+            root: root.to_path_buf(),
+            read,
+            reaper: helper.as_ref().map(|helper| helper.program.clone()),
+        });
         let probe = Arc::clone(&rules);
         let home = scratch.path().to_path_buf();
         let checked = std::thread::Builder::new()
@@ -173,6 +177,7 @@ impl SandboxShell {
             policy,
             prlimit,
             rules,
+            helper,
             scratch,
             homes: Mutex::default(),
             next: AtomicU64::new(0),
@@ -251,6 +256,7 @@ impl Shell for SandboxShell {
             prlimit: self.prlimit.clone(),
             policy: self.policy.clone(),
             shell,
+            helper: self.helper.clone(),
             cwd: launch.cwd.to_path_buf(),
             env,
             home,
@@ -297,6 +303,7 @@ struct Job {
     prlimit: PathBuf,
     policy: SandboxPolicy,
     shell: Vec<String>,
+    helper: Option<ReaperCommand>,
     cwd: PathBuf,
     env: BTreeMap<String, String>,
     home: PathBuf,
@@ -313,14 +320,46 @@ impl Job {
             .create(&self.home)?;
         // The helper the command runs under is a process too, but not the
         // command's.
-        let helper = u64::from(supervisor::program().is_some());
+        let helper = u64::from(self.helper.is_some());
         let limits = limits(&self.policy, user_tasks().saturating_add(helper));
         self.rules.confine(&self.home).map_err(io::Error::other)?;
         let _runtime = handle.enter();
         let mut command = Command::new(&self.prlimit);
         command.args(&limits).args(&self.shell);
-        process::start_shell(command, &self.cwd, &self.env, self.lifeline)
+        process::start_shell(
+            self.helper.as_ref(),
+            command,
+            &self.cwd,
+            &self.env,
+            self.lifeline,
+        )
     }
+}
+
+/// `helper`, unless a command can write its executable: the server trusts
+/// the pid line a helper writes, so a command that replaces the helper could
+/// make it signal another process group. A helper that lies under one of the
+/// `writable` roots (or cannot be resolved) is refused, once with a warning,
+/// and commands run without one.
+fn trusted(helper: Option<&'static ReaperCommand>, writable: &[&Path]) -> Option<ReaperCommand> {
+    let helper = helper?;
+    let resolved = std::fs::canonicalize(&helper.program).ok();
+    let inside = |root: &&Path| {
+        let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        resolved.as_ref().is_none_or(|path| path.starts_with(&root))
+    };
+    if writable.iter().any(inside) {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                helper = %helper.program.display(),
+                "the sandbox can write the helper's executable (it lies under the workspace or the sandbox home); \
+                 commands run without the helper. Put it outside every directory the sandbox can write"
+            );
+        });
+        return None;
+    }
+    Some(helper.clone())
 }
 
 /// Tasks (threads) the server's user runs now, which `RLIMIT_NPROC` counts:
@@ -559,6 +598,36 @@ mod tests {
         for text in ["", missing_caps, &missing_uid, &garbled, &short_uid] {
             assert!(unprivileged(text).is_err(), "{text:?}");
         }
+    }
+
+    /// A helper the sandbox can write (under the workspace or the home,
+    /// through a symlink too) is refused; one outside both is kept.
+    #[test]
+    fn a_helper_the_sandbox_can_write_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (root, home, elsewhere) = (dir.path().join("w"), dir.path().join("h"), dir.path());
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let helper = |path: PathBuf| -> &'static ReaperCommand {
+            Box::leak(Box::new(ReaperCommand {
+                program: path,
+                args: Vec::new(),
+            }))
+        };
+        let writable = [root.as_path(), home.as_path()];
+        for (name, inside) in [("w/x", true), ("h/x", true), ("outside", false)] {
+            let path = elsewhere.join(name);
+            std::fs::write(&path, "").unwrap();
+            let kept = trusted(Some(helper(path)), &writable);
+            assert_eq!(kept.is_none(), inside, "{name}");
+        }
+        // A symlink outside that points into the workspace is inside.
+        let link = elsewhere.join("link");
+        std::os::unix::fs::symlink(root.join("x"), &link).unwrap();
+        assert!(trusted(Some(helper(link)), &writable).is_none());
+        // One that cannot be resolved is not trusted.
+        assert!(trusted(Some(helper("/nonexistent/helper".into())), &writable).is_none());
+        assert!(trusted(None, &writable).is_none());
     }
 
     /// The count covers at least this process's own threads.

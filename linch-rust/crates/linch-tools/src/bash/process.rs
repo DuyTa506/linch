@@ -135,8 +135,9 @@ pub(crate) struct Helper {
     /// The server's end of the helper's stdin, a socket: closing it stops
     /// the command and everything under it.
     pub link: UnixStream,
-    /// The shell's pid, which leads the command's process group.
-    pub shell: u32,
+    /// The shell's pid, which leads the command's process group; `None`
+    /// when it had already ended by the time it was checked.
+    pub shell: Option<u32>,
 }
 
 /// A command an execution backend started: a child of this process, or
@@ -163,7 +164,7 @@ impl Started {
     pub(super) fn pid(&self) -> Option<u32> {
         match self {
             Self::Process(spawned) => (spawned.helper.as_ref())
-                .map(|helper| helper.shell)
+                .and_then(|helper| helper.shell)
                 .or_else(|| spawned.child.id()),
             Self::Remote(_) => None,
         }
@@ -202,7 +203,7 @@ pub(crate) fn spawn(
 ) -> io::Result<Spawned> {
     let mut shell = Command::new("/bin/sh");
     shell.args(shell_args(command, lifeline));
-    start_shell(shell, cwd, env, lifeline)
+    start_shell(supervisor::program(), shell, cwd, env, lifeline)
 }
 
 /// Whether [`spawn`] blocks: a helper has to say which shell it started.
@@ -213,7 +214,7 @@ pub(crate) fn blocks() -> bool {
 /// Start the shell `program` runs in `cwd` with exactly `env`, as the
 /// leader of a new process group, stdout and stderr piped.
 ///
-/// Where a helper is found, the child is the helper, which runs `program`
+/// Where there is a `helper`, the child is the helper, which runs `program`
 /// and tells this process its pid. Its stdin is a socket this process holds
 /// the other end of: closing it (the caller stopping the command, or dying)
 /// ends the command and everything it started. With `lifeline` the
@@ -228,15 +229,6 @@ pub(crate) fn blocks() -> bool {
 /// Blocks until a helper has started the shell, so call it from a blocking
 /// task.
 pub(crate) fn start_shell(
-    program: Command,
-    cwd: &Path,
-    env: &BTreeMap<String, String>,
-    lifeline: bool,
-) -> io::Result<Spawned> {
-    start_shell_under(supervisor::program(), program, cwd, env, lifeline)
-}
-
-fn start_shell_under(
     helper: Option<&ReaperCommand>,
     program: Command,
     cwd: &Path,
@@ -246,8 +238,11 @@ fn start_shell_under(
     if let Some(helper) = helper {
         match start_helped(helper, &program, cwd, env, lifeline) {
             Ok(spawned) => return Ok(spawned),
-            // The helper may be running the command: do not run it twice.
-            Err(error) if error.kind() == ErrorKind::TimedOut => return Err(error),
+            // The helper may be running the command (it did not answer, or
+            // named a process that is not its shell): do not run it twice.
+            Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::InvalidData) => {
+                return Err(error);
+            }
             Err(error) => warn_once(helper, &error),
         }
     }
@@ -260,9 +255,12 @@ fn start_shell_under(
 }
 
 /// Start `program` under `helper` and wait for its first line, the shell's
-/// pid. Fails with [`ErrorKind::UnexpectedEof`] when the helper ended
-/// without starting the shell (it does not know its arguments, say), and
-/// with [`ErrorKind::TimedOut`] when it did not answer: a helper that
+/// pid, which must name a child of the helper that leads its own group (or
+/// one that is already gone), so a helper cannot make this process signal
+/// anything else. Fails with [`ErrorKind::UnexpectedEof`] when the helper
+/// ended without starting the shell (it does not know its arguments, say),
+/// with [`ErrorKind::TimedOut`] when it did not answer, and with
+/// [`ErrorKind::InvalidData`] when the line is not such a pid: a helper that
 /// might be running the command.
 fn start_helped(
     helper: &ReaperCommand,
@@ -285,7 +283,8 @@ fn start_helped(
     // A helper is stopped by its stdin closing, not killed outright.
     let child = launch(wrapped, cwd, env, Stdio::from(OwnedFd::from(theirs)), false)?;
     link.set_read_timeout(Some(HANDSHAKE))?;
-    match read_pid(&link) {
+    let shell = read_pid(&link).and_then(|pid| led_by(pid, child.id()));
+    match shell {
         Ok(shell) => Ok(Spawned {
             child,
             cleanup: None,
@@ -317,6 +316,31 @@ fn read_pid(mut link: &UnixStream) -> io::Result<u32> {
         .and_then(|text| text.trim().parse::<u32>().ok());
     pid.filter(|&pid| pid > 1)
         .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "the helper sent no pid"))
+}
+
+/// `pid` if it is a child of `parent` and leads its own process group, `None`
+/// if it is gone already (nothing to signal), an error if it is anything
+/// else: some process a helper must not make this one signal.
+fn led_by(pid: u32, parent: Option<u32>) -> io::Result<Option<u32>> {
+    let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    // `pid (comm) state ppid pgrp ...`; the name may hold spaces and `)`.
+    let mut fields = stat
+        .rsplit_once(')')
+        .map(|(_, rest)| rest.split_whitespace());
+    let ppid = fields.as_mut().and_then(|fields| fields.nth(1));
+    let pgrp = fields.as_mut().and_then(Iterator::next);
+    let theirs = |field: Option<&str>| field.and_then(|field| field.parse::<u32>().ok());
+    match (theirs(ppid), theirs(pgrp)) {
+        (Some(ppid), Some(pgrp)) if Some(ppid) == parent && pgrp == pid => Ok(Some(pid)),
+        _ => Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "the helper named a process that is not its shell",
+        )),
+    }
 }
 
 /// Say once per process that commands run without their helper.
@@ -379,9 +403,10 @@ fn launch(
 /// Stop a command that was started and not supervised: its group is
 /// killed, and a helper ends the rest when its socket closes with `spawned`.
 pub(crate) fn abandon(spawned: Spawned) {
-    let leader = (spawned.helper.as_ref())
-        .map(|helper| helper.shell)
-        .or_else(|| spawned.child.id());
+    let leader = match &spawned.helper {
+        Some(helper) => helper.shell,
+        None => spawned.child.id(),
+    };
     Group::of(leader, None).kill();
     drop(spawned);
 }
@@ -425,7 +450,7 @@ async fn supervise_process(
     // The shell's group: the shell leads it under a helper, the child does
     // without. Declared after `child`, so on drop it kills the group before
     // the child handle goes.
-    let shell = (helper.as_ref()).map_or(leader, |helper| Some(helper.shell));
+    let shell = (helper.as_ref()).map_or(leader, |helper| helper.shell);
     let mut group = Group::of(shell, cleanup);
     let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
         unreachable!("both streams are piped");
@@ -580,8 +605,7 @@ mod tests {
         for helper in ["/nonexistent/linch-reaper", "/bin/true", "/bin/false"] {
             let helper = command(helper);
             let command = sh("echo ran");
-            let spawned =
-                start_shell_under(Some(&helper), command, dir.path(), &env, false).unwrap();
+            let spawned = start_shell(Some(&helper), command, dir.path(), &env, false).unwrap();
             assert!(spawned.helper.is_none(), "{helper:?}");
             let output = spawned.child.wait_with_output().await.unwrap();
             assert_eq!(output.stdout, b"ran\n", "{helper:?}");
@@ -601,5 +625,32 @@ mod tests {
             std::io::Write::write_all(&mut theirs, sent.as_bytes()).unwrap();
             assert_eq!(read_pid(&ours).is_ok(), ok, "{sent:?}");
         }
+    }
+
+    /// The pid must be a child of the helper that leads its own group; a
+    /// process that is gone is not signalled; anything else is refused.
+    #[test]
+    fn a_pid_is_trusted_only_for_a_child_that_leads_its_group() {
+        use std::os::unix::process::CommandExt;
+
+        let me = std::process::id();
+        let mut leader = std::process::Command::new("sleep");
+        leader.arg("30").process_group(0);
+        let mut leader = leader.spawn().unwrap();
+        let mut member = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let (leads, member_pid) = (leader.id(), member.id());
+        assert_eq!(led_by(leads, Some(me)).unwrap(), Some(leads));
+        // Not the helper's child, or not leading a group of its own.
+        assert!(led_by(leads, Some(me + 1)).is_err());
+        assert!(led_by(member_pid, Some(me)).is_err());
+        // Some other process of the user's: this one's parent.
+        let parent = std::os::unix::process::parent_id();
+        assert!(led_by(parent, Some(me)).is_err());
+        let _ = (leader.kill(), member.kill());
+        let _ = (leader.wait(), member.wait());
+        assert_eq!(led_by(leads, Some(me)).unwrap(), None);
     }
 }
