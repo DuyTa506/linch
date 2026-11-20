@@ -17,6 +17,11 @@ pub enum BuildError {
     /// The spec or a binding is unusable as given.
     #[error("invalid agent: {0}")]
     Invalid(String),
+    /// The reliability policy cannot run on this agent: a rule names a tool
+    /// the agent lacks, a check does not compile, or the rules contradict
+    /// each other. Its text may echo what a rule says.
+    #[error("invalid agent: {0}")]
+    Policy(String),
     /// The tool definitions could not be encoded for the contract digest.
     #[error("agent contract could not be digested: {0}")]
     Contract(#[from] CanonicalError),

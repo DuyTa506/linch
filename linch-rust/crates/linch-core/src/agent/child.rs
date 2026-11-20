@@ -140,7 +140,7 @@ impl AgentInner {
             .filter(|policy| !policy.prerequisites.is_empty());
         let gates = match &spec.policy {
             Some(policy) => Some(Arc::new(
-                Rules::new(policy.clone()).map_err(BuildError::Invalid)?,
+                Rules::new(policy.clone()).map_err(BuildError::Policy)?,
             )),
             None => None,
         };

@@ -312,6 +312,23 @@ async fn a_required_policy_the_agent_cannot_meet_refuses_the_open() {
     .await;
     assert_eq!(found.as_deref(), Some("policy"));
 
+    // Whatever the problem, the tenant's error is the same sentence: here the
+    // tenant's own prerequisite closes a cycle with the operator's.
+    let remote = Rpc::remote(acme(Allowlists::new().required_policy(Some(operators()))));
+    let cycle = json!({"prerequisites": [{"tool": "lookup", "requires": ["update"]}]});
+    let error = (remote
+        .call(method::AGENT_OPEN, remote_config(vec![], Some(cycle)))
+        .await)
+        .unwrap_err();
+    match &error {
+        linch_rpc::ClientError::Rpc(object) => assert_eq!(
+            object.message,
+            "policy: the policy required for this tenant cannot run on this agent"
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(code_of(error), code::BUILD_INVALID);
+
     // A local connection has no tenant: its error names the tool.
     let local = Rpc::new();
     let mut open = config(

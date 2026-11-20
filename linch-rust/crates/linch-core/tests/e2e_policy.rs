@@ -440,7 +440,7 @@ fn a_forced_tool_choice_cannot_go_with_a_policy_it_defeats() {
         let mut spec = policy;
         spec.tool_choice = Some(choice.clone());
         match build_with(spec) {
-            Err(BuildError::Invalid(reason)) => {
+            Err(BuildError::Policy(reason)) => {
                 assert!(reason.contains("tool_choice"), "{why} {choice:?}: {reason}")
             }
             other => panic!("{why} {choice:?}: {:?}", other.map(|_| ())),
@@ -821,7 +821,7 @@ fn a_policy_that_cannot_run_fails_the_build() {
             stores,
         );
         match builder.build() {
-            Err(BuildError::Invalid(reason)) => reason,
+            Err(BuildError::Policy(reason)) => reason,
             Err(other) => panic!("{other:?}"),
             Ok(_) => String::new(),
         }
@@ -919,7 +919,7 @@ fn the_final_tool_cannot_be_named() {
         )
         .build();
         assert!(
-            matches!(&built, Err(BuildError::Invalid(why)) if why.contains("final tool")),
+            matches!(&built, Err(BuildError::Policy(why)) if why.contains("final tool")),
             "{:?}",
             built.err()
         );

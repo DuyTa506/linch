@@ -505,14 +505,14 @@ impl AgentBuilder {
                 };
                 let named = final_tool.as_ref().map(|tool| tool.name.as_str());
                 if let Some(problem) = policy.problem(offered, named) {
-                    return Err(BuildError::Invalid(problem));
+                    return Err(BuildError::Policy(problem));
                 }
                 let choice = self.spec.tool_choice.as_ref();
                 if let Some(problem) = choice.and_then(|c| policy.choice_problem(c, named)) {
-                    return Err(BuildError::Invalid(problem));
+                    return Err(BuildError::Policy(problem));
                 }
                 Some(Arc::new(
-                    Rules::new(policy.clone()).map_err(BuildError::Invalid)?,
+                    Rules::new(policy.clone()).map_err(BuildError::Policy)?,
                 ))
             }
             None => None,

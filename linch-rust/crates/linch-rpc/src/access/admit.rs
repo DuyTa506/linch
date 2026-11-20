@@ -27,9 +27,10 @@ impl Tenant {
     /// would otherwise tell the tenant.
     pub(crate) fn open_error(&self, error: ErrorObject) -> ErrorObject {
         let unmet = error.code == code::BUILD_INVALID
-            && error.message.contains("policy:")
-            && (error.message.contains("not a tool the agent has")
-                || error.message.contains("verifier \""));
+            && error
+                .data
+                .as_ref()
+                .is_some_and(|data| data["kind"] == "policy");
         match (&self.allow.required_policy, unmet) {
             (Some(_), true) => ErrorObject::new(
                 error.code,

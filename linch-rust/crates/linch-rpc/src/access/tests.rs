@@ -10,6 +10,43 @@ fn tenant(name: &str) -> Arc<Tenant> {
     Arc::new(Tenant::new(name, Allowlists::default()).unwrap())
 }
 
+/// What hides the operator's policy is the kind of the core error, not the
+/// words of its message.
+#[test]
+fn a_policy_error_is_hidden_whatever_its_wording() {
+    use linch::{BuildError, OpenError};
+
+    use crate::error::ErrorObject;
+
+    let required: linch::ReliabilityPolicy = serde_json::from_value(serde_json::json!({
+        "prerequisites": [{"tool": "update", "requires": ["lookup"]}],
+    }))
+    .unwrap();
+    let allow = Allowlists::default().required_policy(Some(required));
+    let acme = Tenant::new("acme", allow).unwrap();
+    let open = |build: BuildError| acme.open_error(ErrorObject::from(&OpenError::Build(build)));
+
+    // A message the old phrases never matched.
+    let reworded = open(BuildError::Policy(
+        "a rule cites \"update\", unknown here".into(),
+    ));
+    assert_eq!(
+        reworded.message,
+        "policy: the policy required for this tenant cannot run on this agent"
+    );
+    assert_eq!(reworded.data, None);
+    // Another kind of invalid agent keeps its message, whatever it says.
+    let other = open(BuildError::Invalid(
+        "policy: x is not a tool the agent has".into(),
+    ));
+    assert!(other.message.contains("not a tool the agent has"));
+    // Without a required policy the tenant reads its own error.
+    let free = Tenant::new("beta", Allowlists::default()).unwrap();
+    let error = OpenError::Build(BuildError::Policy("its own rule is wrong".into()));
+    let shown = free.open_error(ErrorObject::from(&error));
+    assert!(shown.message.contains("its own rule is wrong"));
+}
+
 #[test]
 fn tenant_names_are_plain_and_never_hold_a_slash() {
     for good in ["acme", "a.b_c-9", &"x".repeat(64)] {

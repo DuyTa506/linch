@@ -520,7 +520,7 @@ chối:
   của operator khi tenant không đặt gì, còn không thì là giá trị nhỏ hơn trong hai mức
   trần (tenant đặt `max_corrections` có thể hạ nó, không thể nâng). Một rule nêu một
   tool mà agent không có thì từ chối open (`OpenError`), không bao giờ bị bỏ đi; lỗi
-  gửi cho tenant không nêu tên tool hay lặp lại pattern, vì rule do operator viết (config
+  gửi cho tenant với mọi vấn đề về policy (`BuildError::Policy`, `data.kind` là `policy`) là một câu cố định không nêu tên tool hay lặp lại pattern, vì rule do operator viết (config
   server từ chối một `required_policy` có check không biên dịch được). Các rule chỉ ràng buộc
   thứ tự lời gọi của model: một host tool của client dưới tên bắt buộc, một hook
   `pre_tool_use`, một thay thế của `post_tool_use` hay một cache hit vẫn có thể thỏa
