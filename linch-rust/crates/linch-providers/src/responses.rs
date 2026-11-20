@@ -39,6 +39,7 @@ use tokio_util::sync::CancellationToken;
 use crate::ApiKey;
 use crate::openai::{API_KEY_ENV, DEFAULT_BASE_URL};
 use crate::openai_compat::http;
+use crate::request::ErrorScrub;
 
 mod catalog;
 pub(crate) mod payload;
@@ -232,12 +233,12 @@ impl Provider for OpenAiResponses {
         )
         .await
         .map_err(|err| self.options.request.scrub_error(err))?;
-        Ok(self.options.request.scrub_stream(stream::events(
+        Ok(stream::events(
             response.bytes_stream(),
             stream::Translator::new(request.model),
             cancel,
-            key.clone(),
-        )))
+            ErrorScrub::new(Some(key.clone()), &self.options.request),
+        ))
     }
 }
 
