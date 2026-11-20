@@ -19,9 +19,9 @@
 //!   error result is never a repeat: Linch itself asks the model to repeat
 //!   some refused calls (a deferred tool: "call tool_search ... first"), and
 //!   calls that keep failing are the failure streak's. The result is
-//!   compared without the offload file name of a result that
-//!   `ResultOffload` moved (it holds the call's id), or no offloaded result
-//!   would ever repeat.
+//!   compared without the path of a result that `ResultOffload` moved (it
+//!   holds the call's id and a digest of the text: `vfs::without_offload_path`),
+//!   or no offloaded result would ever repeat.
 //! - **Repeated inputs**: the same call, whatever the result, errors
 //!   included (Python's rule, which has no window and counts 3), `max_identical_inputs` times among the last
 //!   [`INPUT_WINDOW`] tool results. It catches a loop whose result changes
@@ -391,7 +391,7 @@ impl Watch {
         };
         let polling = self.polls.contains(&call.tool);
         let input = digest(&[call.key.as_bytes()]);
-        let content = result_content(call, result);
+        let content = result_content(result);
         let tool = &call.tool;
 
         // The same call and result: not an error's, nor a running poll's.
@@ -510,17 +510,13 @@ impl Watch {
     }
 }
 
-/// The canonical text of `result`'s content, with the file name of an
-/// offloaded result (`{tool}_{tool_use_id}.txt`, unique to the call) taken
+/// The canonical text of `result`'s content, with the path of an offloaded
+/// result (which `ResultOffload` names after the call and its text) taken
 /// out; `None` when it cannot be written.
-fn result_content(call: &Call, result: &crate::message::ToolResultBlock) -> Option<String> {
+fn result_content(result: &crate::message::ToolResultBlock) -> Option<String> {
     let content = serde_json::to_value(&result.content).ok()?;
     let content = to_canonical_string(&content).ok()?;
-    let name = format!("{}_{}.txt", call.tool, result.tool_use_id);
-    Some(match content.contains(&name) {
-        true => content.replace(&name, &format!("{}_.txt", call.tool)),
-        false => content,
-    })
+    Some(crate::vfs::without_offload_path(&content).into_owned())
 }
 
 fn stop(reason: LoopGuardReason, detail: String) -> LoopGuardEvent {

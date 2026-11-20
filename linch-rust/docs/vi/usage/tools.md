@@ -321,8 +321,11 @@ status: final
 - **Tệp đã thay đổi.** Nếu tệp thay đổi sau lần model đọc, `Write` và `Edit` trả lời `Read this file again before writing it.` hoặc `... before editing it.`; `Read` thấy tệp đổi giữa chừng trả lời `File changed while reading; Read this file again.`
 - **`old_string` rỗng.** `Edit` chấp nhận nó, như `Edit` của Python. Nó khớp ở
   mọi vị trí, nên với tệp rỗng thì văn bản mới được chèn vào, với tệp không rỗng
-  thì bị từ chối vì mơ hồ trừ khi đặt `replace_all` (chèn ở mọi vị trí và cần
-  đã đọc toàn bộ tệp), và dòng đầu tiên phải đã được đọc.
+  thì bị từ chối vì mơ hồ, và dòng đầu tiên phải đã được đọc. Với `replace_all`
+  nó bị từ chối với mã `empty_old_string`.
+- **Kích thước của `Edit`.** Một `Edit` mà kết quả vượt 10 MiB (giới hạn của
+  `Read`) bị từ chối với mã `too_large` trước khi kết quả được dựng, và tệp giữ
+  nguyên; điều này giới hạn `replace_all` như `edit_file` đã bị giới hạn.
 - **Giới hạn phạm vi.** Đường dẫn là tương đối so với workspace. `..`, đường dẫn
   tuyệt đối nằm ngoài nó và symlink dẫn ra ngoài đều bị từ chối.
 - **`Bash` mặc định không bị giới hạn phạm vi.** Với backend `local` mặc định, nó
@@ -705,7 +708,12 @@ trước. Mọi thứ còn lại nằm ở [Scheduler](./scheduler.md#để-mode
 văn bản nằm trong kho, không phải trên đĩa: ghi chú nháp, kế hoạch, và cả các kết
 quả tool quá lớn cho cuộc hội thoại. Với `offload_threshold_tokens`, một kết quả
 (chuỗi, giá trị có cấu trúc hoặc lỗi) được ước tính trên số token đó sẽ được ghi vào
-`/offload/<tool>_<tool_use_id>.txt` và model nhận vài dòng đầu cùng đường dẫn:
+`/offload/<session>/<tool>_<tool_use_id>_<digest>.txt` và model nhận vài dòng đầu cùng
+đường dẫn. Digest là 16 chữ số hex của SHA-256 của văn bản được lưu, nên một nhà cung cấp
+lặp lại call id (`call_0` trong mọi response) không bao giờ làm kết quả này ghi đè kết quả
+khác, và cùng một kết quả lần nữa là cùng một tệp. Một id dài, rỗng hoặc chứa ký tự ngoài
+chữ, chữ số, `_`, `-` và `.` được rút thành vài ký tự đọc được đầu tiên, một dấu `~` và
+digest của cả id, để một đoạn đường dẫn luôn ngắn trên mọi backend:
 
 ```python
 import asyncio
@@ -727,7 +735,7 @@ config: AgentConfig = {
         "id": "scripted",
         "turns": [
             tool_turn("c1", "export_logs", {"service": "api"}),
-            tool_turn("c2", "read_file", {"path": "/offload/export_logs_c1.txt", "offset": 1999}),
+            tool_turn("c2", "read_file", {"path": "/offload/s1/export_logs_c1_97b1a5182a18162f.txt", "offset": 1999}),
             text_turn("Read the tail."),
         ],
     },
@@ -749,7 +757,7 @@ asyncio.run(main())
 ```
 
 ```text
-export_logs: 371 chars, ends 'read the rest, or ls("/offload") to list offloaded results.]'
+export_logs: 414 chars, ends 'd the rest, or ls("/offload/s1") to list offloaded results.]'
 read_file: 27 chars, ends 'api line 1999\napi line 2000'
 ```
 
@@ -771,7 +779,7 @@ thứ compaction và context window phải trả giá. Một số tool tự gi�
 | Tool | Giới hạn |
 |---|---|
 | `Bash`, `BashOutput` | 4000 byte đầu và 26000 byte cuối của mỗi luồng |
-| `Grep` | mặc định 250 mục, đầu ra tối đa 30000 byte |
+| `Grep` | mặc định 250 mục, đầu ra tối đa 30000 byte; mẫu biên dịch quá 10 MiB là `invalid_query`; một lời gọi chạy quá 30 s thất bại với `timed_out` (một dòng rất dài không thể bị ngắt nên có thể chạy lâu hơn) |
 | `Glob` | 1000 đường dẫn |
 | Một tool MCP | 30000 byte văn bản kết quả |
 | `memory_recall` | 8 KiB ngữ cảnh được gợi lại mỗi request |

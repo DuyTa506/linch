@@ -19,7 +19,9 @@ use linch_core::{
     Tool, ToolContext, ToolOutput, ToolOutputError, ToolRegistry, ToolResult, ToolResultPart,
     ToolScope,
 };
-use linch_tools::vfs::{MemorySessions, OffloadConfig, ResultOffload, SessionFiles, vfs_tools};
+use linch_tools::vfs::{
+    MemorySessions, OffloadConfig, ResultOffload, SessionFiles, offload_path, vfs_tools,
+};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
@@ -208,6 +210,12 @@ fn tool_end(run: &Run, id: &str) -> linch_core::events::kinds::ToolCallEndEvent 
         .unwrap_or_else(|| panic!("no tool end for {id}"))
 }
 
+/// Where the offload of `rows(6_500)` by call `call_1` of session `s1` goes.
+fn rows_path() -> String {
+    let pretty = serde_json::to_string_pretty(&rows(6_500)).unwrap();
+    offload_path("/offload", "s1", "rows", "call_1", &pretty)
+}
+
 #[tokio::test]
 async fn a_structured_value_is_offloaded_and_paged_back_by_lines() {
     let value = rows(6_500);
@@ -215,7 +223,8 @@ async fn a_structured_value_is_offloaded_and_paged_back_by_lines() {
     assert!(compact.len() > 300_000);
     let pretty = serde_json::to_string_pretty(&value).unwrap();
     let all: Vec<&str> = pretty.split('\n').collect();
-    let path = "/offload/rows_call_1.txt";
+    let path = offload_path("/offload", "s1", "rows", "call_1", &pretty);
+    let path = path.as_str();
     let reads = [
         json!({"path": path, "offset": 1, "limit": 4}),
         json!({"path": path, "offset": 20_001, "limit": 3}),
@@ -258,7 +267,8 @@ async fn a_huge_error_is_offloaded_and_keeps_its_classification() {
     assert!(message.len() > 300_000);
     let mut error = ToolOutputError::new(message.clone());
     error.code = Some("exit_status".into());
-    let path = "/offload/test_run_call_1.txt";
+    let path = offload_path("/offload", "s1", "test_run", "call_1", &message);
+    let path = path.as_str();
     let reads = [json!({"path": path, "offset": 1, "limit": 2})];
     let on = run(Err(error.clone()), &reads, Some(THRESHOLD), "test_run").await;
     let off = run(Err(error), &reads, None, "test_run").await;
@@ -296,7 +306,8 @@ async fn one_huge_line_is_paged_to_its_end_by_byte_offset() {
     let line: String = (0..500_000usize)
         .map(|i| char::from(b'a' + (i % 26) as u8))
         .collect();
-    let path = "/offload/minified_call_1.txt";
+    let path = offload_path("/offload", "s1", "minified", "call_1", &line);
+    let path = path.as_str();
     let pages = line.len().div_ceil(PAGE);
     let reads: Vec<JsonValue> = (0..pages)
         .map(|n| match n {
@@ -426,10 +437,9 @@ impl Trial {
         let files: Arc<dyn SessionFiles> = self.sessions.clone();
         let (tool, runs) = Fixed::new("rows", Ok(ToolOutput::new(rows(6_500))));
         self.tool_runs.lock().unwrap().push(runs);
-        let path = "/offload/rows_call_1.txt";
         let provider = Replay(turns(
             "rows",
-            &[json!({"path": path, "offset": 1, "limit": 2})],
+            &[json!({"path": rows_path(), "offset": 1, "limit": 2})],
         ));
         AgentBuilder::new(AgentSpec::new(MODEL))
             .provider(Arc::new(provider))
@@ -482,7 +492,7 @@ async fn a_crash_at_any_write_keeps_the_pointer_the_result() {
     }
     let want = logged_results(&clean.store).await;
     let pointer = want["call_1"].clone();
-    assert!(pointer.contains("offloaded to '/offload/rows_call_1.txt'"));
+    assert!(pointer.contains(&format!("offloaded to '{}'", rows_path())));
     let pretty = serde_json::to_string_pretty(&rows(6_500)).unwrap();
 
     let mut crashes = 0;
@@ -529,7 +539,7 @@ async fn a_crash_at_any_write_keeps_the_pointer_the_result() {
                 *outcomes.entry(interrupted).or_insert(0) += 1;
                 if !interrupted {
                     let backend = trial.sessions.backend(&SessionId::from("s1"));
-                    let stored = backend.read("/offload/rows_call_1.txt").await;
+                    let stored = backend.read(&rows_path()).await;
                     assert_eq!(
                         stored.unwrap(),
                         pretty,

@@ -192,6 +192,19 @@ pub enum FsError {
     /// A regex, glob or file type in a query is invalid.
     #[error("invalid query: {0}")]
     InvalidQuery(String),
+    /// A search ran past its time limit.
+    #[error(
+        "Search stopped after {limit_secs} s with {files} file(s) searched, at {at}; \
+         narrow the path, the glob or the pattern"
+    )]
+    TimedOut {
+        /// The limit in seconds.
+        limit_secs: u64,
+        /// Files searched in full before the stop.
+        files: usize,
+        /// Workspace path of the file being searched or next in line.
+        at: String,
+    },
     /// The search was cancelled.
     #[error("search cancelled")]
     Cancelled,
