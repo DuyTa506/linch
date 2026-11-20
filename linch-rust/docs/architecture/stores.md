@@ -30,11 +30,11 @@ that finds the root run of a call's tree.
 
 | Method | Contract |
 |---|---|
-| `create(NewRun)` | One write: the run row at status `pending`, epoch 0, with its first checkpoint and events (seqs from 1). `Conflict` when the id exists; `SessionBusy` when the namespace already holds a non-terminal run of that session. The check and the insert are one atomic step (`store.rs:184-191`) |
-| `claim(namespace, run_id, owner)` | Take ownership: epoch + 1, status `running`, a `Lease`. The only way to `running`, including out of `awaiting_*`. Refused on a terminal run, and, on a store with a lease TTL, with `RunLeased` while another holder keeps the run's lease alive (`store.rs:193-205`) |
-| `seize(namespace, run_id, owner)` | `claim`, but also over a live lease of another holder. For `Agent::fail` and a parent taking its child runs back (`store.rs:207-217`) |
-| `lease_ttl()` | How long a claim holds without a renewal; `None` (the default) when claims never expire (`store.rs:219-228`) |
-| `renew(&Lease)` / `release(&Lease)` | Extend the lease by a whole TTL; end it early. Both match the lease's epoch; a renewal after a later claim is `LeaseLost`, and so is one after the release (a release leaves no live lease, and a renewal that lands late must not lease the run again). Default no-ops (`store.rs:230-244`) |
+| `create(NewRun)` | One write: the run row at status `pending`, epoch 0, with its first checkpoint and events (seqs from 1). `Conflict` when the id exists or retention pruned it (a tombstone keeps it, also against a create that overlaps the delete); `SessionBusy` when the namespace already holds a non-terminal run of that session. The check and the insert are one atomic step (`store.rs:196-206`) |
+| `claim(namespace, run_id, owner)` | Take ownership: epoch + 1, status `running`, a `Lease`. The only way to `running`, including out of `awaiting_*`. Refused on a terminal run, and, on a store with a lease TTL, with `RunLeased` while another holder keeps the run's lease alive (`store.rs:193-207`) |
+| `seize(namespace, run_id, owner)` | `claim`, but also over a live lease of another holder. For `Agent::fail` and a parent taking its child runs back (`store.rs:209-219`) |
+| `lease_ttl()` | How long a claim holds without a renewal; `None` (the default) when claims never expire (`store.rs:221-230`) |
+| `renew(&Lease)` / `release(&Lease)` | Extend the lease by a whole TTL; end it early. Both match the lease's epoch; a renewal after a later claim is `LeaseLost`, and so is one after the release (a release leaves no live lease, and a renewal that lands late must not lease the run again). Default no-ops (`store.rs:232-246`) |
 | `load` | The current `RunRecord` |
 | `commit(&Lease, Commit)` | One atomic write of events (seqs continue `last_seq` with no gap), an optional checkpoint and an optional status. Accepted only on a `running` run under the current epoch. A terminal status is final |
 | `events(namespace, run_id, after_seq)` | Committed events after `after_seq`, in order |
@@ -250,7 +250,7 @@ names the refusal in the same order as the memory store (`run.rs:158-174`,
 
 If the read finds nothing wrong, the row moved after the refused write and the
 commit is tried again. After three tries it is `Conflict` ("kept changing
-during a commit") (`run.rs:498-532`). A commit that no row could take (a
+during a commit") (`run.rs:505-539`). A commit that no row could take (a
 status of `pending`, an event of another run, or seqs that do not continue
 each other) skips the statement and goes straight to the read. A session append reads the length
 the same way: `NotFound`, or `Conflict` naming both lengths

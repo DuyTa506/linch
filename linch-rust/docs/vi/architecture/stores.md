@@ -32,11 +32,11 @@ gốc trong cây của một lời gọi.
 
 | Method | Hợp đồng |
 |---|---|
-| `create(NewRun)` | Một lần ghi: hàng run ở trạng thái `pending`, epoch 0, cùng checkpoint đầu tiên và các event của nó (seq bắt đầu từ 1). `Conflict` khi id đã tồn tại; `SessionBusy` khi namespace đã có một run chưa terminal của session đó. Việc kiểm tra và việc chèn là một bước nguyên tử (`store.rs:184-191`) |
-| `claim(namespace, run_id, owner)` | Nhận quyền sở hữu: epoch + 1, trạng thái `running`, một `Lease`. Là cách duy nhất để sang `running`, kể cả từ `awaiting_*`. Bị từ chối với một run đã terminal, và, trên một store có lease TTL, với `RunLeased` khi một holder khác vẫn đang duy trì lease của run (`store.rs:193-205`) |
-| `seize(namespace, run_id, owner)` | `claim`, nhưng cũng qua mặt cả lease còn sống của một holder khác. Dành cho `Agent::fail` và một run cha lấy lại các run con của nó (`store.rs:207-217`) |
-| `lease_ttl()` | Một claim giữ được bao lâu khi không có lần gia hạn; `None` (mặc định) khi claim không bao giờ hết hạn (`store.rs:219-228`) |
-| `renew(&Lease)` / `release(&Lease)` | Gia hạn lease thêm một TTL đầy đủ; kết thúc nó sớm. Cả hai khớp epoch của lease; một lần gia hạn sau một claim muộn hơn là `LeaseLost`, và sau lần release cũng vậy (release không để lại lease nào còn sống, và một lần gia hạn đến muộn không được thuê lại run). Mặc định là no-op (`store.rs:230-244`) |
+| `create(NewRun)` | Một lần ghi: hàng run ở trạng thái `pending`, epoch 0, cùng checkpoint đầu tiên và các event của nó (seq bắt đầu từ 1). `Conflict` khi id đã tồn tại hoặc retention đã xóa nó (một tombstone giữ id, kể cả với một create trùng lúc với việc xóa); `SessionBusy` khi namespace đã có một run chưa terminal của session đó. Việc kiểm tra và việc chèn là một bước nguyên tử (`store.rs:196-206`) |
+| `claim(namespace, run_id, owner)` | Nhận quyền sở hữu: epoch + 1, trạng thái `running`, một `Lease`. Là cách duy nhất để sang `running`, kể cả từ `awaiting_*`. Bị từ chối với một run đã terminal, và, trên một store có lease TTL, với `RunLeased` khi một holder khác vẫn đang duy trì lease của run (`store.rs:193-207`) |
+| `seize(namespace, run_id, owner)` | `claim`, nhưng cũng qua mặt cả lease còn sống của một holder khác. Dành cho `Agent::fail` và một run cha lấy lại các run con của nó (`store.rs:209-219`) |
+| `lease_ttl()` | Một claim giữ được bao lâu khi không có lần gia hạn; `None` (mặc định) khi claim không bao giờ hết hạn (`store.rs:221-230`) |
+| `renew(&Lease)` / `release(&Lease)` | Gia hạn lease thêm một TTL đầy đủ; kết thúc nó sớm. Cả hai khớp epoch của lease; một lần gia hạn sau một claim muộn hơn là `LeaseLost`, và sau lần release cũng vậy (release không để lại lease nào còn sống, và một lần gia hạn đến muộn không được thuê lại run). Mặc định là no-op (`store.rs:232-246`) |
 | `load` | `RunRecord` hiện tại |
 | `commit(&Lease, Commit)` | Một lần ghi nguyên tử gồm các event (seq nối tiếp `last_seq` không có khoảng trống), một checkpoint tùy chọn và một trạng thái tùy chọn. Chỉ được chấp nhận trên một run `running` dưới epoch hiện tại. Một trạng thái terminal là cuối cùng |
 | `events(namespace, run_id, after_seq)` | Các event đã commit sau `after_seq`, theo thứ tự |
@@ -246,7 +246,7 @@ tên cho lần từ chối theo cùng thứ tự với store trong bộ nhớ (`
 
 Nếu lần đọc không thấy gì sai, hàng đã di chuyển sau lần ghi bị từ chối và commit được
 thử lại. Sau ba lần thử thì là `Conflict` ("kept changing during a commit")
-(`run.rs:498-532`). Một commit mà không hàng nào có thể nhận (trạng thái `pending`, một
+(`run.rs:505-539`). Một commit mà không hàng nào có thể nhận (trạng thái `pending`, một
 event của run khác, hoặc các seq không nối tiếp nhau) bỏ qua câu lệnh và đi thẳng tới lần
 đọc. Một lần append của session đọc độ dài theo cách tương tự: `NotFound`, hoặc `Conflict`
 nêu cả hai độ dài (`session.rs:146-168`).

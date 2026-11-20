@@ -18,19 +18,19 @@ leads its own process group.
 
 ## Configuration
 
-`McpServerConfig` (`crates/linch-mcp/src/config.rs:169`):
+`McpServerConfig` (`crates/linch-mcp/src/config.rs:179`):
 
 | Field | Default (`new`) | Meaning |
 |---|---|---|
-| `name` | required | The `<server>` in `mcp__<server>__<tool>`. ASCII letters, digits, `-` and single `_` between them, so the tool name splits cleanly (`config.rs:215`) |
+| `name` | required | The `<server>` in `mcp__<server>__<tool>`. ASCII letters, digits, `-` and single `_` between them, so the tool name splits cleanly (`config.rs:225`) |
 | `transport` | required | `Stdio { command, args, env }`, `Http { url, headers }` or `Custom(Arc<dyn Connector>)` |
 | `trust_annotations` | `false` | Whether a `readOnlyHint` tool gets the `read` scope |
 | `call_timeout` | 300 s | Longest wait for one tool call before it is cancelled |
-| `reconnect` | `ReconnectPolicy::default()` | 5 attempts, 0.5 s doubling to 30 s, 30 s per attempt (`config.rs:155-165`) |
+| `reconnect` | `ReconnectPolicy::default()` | 5 attempts, 0.5 s doubling to 30 s, 30 s per attempt (`config.rs:165-175`) |
 
-`validate()` (`config.rs:198`) refuses a bad name and a zero call or attempt
+`validate()` (`config.rs:208`) refuses a bad name and a zero call or attempt
 timeout; headers are checked when the transport is built. `Custom` takes a
-`Connector` (`crates/linch-mcp/src/connector.rs:119`) for in-process servers
+`Connector` (`crates/linch-mcp/src/connector.rs:140`) for in-process servers
 and tests: it opens a transport and runs `Handler::serve` over it.
 
 The HTTP transport uses a `reqwest` client of the crate's own
@@ -64,7 +64,7 @@ On connect, and on every relist, each listed tool becomes one registration
   default permission mode and never runs in parallel.
 - **Schema.** The server's `inputSchema`; a missing `type` or `properties`
   defaults to an empty object schema.
-- **Result** (`crates/linch-mcp/src/result.rs:38`). Text blocks join with
+- **Result** (`crates/linch-mcp/src/result.rs:44`). Text blocks join with
   newlines into the output value. Images go to `metadata.images` (at most 8, and
   4 MiB of base64 data and MIME types in all, a MIME type of at most 255
   bytes; an image over a limit is left out and the text says which:
@@ -100,10 +100,10 @@ bytes keeps the code.
 
 ## Lifecycle
 
-`McpServer::connect(config, registry)` (`crates/linch-mcp/src/server.rs:97`)
+`McpServer::connect(config, registry)` (`crates/linch-mcp/src/server.rs:99`)
 validates the config, makes one attempt (connect, subscribe, list) within
 `attempt_timeout`, routes calls to the new connection, then registers the
-tools, so a tool is never visible before it can be called (`server.rs:355`).
+tools, so a tool is never visible before it can be called (`server.rs:361`).
 A failed first attempt is `McpError::Connect` and registers nothing; it is
 not retried. Its `ConnectError` is one of `Spawn`, `Handshake`, `Listen`,
 `ListTools`, `ListTooLarge` (the first tool of the listing is over 4 MiB),
@@ -111,7 +111,7 @@ not retried. Its `ConnectError` is one of `Spawn`, `Handshake`, `Listen`,
 variants, `ListTooLarge` and `HttpClient`, are new, so an exhaustive `match`
 on `ConnectError` needs two more arms.
 
-`ServerStatus` (`server.rs:42`): `Connected`, `Reconnecting`, `Unavailable`
+`ServerStatus` (`server.rs:44`): `Connected`, `Reconnecting`, `Unavailable`
 (every reconnect attempt failed; the tools stay registered and fail with
 `mcp_unavailable`) and `Closed`. `status()` reads it; `watch_status()`
 returns a `watch::Receiver`.
@@ -119,10 +119,10 @@ returns a `watch::Receiver`.
 ### Relist
 
 The supervisor lists the tools again on `notifications/tools/list_changed`
-and after every reconnect (`server.rs:234-271`). From protocol 2026-07-28 that
+and after every reconnect (`server.rs:236-273`). From protocol 2026-07-28 that
 notification arrives only on a `subscriptions/listen` stream, which the
 client opens before it lists, so no change is missed in between
-(`crates/linch-mcp/src/listener.rs:65`, `server.rs:382`); older servers send
+(`crates/linch-mcp/src/listener.rs:65`, `server.rs:388`); older servers send
 it unprompted to the `Handler`. A subscription the server ends normally is
 renewed after 1 s.
 
@@ -157,7 +157,7 @@ A connection counts as lost when the transport closes, or for a stdio server
 when a write fails, since its stdin is gone (`tool.rs:94-100`). The status
 becomes `Reconnecting`, calls fail with `mcp_unavailable`, and the supervisor
 retries per `ReconnectPolicy`: attempt `n` waits
-`min(max_delay, initial_delay * 2^n)` (`config.rs:147`). Each attempt
+`min(max_delay, initial_delay * 2^n)` (`config.rs:157`). Each attempt
 reconnects, resubscribes and relists. After the last failure the status is
 `Unavailable` until the server is disconnected. `attempts: 0` never
 reconnects.
@@ -175,20 +175,20 @@ rmcp's, because rmcp's waits for the cancel's send (`tool.rs:228-229`).
 
 ### Close
 
-`disconnect()` (`server.rs:169`) disposes every registration at once, then
+`disconnect()` (`server.rs:171`) disposes every registration at once, then
 waits for the transport to close. Dropping the handle without it disposes the
 registrations at once and closes the server in the background
-(`server.rs:184-188`). A sync that races a close registers nothing: it checks
-the close token under the catalog lock (`server.rs:370-375`).
+(`server.rs:186-190`). A sync that races a close registers nothing: it checks
+the close token under the catalog lock (`server.rs:376-381`).
 
 For a stdio server:
 
 - **Process group.** The server leads its own group, so what it starts
-  (`npx`, `uvx`, `sh -c`) goes with it (`connector.rs:163-166`).
+  (`npx`, `uvx`, `sh -c`) goes with it (`connector.rs:184-187`).
 - **Group kill.** rmcp signals the group only when the server outlives its
   grace period. `KillGroup` sends `SIGKILL` to the whole group as soon as the
   server has exited, so a server that exits on stdin EOF leaves no children
-  (`connector.rs:199-241`).
+  (`connector.rs:220-262`).
 - **Lifeline.** A small `/bin/sh` watchdog per server reads its own stdin, a
   pipe whose write end only the client holds, and kills the server's group
   when it reaches end of file. The kernel closes that pipe when the client
@@ -200,7 +200,7 @@ For a stdio server:
   stdin closes, 3 s more after `SIGTERM`). When the server has stopped
   reading and a write has filled its stdin, that close would wait forever;
   `BoundedClose` gives up after 10 s and dropping the transport sends
-  `SIGKILL` to the group (`connector.rs:31-34`, `connector.rs:172-197`).
+  `SIGKILL` to the group (`connector.rs:39-42`, `connector.rs:193-218`).
 
 ## Limits
 
@@ -209,26 +209,26 @@ What one server can make the client hold or wait for
 
 | Limit | Value | Where |
 |---|---|---|
-| `tools/list` pages per listing | 100 | `server.rs:22` |
-| Tools kept from one listing | 1000; the rest are left out, with a `tracing` warning | `server.rs:25` |
+| `tools/list` pages per listing | 100 | `server.rs:23` |
+| Tools kept from one listing | 1000; the rest are left out, with a `tracing` warning | `server.rs:26` |
 | Bytes kept from one listing (each tool as the server sent it, as JSON) | 4 MiB; the tools before the bound are kept in order and the rest are left out, with a `tracing` warning; a first tool alone over it fails the connect with `ConnectError::ListTooLarge`, and a relist then keeps the current tools | `server.rs` (`MAX_LIST_BYTES`) |
 | Time between two `list_changed` relists | 1 s, notifications in between share one relist | `server.rs` (`MIN_RELIST_INTERVAL`) |
-| One connect, resubscribe or relist attempt | `attempt_timeout` (30 s) | `server.rs:257`, `server.rs:323` |
+| One connect, resubscribe or relist attempt | `attempt_timeout` (30 s) | `server.rs:259`, `server.rs:329` |
 | One tool call | `call_timeout` (300 s) | `tool.rs:264` |
 | Cancels waiting on one connection | 64; later ones are dropped | `tool.rs:29` |
 | Result text, and the text of a tool error (a JSON-RPC error's message included) | 30 000 bytes, cut on a character boundary | `result.rs:10`, `tool.rs` (`coded`) |
 | Images kept from one result | 8, and 4 MiB of base64 data and MIME types in all; a MIME type of at most 255 bytes; an image over a limit is left out, with a note naming the limit | `result.rs` (`MAX_IMAGES`, `MAX_IMAGE_BYTES`) |
 | Tool argument summary | 80 characters | `tool.rs:23` |
-| Stdio close | 10 s, then `SIGKILL` | `connector.rs:34` |
+| Stdio close | 10 s, then `SIGKILL` | `connector.rs:42` |
 
 ## Redaction
 
 - **Environment.** A stdio server inherits only `HOME`, `LOGNAME`, `PATH`,
   `SHELL`, `TERM` and `USER` from the host, the same list the MCP Python SDK
   uses; everything else comes from the config's `env`
-  (`connector.rs:27-29`, `connector.rs:155-162`).
+  (`connector.rs:35-37`, `connector.rs:176-183`).
 - **Debug output.** `McpTransport`'s `Debug` prints environment and header
-  names, never their values (`config.rs:87-125`), and shows an HTTP URL with
+  names, never their values (`config.rs:89-135`), and shows an HTTP URL with
   its user name, password and query replaced by `redacted` and its fragment
   dropped (a string that is not a URL, or has no host, such as
   `user:token@host:8443/mcp`, which parses as scheme `user`, is shown as

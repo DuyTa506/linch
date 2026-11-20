@@ -433,7 +433,7 @@ behavior by accident.
 | llama.cpp (`servers/llamacpp.rs:31`) | `delta.reasoning_content` | yes | no (fails locally) | `max_tokens` | `enable_thinking: false` |
 
 A server is chosen with `ServerOptions::new(Server::Vllm, base_url)`
-(`crates/linch-providers/src/servers.rs:80`), which fills the
+(`crates/linch-providers/src/servers.rs:83`), which fills the
 `chat_template_kwargs` that server's docs give for turning thinking off. When
 a request asks for `Thinking::Disabled`, those kwargs are sent and effort is
 left out (`profile.rs:144-154`). The profile's `reasoning_effort` writes the

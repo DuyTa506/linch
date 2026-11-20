@@ -427,7 +427,7 @@ mỗi đích nêu mọi quy tắc, nên một server không bao giờ vô tình 
 | llama.cpp (`servers/llamacpp.rs:31`) | `delta.reasoning_content` | có | không (thất bại tại chỗ) | `max_tokens` | `enable_thinking: false` |
 
 Một server được chọn bằng `ServerOptions::new(Server::Vllm, base_url)`
-(`crates/linch-providers/src/servers.rs:80`), thứ điền
+(`crates/linch-providers/src/servers.rs:83`), thứ điền
 `chat_template_kwargs` mà tài liệu của server đó nêu để tắt thinking. Khi
 một request yêu cầu `Thinking::Disabled`, các kwargs đó được gửi và effort bị
 bỏ ra (`profile.rs:144-154`). `reasoning_effort` của profile quyết định cách
