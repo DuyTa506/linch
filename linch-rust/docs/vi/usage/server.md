@@ -612,7 +612,11 @@ lại giữ các run của nó cho đến khi đóng.
 
 **Sau một lần dừng, output đã xếp hàng được ghi trong tối đa 15 giây; một client không nhận kịp
 trong thời gian đó bị cắt, dù nó đọc chậm đến đâu.** Một lần dừng là SIGTERM hoặc SIGINT, hoặc
-input của kết nối đã hết. Từ đó kết nối có một khoảng ân hạn 15 s (`SHUTDOWN_GRACE`, một hằng
+input của kết nối đã hết khi kết nối đọc đến chỗ đó. Kết nối ngừng đọc input khi có 1024 câu trả
+lời nằm trong hàng đợi chưa được đọc (hàng đợi đầy, vòng đọc chờ chỗ trống), nên một client đã
+kết thúc input mà vẫn không đọc gì thì không bắt đầu khoảng ân hạn theo cách đó; chỉ SIGTERM
+hoặc SIGINT làm được, hoặc client nhận câu trả lời trở lại, sau đó kết nối đọc được chỗ hết
+input. Từ một lần dừng, kết nối có một khoảng ân hạn 15 s (`SHUTDOWN_GRACE`, một hằng
 số của `linch-rpc`, không phải setting) để hoàn tất các lời gọi đang chạy và ghi những gì đã xếp
 hàng. Hết khoảng đó, các lời gọi còn chạy bị bỏ, hàng đợi bị bỏ, writer bị abort và kết nối
 đóng, nên chỗ tenant của nó và việc tắt server không còn chờ client đó. Mọi lần chờ của việc tắt

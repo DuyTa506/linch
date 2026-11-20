@@ -245,7 +245,8 @@ request từ server; và tenant của nó, là `None` đối với client cục 
    resume được), làm các request đang chờ của server thất bại, rồi đóng các MCP server
    của mọi agent. Writer xả hết hàng đợi và kết nối trả về.
    Toàn bộ việc tắt có một hạn chót, `SHUTDOWN_GRACE` (15 s; `connection.rs`), tính từ lúc dừng
-   hoặc hết input (một task khởi động cùng kết nối chờ token shutdown của server rồi ngủ). Các lời
+   hoặc từ khi vòng đọc đọc được chỗ hết input (nó không đọc khi đang chờ chỗ trống trong hàng đợi
+   đầy 1024, nên khi đó chỉ một lệnh dừng mới bắt đầu tính; một task khởi động cùng kết nối chờ token shutdown của server rồi ngủ). Các lời
    gọi chạy dưới hạn đó (`server.rs`, `receive`), vòng đọc chạy đua với lệnh dừng khi nó trao một
    lời từ chối cho hàng đợi đầy, và writer được chờ đến hạn đó. Tới hạn, các lời gọi đang chạy bị
    bỏ, writer bị abort và hàng đợi cùng transport của nó bị bỏ: một client không nhận hết hàng

@@ -245,9 +245,10 @@ requests; and its tenant, `None` for a local client.
    resumable), fails the waiting server requests, then closes every agent's
    MCP servers. The writer drains the queue and the connection returns.
    The whole teardown has one deadline, `SHUTDOWN_GRACE` (15 s;
-   `connection.rs`), counted from the stop or the end of input (a task
-   started with the connection waits on the server's shutdown token and then
-   sleeps). Calls run under it (`server.rs`, `receive`), the read loop races
+   `connection.rs`), counted from the stop or from the end of input once the
+   read loop reads it (it does not read while it waits for room in a full
+   queue of 1024, so then only a stop starts the count; a task started with
+   the connection waits on the server's shutdown token and then sleeps). Calls run under it (`server.rs`, `receive`), the read loop races
    the stop while it hands a refusal to a full queue, and the writer is
    awaited until it. At the deadline the calls in flight are dropped, the
    writer is aborted and its queue and transport dropped: a client that

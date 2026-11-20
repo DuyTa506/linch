@@ -639,7 +639,12 @@ a local client that never reads again holds its runs until it closes.
 
 **After a stop, queued output is written for up to 15 seconds; a client that
 cannot take it in that time is cut, however slowly it reads.** A stop is
-SIGTERM or SIGINT, or the end of the connection's input. From then the
+SIGTERM or SIGINT, or the end of the connection's input once the connection
+reads it. The connection stops reading its input while 1024 answers are
+queued and unread (a full queue, its read loop waiting for room), so a client
+that ended its input and still reads nothing starts no grace by that; only
+SIGTERM or SIGINT does, or the client taking answers again, after which the
+connection reads the end of the input. From a stop the
 connection has one grace of 15 s (`SHUTDOWN_GRACE`, a constant of
 `linch-rpc`, not a setting) to finish the calls in flight and write what is
 queued. At its end the calls still running are dropped, the queue is

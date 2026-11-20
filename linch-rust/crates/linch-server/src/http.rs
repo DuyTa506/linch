@@ -290,7 +290,7 @@ async fn serve_socket(socket: WebSocket, access: Access, stop: CancellationToken
         _ = serving => {}
         () = pinging => {}
         // When the client closes, the input ends and the connection finishes
-        // its calls; it is not cut short.
+        // its calls within the shutdown grace.
         () = async { reading.await; std::future::pending::<()>().await } => {}
     }
     // Say goodbye if the peer is still there to hear it, inside the same
