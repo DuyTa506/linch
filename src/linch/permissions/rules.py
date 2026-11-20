@@ -309,7 +309,8 @@ def evaluate_bash_rules(
     all_allowed = True
     saw_ask = False
     for segment in segments:
-        decision = _first_matching_bash_decision(rules, segment)
+        matched = _first_matching_bash_rule(rules, segment)
+        decision = matched.decision if matched is not None else None
         # A prefix (`X=1 rm`, `if x; then rm`) or a quoted spelling (`\rm`, `r""m`)
         # hides the command from the segment's own text, so deny and ask rules also
         # see it stripped and unquoted. An allow never comes from those forms.
@@ -323,8 +324,13 @@ def evaluate_bash_rules(
             return "deny"
         if decision == "ask" or "ask" in hidden:
             saw_ask = True
-        elif decision != "allow" or redirects_to_file(segment):
-            # An allow covers a command, not what it writes to a file.
+        elif (
+            matched is None
+            or decision != "allow"
+            # An allow covers a command, not what it writes to a file, unless the
+            # rule allows every command.
+            or (not _is_allow_all(matched) and redirects_to_file(segment))
+        ):
             all_allowed = False
     if saw_ask:
         return "ask"
@@ -405,15 +411,23 @@ def _match_unparsed_bash_rule(rule: BashRule, command: str) -> bool:
     return match_bash_rule(rule, command)
 
 
+def _first_matching_bash_rule(rules: list[BashRule], command_segment: str) -> BashRule | None:
+    for rule in rules:
+        if rule.decision != "passthrough" and match_bash_rule(rule, command_segment):
+            return rule
+    return None
+
+
 def _first_matching_bash_decision(
     rules: list[BashRule], command_segment: str
 ) -> RuleDecision | None:
-    for rule in rules:
-        if match_bash_rule(rule, command_segment):
-            if rule.decision == "passthrough":
-                continue
-            return rule.decision
-    return None
+    rule = _first_matching_bash_rule(rules, command_segment)
+    return rule.decision if rule is not None else None
+
+
+def _is_allow_all(rule: BashRule) -> bool:
+    patterns = rule.pattern if isinstance(rule.pattern, list) else [rule.pattern]
+    return rule.decision == "allow" and "*" in patterns
 
 
 def _validate_decision(decision: str) -> RuleDecision:

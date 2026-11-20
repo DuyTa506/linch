@@ -705,8 +705,10 @@ Cách Bash rule đọc một lệnh:
   (`echo x > file`, `>>`, `2>file`, `>|`, `<>`, có hoặc không có số
   descriptor): lệnh đó bị hỏi (hoặc rơi về mặc định của mode khi không rule nào
   quyết định). Nhân đôi descriptor (`2>&1`, `>&2`, `>&-`, `<&3`) và đúng
-  `/dev/null`, `/dev/stdout`, `/dev/stderr` không phải là tệp. Rule deny và ask
-  không đổi.
+  `/dev/null`, `/dev/stdout`, `/dev/stderr` không phải là tệp. Rule allow-all
+  (đúng pattern `*`) được miễn: nó vốn đã cho phép mọi lệnh nên
+  `BashRule("*", "allow")` bao phủ `cmd > file`. Rule deny và ask không đổi, và
+  cú pháp chưa phân tích được không bao giờ được cho phép, kể cả bởi allow-all.
 - Rule deny hoặc ask khớp từng đoạn lệnh như được viết, và khớp lại sau khi từ
   lệnh được bỏ dấu nháy (`\rm`, `r""m`) và các từ đứng trước lệnh bị loại bỏ:
   phép gán `NAME=value`, chuyển hướng (`>f`, `2>&1`), các từ dành riêng `if`,

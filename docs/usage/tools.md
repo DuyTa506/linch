@@ -707,8 +707,10 @@ How Bash rules read a command:
   (`echo x > file`, `>>`, `2>file`, `>|`, `<>`, with or without a descriptor
   number): the command asks (or falls to the mode default when no rule
   decides it). Descriptor duplication (`2>&1`, `>&2`, `>&-`, `<&3`) and exactly
-  `/dev/null`, `/dev/stdout` and `/dev/stderr` are not files. Deny and ask rules
-  are unchanged.
+  `/dev/null`, `/dev/stdout` and `/dev/stderr` are not files. The allow-all
+  rule (the bare pattern `*`) is exempt: it already allows every command, so
+  `BashRule("*", "allow")` covers `cmd > file`. Deny and ask rules are
+  unchanged, and unparsed syntax is never allowed, allow-all included.
 - A deny or ask rule matches each segment as written, and again after its
   command word is unquoted (`\rm`, `r""m`) and the words in front of the
   command are removed: `NAME=value` assignments, redirections (`>f`, `2>&1`),

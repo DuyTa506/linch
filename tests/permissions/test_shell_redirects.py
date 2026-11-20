@@ -74,16 +74,82 @@ def test_an_allow_rule_covers_descriptor_duplication_and_the_standard_devices(
     assert _allow_echo(command) == "allow"
 
 
-def test_an_allow_all_rule_does_not_cover_a_file_redirect_and_ask_and_deny_are_unchanged() -> None:
-    allow_all: list[PermissionRule] = [BashRule("*", "allow")]
-    assert _bash(allow_all, "pytest -q > test.log") == "ask"
-    assert _bash(allow_all, "pytest -q >/dev/null 2>&1") == "allow"
-    assert _bash(allow_all, "pytest -q > test.log", "skip-dangerous") == "allow"
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pytest -q > test.log",
+        "echo x >> f",
+        "make 2> err.log",
+        "cat <> f",
+        "pytest -q >/dev/null 2>&1",
+    ],
+)
+def test_an_allow_all_rule_covers_a_file_redirect(command: str) -> None:
+    assert _bash([BashRule("*", "allow")], command) == "allow"
+    assert _bash([BashRule(patterns=["*"], decision="allow")], command) == "allow"
+
+
+def test_a_narrower_allow_rule_still_does_not_cover_a_file_redirect() -> None:
+    assert _bash([BashRule("git *", "allow")], "git status > f") == "ask"
+    assert _bash([BashRule("*", "allow")], "echo x > f") == "allow"
+    assert _bash([BashRule("echo", "allow")], "echo x > f") == "ask"
+    assert _bash([BashRule("* *", "allow")], "echo x > f") == "ask"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo hi &>redir touch M",
+        "echo \\>& touch M",
+        "echo hi #'\ntouch M\n#'",
+        "echo \"${x#'\"'}\" ; touch M ; echo \\'",
+        "echo hi >| out",
+        "echo hi |& cat",
+        "cat <<EOF",
+        "$a -rf x",
+    ],
+)
+def test_an_allow_all_rule_still_never_covers_unparsed_syntax(command: str) -> None:
+    assert _bash([BashRule("*", "allow")], command) == "ask"
+
+
+def test_deny_and_ask_rules_are_unchanged_by_a_file_redirect() -> None:
     rules: list[PermissionRule] = [BashRule("rm *", "deny"), BashRule("git push *", "ask")]
     assert _bash(rules, "rm -rf x > /dev/null", "skip-dangerous") == "deny"
     assert _bash(rules, "rm -rf x > f", "skip-dangerous") == "deny"
     assert _bash(rules, "git push > log", "skip-dangerous") == "ask"
     assert _bash(rules, "git status > log", "skip-dangerous") == "allow"
+
+
+def test_allow_all_after_a_deny_or_ask_rule_keeps_both_with_a_file_redirect() -> None:
+    deny: list[PermissionRule] = [BashRule("rm *", "deny"), BashRule("*", "allow")]
+    assert _bash(deny, "rm x > f") == "deny"
+    assert _bash(deny, "echo x > f") == "allow"
+    ask: list[PermissionRule] = [BashRule("git push *", "ask"), BashRule("*", "allow")]
+    assert _bash(ask, "git push origin > log") == "ask"
+    assert _bash(ask, "git status > log") == "allow"
+
+
+def test_a_deny_or_ask_rule_after_allow_all_is_shadowed_by_first_match_with_a_file_redirect() -> (
+    None
+):
+    # The first matching rule decides a segment, so `*` first allows it, with or
+    # without a redirect; the rules after it are never reached.
+    deny: list[PermissionRule] = [BashRule("*", "allow"), BashRule("rm *", "deny")]
+    assert _bash(deny, "rm x > f") == "allow"
+    assert _bash(deny, "rm x") == "allow"
+    ask: list[PermissionRule] = [BashRule("*", "allow"), BashRule("git push *", "ask")]
+    assert _bash(ask, "git push > log") == "allow"
+    assert _bash(ask, "git push") == "allow"
+
+
+def test_a_narrow_allow_rule_before_allow_all_falls_through_to_it_with_a_file_redirect() -> None:
+    # Python re-evaluates the pool from each later bash rule: the narrow rule
+    # does not cover the redirect, then `*` does. The Rust kernel pools once per
+    # layer and would not allow here.
+    rules: list[PermissionRule] = [BashRule("echo", "allow"), BashRule("*", "allow")]
+    assert _bash(rules, "echo x > f") == "allow"
+    assert _bash([BashRule("*", "allow"), BashRule("echo", "allow")], "echo x > f") == "allow"
 
 
 def test_the_stricter_of_two_pooled_bash_rules_decides_a_file_redirect() -> None:

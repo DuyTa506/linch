@@ -135,6 +135,8 @@ def _bash_call(command: str) -> PendingToolCall:
 
 _SUPPORTED_SHELL_COMMANDS = [
     "pytest -q 2>&1",
+    "pytest -q > test.log",
+    "pytest -q >> test.log",
     "cat < input.txt",
     "git status | cat",
     "git diff | less",
@@ -147,6 +149,10 @@ _SUPPORTED_SHELL_COMMANDS = [
     "grep -R TODO src | wc -l",
     "docker compose ps",
     "cargo test --all-features 2>&1",
+    "make test > make.log",
+    "python script.py < input.txt > output.txt",
+    "echo ready > status.txt",
+    "sort < names.txt > sorted.txt",
     "sed -n '1,10p' README.md | cat",
     "go test ./... | tee go.log",
     "cat input.txt 2>&1 | grep error",

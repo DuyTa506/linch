@@ -21,7 +21,9 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
 - A Bash allow rule no longer covers a command segment that redirects output to a file (`>`, `>>`,
   `>|`, `<>`, with or without a descriptor number): the call asks, or falls to the mode default
   when no rule decides it. Descriptor duplication (`2>&1`, `>&2`, `>&-`, `<&3`) and exactly
-  `/dev/null`, `/dev/stdout` and `/dev/stderr` are not files. Deny and ask rules are unchanged.
+  `/dev/null`, `/dev/stdout` and `/dev/stderr` are not files. The allow-all rule (the bare
+  pattern `*`) is exempt, since it already allows every command; unparsed syntax is never
+  allowed, allow-all included. Deny and ask rules are unchanged.
 - Bash deny and ask rules see through the words in front of a command: leading assignments and
   redirections, `if then else elif do while until ! {`, and `time exec command builtin env` (quoted
   or not) with their options and option arguments (`command -v`/`-V` is kept whole). The command
