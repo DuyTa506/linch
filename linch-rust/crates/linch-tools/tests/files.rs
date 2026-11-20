@@ -233,16 +233,46 @@ async fn edit_with_an_empty_old_string_follows_python() {
         .unwrap();
     let ambiguous = json!({"file_path": "new.txt", "old_string": "", "new_string": "x"});
     assert_eq!(code(call(&t.edit, ambiguous).await), "ambiguous_match");
-    // replace_all inserts at every position and needs the whole file read.
+}
+
+#[tokio::test]
+async fn edit_refuses_an_empty_old_string_with_replace_all() {
+    let t = tools();
     t.ws.put("ab.txt", "ab");
+    call(&t.read, json!({"file_path": "ab.txt"})).await.unwrap();
     let all =
         json!({"file_path": "ab.txt", "old_string": "", "new_string": "-", "replace_all": true});
-    call(&t.read, json!({"file_path": "ab.txt"})).await.unwrap();
-    assert_eq!(
-        text(call(&t.edit, all).await),
-        "Edited ab.txt (3 replacements)"
-    );
-    assert_eq!(t.ws.get("ab.txt"), "-a-b-");
+    assert_eq!(code(call(&t.edit, all).await), "empty_old_string");
+    assert_eq!(t.ws.get("ab.txt"), "ab");
+}
+
+#[tokio::test]
+async fn edit_replace_all_cannot_grow_a_file_past_the_read_limit() {
+    let t = tools();
+    let content = "a".repeat(4096);
+    t.ws.put("a.txt", &content);
+    call(&t.read, json!({"file_path": "a.txt"})).await.unwrap();
+    let grow = json!({
+        "file_path": "a.txt",
+        "old_string": "a",
+        "new_string": "b".repeat(4096),
+        "replace_all": true,
+    });
+    let error = call(&t.edit, grow)
+        .await
+        .expect_err("the result is too large");
+    assert_eq!(error.code.as_deref(), Some("too_large"));
+    assert!(error.message.contains("10485760"), "{}", error.message);
+    assert!(!error.message.contains("aaaa"), "the content is not echoed");
+    assert_eq!(t.ws.get("a.txt"), content, "the file is untouched");
+    // A result of gigabytes is refused before it is built.
+    let huge = json!({
+        "file_path": "a.txt",
+        "old_string": "a",
+        "new_string": "b".repeat(1 << 20),
+        "replace_all": true,
+    });
+    assert_eq!(code(call(&t.edit, huge).await), "too_large");
 }
 
 #[tokio::test]
