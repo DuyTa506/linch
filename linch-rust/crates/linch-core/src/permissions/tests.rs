@@ -84,8 +84,10 @@ fn bash_rule(pattern: &str, decision: RuleDecision) -> Rule {
 const SUPPORTED: &[&str] = &[
     "pytest -q 2>&1",
     "cat < input.txt",
+    "pytest -q > test.log",
+    "pytest -q >> test.log",
+    "python script.py < input.txt > output.txt",
     "pytest -q > /dev/null 2>&1",
-    "python script.py < input.txt 2> /dev/null",
     "git status | cat",
     "ruff check . | tee ruff.log",
     "npm test 2>&1 | tee npm.log",
@@ -96,7 +98,7 @@ const SUPPORTED: &[&str] = &[
     "echo hi >&2",
     "cat <&3",
     "build 2>&1 && deploy",
-    "build >/dev/null 2>&1 | tee run.log",
+    "build >out.log 2>&1 | tee run.log",
     "tail -f app.log 2>/dev/null",
     "printf '&'",
     "printf '$(literal)'",
@@ -689,10 +691,48 @@ fn an_allow_rule_covers_descriptor_duplication_and_the_standard_devices() {
 }
 
 #[test]
-fn an_allow_all_rule_does_not_cover_a_file_redirect_and_ask_and_deny_rules_are_unchanged() {
+fn an_allow_all_rule_covers_a_file_redirect_but_a_narrow_rule_does_not() {
     let allow_all = flat(PermissionMode::Default, vec![bash_rule("*", Allow)]);
-    assert_eq!(bash(&allow_all, "pytest -q > test.log"), "ask");
-    assert_eq!(bash(&allow_all, "pytest -q >/dev/null 2>&1"), "allow");
+    for command in [
+        "pytest -q > test.log",
+        "echo x >> f",
+        "build 2>err.log | tee out.log > all.log",
+        "pytest -q >/dev/null 2>&1",
+    ] {
+        assert_eq!(bash(&allow_all, command), "allow", "{command:?}");
+    }
+    for rule in ["echo", "echo *", "git *", "* x", "**x"] {
+        let narrow = flat(PermissionMode::Default, vec![bash_rule(rule, Allow)]);
+        for command in ["echo x > f", "git log >> f"] {
+            assert_ne!(bash(&narrow, command), "allow", "{rule:?} {command:?}");
+        }
+    }
+    // The first rule that matches a segment decides.
+    let narrow_first = flat(
+        PermissionMode::Default,
+        vec![bash_rule("echo", Allow), bash_rule("*", Allow)],
+    );
+    assert_eq!(bash(&narrow_first, "echo x > f"), "ask");
+    assert_eq!(bash(&narrow_first, "ls > f"), "allow");
+}
+
+#[test]
+fn an_allow_all_rule_still_never_covers_unparsed_syntax() {
+    let allow_all = flat(PermissionMode::Default, vec![bash_rule("*", Allow)]);
+    for command in [
+        "echo hi &>f touch M",
+        "echo hi &>f",
+        "echo hi >| f",
+        "echo \\>& touch M",
+        "echo hi #'\ntouch M\n#'",
+        "echo \"${x#'\"'}\" ; touch M ; echo \\'",
+    ] {
+        assert_eq!(bash(&allow_all, command), "ask", "{command:?}");
+    }
+}
+
+#[test]
+fn ask_and_deny_rules_are_unchanged_by_a_file_redirect() {
     let skip = flat(PermissionMode::SkipDangerous, vec![bash_rule("*", Allow)]);
     assert_eq!(bash(&skip, "pytest -q > test.log"), "allow");
     let rules = flat(

@@ -6,6 +6,7 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ## Unreleased
 
+- The bash file-redirect rule applies to narrow allow rules only: the allow-all rule `*` covers `pytest -q > test.log` again, while `echo` or `git *` allow rules still ask for a command that writes a file; `&>` and `>|` stay unparsed for every rule.
 - A bash allow rule no longer covers a command that redirects output to a file (`echo x > file`); descriptor duplication (`2>&1`) and `/dev/null`, `/dev/stdout`, `/dev/stderr` are still covered, and deny and ask rules are unchanged.
 - Bash deny and ask rules match the unquoted command word with the arguments as written, so a deny pattern such as `* --force` no longer matches text inside a quoted argument; a `#` after an escaped blank or semicolon is not a comment.
 - `function`, `coproc`, an array-element assignment (`a[0]=1`), a descriptor-variable redirection (`{fd}>log`) and a brace expansion (`{rm,-rf}`) in command position count as syntax the splitter cannot model.

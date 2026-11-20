@@ -499,10 +499,15 @@ Cách các rule kết hợp:
   trong dấu nháy kép mà phần thân có dấu nháy hoặc dấu gạch chéo ngược, `env -S`,
   và vị trí lệnh là phép khai triển `$`, khai triển ngoặc nhọn (`{rm,-rf}`),
   `function`, `coproc`, gán phần tử mảng (`a[0]=1`) hay chuyển hướng `{fd}>file`.
-- Một rule allow không bao phủ lệnh chuyển hướng đầu ra vào một tệp
-  (`echo x > file`, `>>`, `2>file`, `>|`, `<>`): lệnh đó sẽ hỏi. Nhân bản
-  descriptor (`2>&1`, `>&2`, `>&-`) và `/dev/null`, `/dev/stdout`, `/dev/stderr`
-  không phải tệp. Rule deny và ask không đổi.
+- Một rule allow hẹp (pattern không phải `*` trần) không bao phủ lệnh chuyển
+  hướng đầu ra vào một tệp (`echo x > file`, `>>`, `2>file`, `<>`): lệnh đó sẽ
+  hỏi. Vì vậy rule allow cho `echo` hay `git *` không cho `echo x > file` hay
+  `git log > file` đi qua, còn rule allow-all `*` cho phép `pytest -q > test.log`
+  như mọi lệnh khác. Nhân bản descriptor (`2>&1`, `>&2`, `>&-`) và `/dev/null`,
+  `/dev/stdout`, `/dev/stderr` không phải tệp. Rule khớp đầu tiên của một đoạn
+  quyết định đoạn đó có phải allow-all hay không. Cú pháp mà bộ tách lệnh không
+  mô hình hóa được (`&>`, `>|`) không bao giờ được cho phép, kể cả bởi `*`. Rule
+  deny và ask không đổi.
 - Các bash rule dựa trên tên lệnh chỉ là nỗ lực tối đa và sandbox mới là ranh giới.
   Một rule deny hoặc ask khớp từng đoạn như đã viết, rồi khớp lại sau khi từ lệnh
   được bỏ dấu nháy (`\rm`, `r""m`) và các từ đứng trước lệnh bị gỡ: phép gán

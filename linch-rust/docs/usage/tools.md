@@ -497,10 +497,15 @@ How rules combine:
   command position that is a `$` expansion, a brace expansion (`{rm,-rf}`),
   `function`, `coproc`, an array assignment (`a[0]=1`) or a `{fd}>file`
   redirection.
-- An allow rule does not cover a command that redirects output to a file
-  (`echo x > file`, `>>`, `2>file`, `>|`, `<>`): it asks. Descriptor
+- A narrow allow rule (one whose pattern is not the bare `*`) does not cover
+  a command that redirects output to a file (`echo x > file`, `>>`, `2>file`,
+  `<>`): it asks. So an allow rule for `echo` or `git *` does not let
+  `echo x > file` or `git log > file` through, while the allow-all rule `*`
+  allows `pytest -q > test.log`, as it allows every command. Descriptor
   duplication (`2>&1`, `>&2`, `>&-`) and `/dev/null`, `/dev/stdout`,
-  `/dev/stderr` are not files. Deny and ask rules are unchanged.
+  `/dev/stderr` are not files. The first rule that matches a segment decides
+  whether it is allow-all. Syntax the splitter cannot model (`&>`, `>|`) is
+  never allowed, `*` included. Deny and ask rules are unchanged.
 - Name-based bash rules are best effort and the sandbox is the boundary. A
   deny or ask rule matches each segment as written, and again after its
   command word is unquoted (`\rm`, `r""m`) and the words in front of the
