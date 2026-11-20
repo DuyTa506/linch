@@ -40,6 +40,7 @@ use tokio_util::sync::CancellationToken;
 use crate::ApiKey;
 use crate::openai_compat::stream::{ReasoningField, Translator, WireUsage};
 use crate::openai_compat::{http, payload, stream};
+use crate::request::ErrorScrub;
 
 /// DeepSeek's API root.
 pub const DEFAULT_BASE_URL: &str = "https://api.deepseek.com";
@@ -217,12 +218,12 @@ impl Provider for DeepSeek {
         let translator =
             Translator::new(request.model, Some(ReasoningField::ReasoningContent), usage)
                 .refusing(overflow);
-        Ok(self.options.request.scrub_stream(stream::events(
+        Ok(stream::events(
             response.bytes_stream(),
             translator,
             cancel,
-            Some(key.clone()),
-        )))
+            ErrorScrub::new(Some(key.clone()), &self.options.request),
+        ))
     }
 }
 

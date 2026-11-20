@@ -12,7 +12,6 @@ workspace = true
 
 [dependencies]
 async-trait = "0.1.92"
-eventsource-stream = "0.2.3"
 futures = "0.3.34"
 linch-core = { path = "../linch-core" }
 percent-encoding = "2.3.2"
