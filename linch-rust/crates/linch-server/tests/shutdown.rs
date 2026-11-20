@@ -98,7 +98,7 @@ async fn a_server_with_a_run_streaming_to_a_client_that_never_reads_exits_within
     let mut running = start().await;
     let (mut reader, mut writer) = login(&running.socket).await;
     let turn = linch::provider::scripted::TurnBuilder::new("scripted-model")
-        .text(&"x".repeat(12 * 1024 * 1024))
+        .text("x".repeat(12 * 1024 * 1024))
         .build();
     let open = json!({"jsonrpc": "2.0", "id": 1, "method": "agent.open", "params": {
         "namespace": "acme", "spec": {"model": "scripted-model", "max_turns": 100},

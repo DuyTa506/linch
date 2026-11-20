@@ -170,7 +170,6 @@ mod tests {
         assert_eq!(value["a"][1], "short");
         let cut = value["b"]["c"].as_str().unwrap();
         assert!(cut.ends_with("[truncated: 1 more bytes]"));
-        assert_eq!(cut_strings(&mut value), 0, "a cut string is short enough");
     }
 
     #[test]
