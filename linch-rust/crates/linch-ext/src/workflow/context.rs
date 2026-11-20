@@ -203,6 +203,24 @@ impl WorkflowContext {
         Ok(())
     }
 
+    /// `LimitExceeded` (`what` names the value) when `value` is longer than
+    /// `max_record_bytes`: a record's value, or a payload that is kept in the
+    /// workflow's stored status.
+    pub(super) fn check_size(
+        &self,
+        value: &JsonValue,
+        what: &'static str,
+    ) -> Result<(), WorkflowError> {
+        let too_big = (self.inner.max_record_bytes).filter(|max| value.to_string().len() > *max);
+        match too_big {
+            Some(max) => Err(WorkflowError::LimitExceeded {
+                what,
+                max: max as u64,
+            }),
+            None => Ok(()),
+        }
+    }
+
     /// Make one result durable, then cache it.
     pub(super) async fn record(
         &self,
@@ -211,13 +229,7 @@ impl WorkflowContext {
         value: &JsonValue,
     ) -> Result<(), WorkflowError> {
         self.check_room()?;
-        let too_big = (self.inner.max_record_bytes).filter(|max| value.to_string().len() > *max);
-        if let Some(max) = too_big {
-            return Err(WorkflowError::LimitExceeded {
-                what: "bytes in a journal record",
-                max: max as u64,
-            });
-        }
+        self.check_size(value, "bytes in a journal record")?;
         let record = JournalRecord {
             call_key: call_key.to_owned(),
             occurrence,

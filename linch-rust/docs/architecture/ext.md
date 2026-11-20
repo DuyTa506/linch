@@ -256,7 +256,8 @@ drives a `WorkflowSession` (`crates/linch-ext/src/workflow/engine.rs`):
   finished calls spent, replays included (`agent.rs:286`), so one running
   call can overshoot. `max_records` is checked before a call spends
   (`context.rs`, `check_room`) against the records, and `max_record_bytes`
-  when a record is written. The counters (one per call key and branch) are
+  when a record is written and on an interrupt's payload, which the stored
+  status keeps (`check_size`). The counters (one per call key and branch) are
   bounded by `WorkflowOptions::max_call_keys`: a call with a new key and no
   record to replay is refused past it (`LimitExceeded`, `what: "call keys"`),
   which keeps calls that journal nothing (failed, suspended) from growing

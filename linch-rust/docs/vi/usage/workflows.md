@@ -236,7 +236,7 @@ lên và đặt các mức trần:
 | `max_workflows` | 4 | Số workflow tenant drive cùng lúc, qua mọi kết nối của nó (`-32005`, `kind: workflows`) |
 | `max_records` | 10000 | Số record journal của một workflow, tính cả replay (`-32005`, `kind: journal_records`); được kiểm tra trước khi một lời gọi tiêu tiền |
 | `max_fan_out` | 8 | Số lời gọi agent của một workflow đang chạy cùng lúc (`-32005`, `kind: agent_calls_in_flight`); client hạ `max_concurrency` của nó xuống mức này |
-| `max_record_bytes` | 1 MiB | Giá trị JSON của một record |
+| `max_record_bytes` | 1 MiB | Giá trị JSON của một record, và payload của một interrupt (mà status đã lưu của workflow giữ), bị từ chối với `kind: bytes_in_an_interrupt_payload` |
 | `max_tokens`, `max_cost_usd` | không có | Một mức trần cho `budget` của workflow; workflow không có budget sẽ nhận nó, và workflow xin nhiều hơn bị từ chối (`-32004`, `kind: workflow_budget`) |
 
 Dù `max_records` là bao nhiêu, server giữ bộ đếm cho tối đa 10.000 call key khác

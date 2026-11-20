@@ -77,6 +77,8 @@ impl WorkflowContext {
             }
             self.emit(event(WorkflowKind::InterruptStale, None));
         }
+        // The payload is kept, and written with the workflow's status.
+        self.check_size(&payload, "bytes in an interrupt payload")?;
         let mut requested = event(WorkflowKind::InterruptRequested, None);
         let mut structured = JsonObject::new();
         structured.insert("payload".into(), payload.clone());

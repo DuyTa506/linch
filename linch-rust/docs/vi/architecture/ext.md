@@ -253,7 +253,7 @@ Một host có hàm workflow chạy ở nơi khác (client của server RPC) dri
   gọi đã xong đã tiêu, tính cả replay (`agent.rs:286`), nên một lời gọi đang chạy
   có thể vượt. `max_records` được kiểm tra trước khi một lời gọi tiêu tiền
   (`context.rs`, `check_room`) so với số record, và `max_record_bytes` khi một
-  record được ghi. Các bộ đếm (một cho mỗi call key và nhánh) bị chặn bởi
+  record được ghi và với payload của interrupt, thứ mà status đã lưu giữ (`check_size`). Các bộ đếm (một cho mỗi call key và nhánh) bị chặn bởi
   `WorkflowOptions::max_call_keys`: một lời gọi có key mới và không có record để
   replay bị từ chối khi vượt mức đó (`LimitExceeded`, `what: "call keys"`), nhờ
   vậy các lời gọi không ghi journal (thất bại, suspend) không làm chúng phình ra;

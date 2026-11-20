@@ -453,3 +453,33 @@ async fn a_forked_call_continues_the_conversation_of_an_earlier_call() {
     );
     assert!(seen.contains("what was the number?"));
 }
+
+#[tokio::test]
+async fn an_interrupt_payload_over_max_record_bytes_is_refused_and_not_kept() {
+    let store = Arc::new(MemoryJournalStore::default());
+    let mut small = options(&store, "w1", &Recorder::default());
+    small.max_record_bytes = Some(64);
+    let session = WorkflowSession::open(&small).await.unwrap();
+    let wf = session.context();
+    let big = json!({"question": "x".repeat(1000)});
+    let refused = wf.interrupt::<serde_json::Value>("big", big).await;
+    assert!(
+        matches!(
+            &refused,
+            Err(WorkflowError::LimitExceeded {
+                what: "bytes in an interrupt payload",
+                max: 64
+            })
+        ),
+        "{refused:?}"
+    );
+    // Nothing is parked on it: the workflow does not suspend on a payload
+    // it refused.
+    let small_payload = wf
+        .interrupt::<serde_json::Value>("ok", json!({"q": "short"}))
+        .await;
+    assert!(
+        matches!(small_payload, Err(WorkflowError::Suspended(ref asked)) if asked.key == "ok"),
+        "{small_payload:?}"
+    );
+}
