@@ -101,6 +101,15 @@ fn definition(config: &AgentConfig, tools: bool, callbacks: bool) -> Result<Stri
     serde_json::to_string(&value).map_err(|_| "unencodable")
 }
 
+/// Create or upgrade the queue tables in `pool`'s database, once per agent.
+async fn migrate_once(pool: &PgPool, migrated: &OnceCell<()>) -> Result<(), ErrorObject> {
+    migrated
+        .get_or_try_init(|| async { linch_worker::migrate(pool).await })
+        .await
+        .map(|_| ())
+        .map_err(|error| ErrorObject::new(code::STORE_UNAVAILABLE, chain(&error)))
+}
+
 /// An open agent, ready for a scheduler call.
 struct Scheduled {
     pool: PgPool,
@@ -112,30 +121,46 @@ impl Server {
     /// The agent `handle` as the scheduler needs it, with the queue tables
     /// in its database.
     async fn scheduled(&self, handle: &str) -> Result<Scheduled, ErrorObject> {
-        let (pool, namespace, definition, migrated) = {
-            let tables = lock(&self.0.tables);
-            let opened = tables.opened(handle)?;
-            let definition = (opened.background.definition.clone())
-                .map_err(|reason| not_background(handle, reason))?;
-            let pool = opened.agent.pool().cloned();
-            let pool = pool.expect("an agent with Postgres stores has a pool");
-            let namespace = opened.agent.agent().namespace().to_owned();
-            (
-                pool,
-                namespace,
-                definition,
-                Arc::clone(&opened.background.migrated),
-            )
-        };
-        migrated
-            .get_or_try_init(|| async { linch_worker::migrate(&pool).await })
-            .await
-            .map_err(|error| ErrorObject::new(code::STORE_UNAVAILABLE, chain(&error)))?;
-        Ok(Scheduled {
+        let (agent, migrated) = self.attached(handle)?;
+        migrate_once(&agent.pool, &migrated).await?;
+        Ok(agent)
+    }
+
+    /// [`scheduled`](Self::scheduled) for a call that reads or deletes. A
+    /// tenant whose allowlists give it neither schedules nor background
+    /// runs does not migrate its database for it: it gets the agent when
+    /// the tables are already there (it may clean up what it made), else
+    /// `None`, which the caller answers as an empty namespace.
+    async fn scheduled_if_present(&self, handle: &str) -> Result<Option<Scheduled>, ErrorObject> {
+        let may_schedule = self.0.tenant.as_ref().is_none_or(|tenant| {
+            let allow = tenant.allowlists();
+            allow.max_schedules.is_some() || allow.max_queued_jobs.is_some()
+        });
+        if may_schedule {
+            return self.scheduled(handle).await.map(Some);
+        }
+        let (agent, _) = self.attached(handle)?;
+        let version = linch_worker::schema_version(&agent.pool).await;
+        let version =
+            version.map_err(|error| ErrorObject::new(code::STORE_UNAVAILABLE, chain(&error)))?;
+        Ok(version.is_current().then_some(agent))
+    }
+
+    /// The agent `handle`'s pool, namespace and definition, and the cell
+    /// that migrates its database once.
+    fn attached(&self, handle: &str) -> Result<(Scheduled, Arc<OnceCell<()>>), ErrorObject> {
+        let tables = lock(&self.0.tables);
+        let opened = tables.opened(handle)?;
+        let definition = (opened.background.definition.clone())
+            .map_err(|reason| not_background(handle, reason))?;
+        let pool = opened.agent.pool().cloned();
+        let pool = pool.expect("an agent with Postgres stores has a pool");
+        let agent = Scheduled {
             pool,
-            namespace,
+            namespace: opened.agent.agent().namespace().to_owned(),
             definition,
-        })
+        };
+        Ok((agent, Arc::clone(&opened.background.migrated)))
     }
 
     pub(super) async fn create_schedule(
@@ -169,7 +194,11 @@ impl Server {
         &self,
         params: ScheduleListParams,
     ) -> Result<JsonValue, ErrorObject> {
-        let agent = self.scheduled(&params.agent).await?;
+        let Some(agent) = self.scheduled_if_present(&params.agent).await? else {
+            return to_value(&Schedules {
+                schedules: Vec::new(),
+            });
+        };
         let listed = linch_worker::list_schedules(&agent.pool, &agent.namespace).await;
         let schedules = listed.map_err(|error| worker_error(&error))?;
         to_value(&Schedules {
@@ -181,7 +210,9 @@ impl Server {
         &self,
         params: ScheduleIdParams,
     ) -> Result<JsonValue, ErrorObject> {
-        let agent = self.scheduled(&params.agent).await?;
+        let Some(agent) = self.scheduled_if_present(&params.agent).await? else {
+            return found(Ok(None), &params.id);
+        };
         let paused = linch_worker::pause_schedule(&agent.pool, &agent.namespace, &params.id).await;
         found(paused, &params.id)
     }
@@ -190,7 +221,9 @@ impl Server {
         &self,
         params: ScheduleIdParams,
     ) -> Result<JsonValue, ErrorObject> {
-        let agent = self.scheduled(&params.agent).await?;
+        let Some(agent) = self.scheduled_if_present(&params.agent).await? else {
+            return found(Ok(None), &params.id);
+        };
         let resumed =
             linch_worker::resume_schedule(&agent.pool, &agent.namespace, &params.id).await;
         found(resumed, &params.id)
@@ -200,7 +233,9 @@ impl Server {
         &self,
         params: ScheduleIdParams,
     ) -> Result<JsonValue, ErrorObject> {
-        let agent = self.scheduled(&params.agent).await?;
+        let Some(agent) = self.scheduled_if_present(&params.agent).await? else {
+            return to_value(&ScheduleDeleted { deleted: false });
+        };
         let deleted =
             linch_worker::delete_schedule(&agent.pool, &agent.namespace, &params.id).await;
         let deleted = deleted.map_err(|error| worker_error(&error))?;
@@ -235,7 +270,9 @@ impl Server {
     }
 
     pub(super) async fn get_job(&self, params: JobGetParams) -> Result<JsonValue, ErrorObject> {
-        let agent = self.scheduled(&params.agent).await?;
+        let Some(agent) = self.scheduled_if_present(&params.agent).await? else {
+            return Err(job_not_found(params.job_id));
+        };
         let id = linch_worker::JobId(params.job_id);
         let job = linch_worker::job(&agent.pool, &agent.namespace, id).await;
         let job = job.map_err(|error| worker_error(&error))?;
@@ -243,7 +280,9 @@ impl Server {
     }
 
     pub(super) async fn list_jobs(&self, params: JobListParams) -> Result<JsonValue, ErrorObject> {
-        let agent = self.scheduled(&params.agent).await?;
+        let Some(agent) = self.scheduled_if_present(&params.agent).await? else {
+            return to_value(&Jobs { jobs: Vec::new() });
+        };
         let limit = params.limit.unwrap_or(DEFAULT_JOBS_LISTED);
         let listed = linch_worker::jobs(
             &agent.pool,

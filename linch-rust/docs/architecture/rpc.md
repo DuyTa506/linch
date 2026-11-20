@@ -420,7 +420,11 @@ asked ([usage](../usage/scheduler.md)).
   open agent; its Postgres pool (`OpenedAgent::pool`) holds the rows, its
   namespace scopes them, and the queue tables are migrated on its database
   at the first scheduler call (once per agent), so a server that never
-  schedules never creates them.
+  schedules never creates them. A tenant with neither `max_schedules` nor
+  `max_queued_jobs` never migrates: `schedule.list`, `schedule.delete`,
+  `job.list` and `job.get` still read the tables when they are there (it may
+  clean up what it made) and answer as an empty namespace when they are not
+  (`schedule.pause` and `schedule.resume` answer not found).
 - **Tenant checks.** Before any query: `max_schedules` and
   `max_queued_jobs` must be set (`-32004`, kinds `schedules` and
   `background_runs`), and a schedule's `Timing::shortest_gap` must be at

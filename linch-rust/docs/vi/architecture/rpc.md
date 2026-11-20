@@ -412,7 +412,11 @@ kết nối đã yêu cầu ([cách dùng](../usage/scheduler.md)).
   Mọi method của scheduler nêu tên một agent đang mở; pool Postgres của nó
   (`OpenedAgent::pool`) giữ các hàng, namespace của nó phân vùng chúng, và các bảng hàng đợi
   được migrate trên cơ sở dữ liệu của nó ở lần gọi scheduler đầu tiên (một lần cho mỗi
-  agent), nên một server không bao giờ lập lịch thì không bao giờ tạo chúng.
+  agent), nên một server không bao giờ lập lịch thì không bao giờ tạo chúng. Một tenant không có
+  `max_schedules` lẫn `max_queued_jobs` thì không bao giờ migrate: `schedule.list`,
+  `schedule.delete`, `job.list` và `job.get` vẫn đọc các bảng khi chúng đã có (nó có thể dọn
+  những gì nó đã tạo) và trả lời như một namespace rỗng khi chưa có (`schedule.pause` và
+  `schedule.resume` trả not found).
 - **Kiểm tra tenant.** Trước mọi truy vấn: `max_schedules` và `max_queued_jobs` phải được đặt
   (`-32004`, kind `schedules` và `background_runs`), và `Timing::shortest_gap` của một lịch
   phải ít nhất bằng `min_schedule_interval` (`kind: schedule_interval`). Bản thân các số đếm
