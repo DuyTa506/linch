@@ -15,6 +15,7 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 - A Postgres run claim of a run that has no row ends its transaction before it reads the pruning tombstones, so it no longer needs a second pool connection (a pool of one answered `NotFound` only after the 30 s acquire timeout).
 - A lease renewal that arrives after the release is `LeaseLost` and no longer leases the run again; the epoch fence is unchanged.
 - A job heartbeat that arrives after the attempt released or failed the job answers `false` and no longer hides the job for a visibility timeout.
+- `create` of a run id that retention pruned (its tombstone is still kept) answers `Conflict`, like an existing id, instead of starting a second run.
 
 ## 0.2.0 - 2026-11-19
 

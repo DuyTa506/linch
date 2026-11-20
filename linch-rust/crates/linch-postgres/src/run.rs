@@ -249,9 +249,9 @@ fn session_busy(error: &sqlx::Error) -> bool {
 
 impl PgRunStore {
     /// The error for a run with no row: `NotFound`, `pruned` when a
-    /// retention pass deleted it. Only this not-found path reads the
-    /// tombstones, so no read of a run that exists pays for them. A failed
-    /// tombstone read is the error, and not a guess.
+    /// retention pass deleted it. Besides `create`'s insert, only this
+    /// not-found path reads the tombstones, so no read of a run that exists
+    /// pays for them. A failed tombstone read is the error, and not a guess.
     async fn missing(&self, namespace: &str, run_id: &RunId) -> StoreError {
         let pruned = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM linch_pruned_runs WHERE namespace = $1 AND run_id = $2)",
@@ -393,12 +393,17 @@ impl PgRunStore {
         let events = encode_events(&run.events)?;
         let last_seq = run.events.len() as u64;
         let mut tx = crate::begin(&self.pool).await.map_err(backend)?;
-        // Only an existing id is skipped here; a live run on the session
-        // fails the statement through the partial unique index.
+        // Only an existing or pruned id is skipped here (a pruned id has a
+        // tombstone, read by this statement's primary key lookup); a live
+        // run on the session fails the statement through the partial unique
+        // index.
         let inserted = sqlx::query(
             "INSERT INTO linch_runs (namespace, run_id, session_id, parent_run_id, contract, \
              status, epoch, checkpoint, last_seq, principal) \
-             VALUES ($1, $2, $3, $4, $5, $6, 0, $7, $8, $9) \
+             SELECT $1::text, $2::text, $3::text, $4::text, $5::text, $6::text, 0, $7::text, \
+                    $8::bigint, $9::text \
+             WHERE NOT EXISTS (SELECT 1 FROM linch_pruned_runs \
+                               WHERE namespace = $1 AND run_id = $2) \
              ON CONFLICT (namespace, run_id) DO NOTHING",
         )
         .bind(&run.namespace)
@@ -418,8 +423,22 @@ impl PgRunStore {
             Err(error) => return Err(backend(error)),
         };
         if inserted == 0 {
+            let pruned: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM linch_pruned_runs \
+                 WHERE namespace = $1 AND run_id = $2)",
+            )
+            .bind(&run.namespace)
+            .bind(run.run_id.as_str())
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(backend)?;
+            let what = if pruned {
+                "was pruned by retention and its id cannot be used again"
+            } else {
+                "already exists"
+            };
             return Err(StoreError::Conflict {
-                message: format!("run {} already exists in {}", run.run_id, run.namespace),
+                message: format!("run {} {what} in {}", run.run_id, run.namespace),
             });
         }
         insert_events(&mut tx, &run.namespace, &run.run_id, events).await?;

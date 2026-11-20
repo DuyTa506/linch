@@ -97,6 +97,46 @@ async fn an_append_moves_the_sessions_last_write() {
     db.finish().await;
 }
 
+/// A caller-chosen run id is idempotent through `Conflict` while the run
+/// exists; once retention pruned the run, its tombstone keeps the id from
+/// being created again, so a retried `create` cannot start a second run.
+#[tokio::test]
+async fn a_pruned_run_id_cannot_be_created_again() {
+    let Some(db) = TestDb::migrated("ret_recreate").await else {
+        return;
+    };
+    let store = PgRunStore::new(db.pool.clone());
+    let run = new_run("ns", "r1", 0);
+    let id = run.run_id.clone();
+    store.create(run).await.unwrap();
+    let again = store.create(new_run("ns", "r1", 0)).await;
+    assert!(
+        matches!(again, Err(StoreError::Conflict { .. })),
+        "an existing id: {again:?}"
+    );
+    sqlx::query("DELETE FROM linch_runs WHERE run_id = 'r1'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO linch_pruned_runs (namespace, run_id) VALUES ('ns', 'r1')")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let recreated = store.create(new_run("ns", "r1", 0)).await;
+    let other_namespace = store.create(new_run("other", "r1", 0)).await;
+    let missing = store.load("ns", &id).await;
+    db.finish().await;
+    assert!(
+        matches!(recreated, Err(StoreError::Conflict { .. })),
+        "a pruned id was created again: {recreated:?}"
+    );
+    assert!(other_namespace.is_ok(), "{other_namespace:?}");
+    assert!(
+        matches!(missing, Err(StoreError::NotFound { pruned: true, .. })),
+        "{missing:?}"
+    );
+}
+
 /// A run that never existed, or exists in another namespace, is a plain
 /// not-found; only a tombstone says "pruned".
 #[tokio::test]
