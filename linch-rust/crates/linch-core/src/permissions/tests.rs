@@ -255,6 +255,23 @@ fn a_deny_rule_covers_a_command_that_is_not_the_first_word_of_its_segment() {
 }
 
 #[test]
+fn a_deny_rule_covers_a_command_name_spelled_with_quotes_or_escapes() {
+    let engine = flat(PermissionMode::SkipDangerous, vec![bash_rule("rm *", Deny)]);
+    for command in [
+        "\\rm -rf build",
+        "r\"\"m -rf build",
+        "'rm' -rf build",
+        "\"rm\" -rf build",
+        "r\\m -rf build",
+        "X=1 \\rm -rf build",
+        "echo hi; \\rm -rf build",
+    ] {
+        assert_eq!(bash(&engine, command), "deny", "{command:?}");
+    }
+    assert_eq!(bash(&engine, "echo \"rm -rf build\""), "allow");
+}
+
+#[test]
 fn an_ask_rule_covers_a_command_that_is_not_the_first_word_of_its_segment() {
     let engine = flat(
         PermissionMode::SkipDangerous,

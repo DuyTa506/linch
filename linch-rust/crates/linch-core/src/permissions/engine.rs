@@ -243,23 +243,25 @@ impl<'a> Eval<'a> {
                     .find(|r| r.patterns.iter().any(|p| shell::pattern_matches(p, text)))
                     .map(|r| r.decision)
             };
-            // A prefix (`X=1 rm`, `if x; then rm`) hides the command from the
-            // segment's own words, so deny and ask rules also see it without
-            // the prefix. An allow never comes from the stripped form.
+            // A prefix (`X=1 rm`, `if x; then rm`) or a quoted spelling
+            // (`\rm`, `r""m`) hides the command from the segment's own text,
+            // so deny and ask rules also see it stripped and unquoted. An
+            // allow never comes from those forms.
             let own = first(segment);
             let behind = shell::strip_command_prefix(segment);
-            let inner = if behind.len() < segment.len() && !behind.is_empty() {
-                first(behind)
-            } else {
-                None
-            };
-            match (own, inner) {
-                (Some(RuleDecision::Deny), _) | (_, Some(RuleDecision::Deny)) => {
-                    return Some(RuleDecision::Deny);
-                }
-                (Some(RuleDecision::Ask), _) | (_, Some(RuleDecision::Ask)) => ask = true,
-                (Some(RuleDecision::Allow), _) => {}
-                (None, _) => all_allowed = false,
+            let plain = shell::tokenize(behind).join(" ");
+            let hidden: Vec<Option<RuleDecision>> = [behind, plain.as_str()]
+                .into_iter()
+                .filter(|text| !text.is_empty() && *text != segment)
+                .map(first)
+                .collect();
+            if own == Some(RuleDecision::Deny) || hidden.contains(&Some(RuleDecision::Deny)) {
+                return Some(RuleDecision::Deny);
+            }
+            if own == Some(RuleDecision::Ask) || hidden.contains(&Some(RuleDecision::Ask)) {
+                ask = true;
+            } else if own.is_none() {
+                all_allowed = false;
             }
         }
         if ask {

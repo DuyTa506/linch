@@ -497,11 +497,11 @@ Cách các rule kết hợp:
   `&` chạy nền hoặc `&>`, `>&file`, chú thích `#`, here-document hay `>|`) có thể bị rule deny
   hoặc ask nhưng không bao giờ được rule allow.
 - Các bash rule dựa trên tên lệnh chỉ là nỗ lực tối đa và sandbox mới là ranh giới:
-  một rule deny hoặc ask cũng thấy lệnh nằm sau các từ `NAME=value`, chuyển hướng,
+  một rule deny hoặc ask cũng thấy lệnh khi bỏ dấu nháy (`\rm`, `r""m`) và nằm sau các từ `NAME=value`, chuyển hướng,
   từ khóa dành riêng (`if`, `then`, `do`, `!`, `{`) và `time`, `exec`, `command`,
   `builtin`, `env` ở đầu đoạn, và một phép khai triển `$` ở vị trí lệnh bị coi là
-  không phân tích được, nhưng `/bin/rm`, `sudo rm`, `xargs rm` và `sh -c 'rm x'`
-  là những lệnh khác đối với rule.
+  không phân tích được, nhưng `/bin/rm`, `sudo rm`, `xargs rm`, `eval rm x` và
+  `sh -c 'rm x'` là những lệnh khác đối với rule.
 - Đường dẫn nằm ngoài project root không bao giờ khớp một rule allow.
 
 `auto_allow` (danh sách tên tool) cho phép các tool đó ở mọi mode trừ khi một rule
