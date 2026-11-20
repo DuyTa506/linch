@@ -8,8 +8,6 @@
 //! the engine applies its floor to it instead of trusting the segments.
 //! Words are separated by space and tab only, as in bash.
 
-use std::borrow::Cow;
-
 use super::glob::wildcard;
 
 /// Whether bash separates words at `c`.
@@ -540,19 +538,46 @@ pub fn redirects_to_file(segment: &str) -> bool {
     false
 }
 
-/// `command` with the quotes and backslashes of every word removed and the
-/// words kept apart: a word that is empty or holds a blank, a quote or a
-/// backslash is written back in single quotes, so `git 'push' "a b"` becomes
-/// `git push 'a b'` and a quoted argument stays one word.
-pub fn unquote_words(command: &str) -> Cow<'_, str> {
-    if !command.contains(['\'', '"', '\\']) {
-        return Cow::Borrowed(command);
+/// How many words the redirection that `word` starts takes: 0 when it is not
+/// one, 2 for a bare operator (`>`, `2>&`) whose target is the next word.
+fn redirection_len(word: &str) -> usize {
+    let operator = word.trim_start_matches(|c: char| c.is_ascii_digit());
+    if !operator.starts_with(['<', '>']) {
+        0
+    } else if operator.trim_start_matches(['<', '>', '&', '|']).is_empty() {
+        2
+    } else {
+        1
     }
+}
+
+/// The words of `command` as the shell passes them, for matching deny and ask
+/// rules: quotes and backslashes removed, blanks collapsed to one space,
+/// redirections (and the target of a bare operator) dropped wherever they
+/// appear. A word that is empty or holds a blank, a quote or a backslash is
+/// written back in single quotes, so `git 'push' "a b"` becomes `git push 'a b'`
+/// and a quoted argument stays one word.
+pub fn unquote_words(command: &str) -> String {
     let mut out = String::with_capacity(command.len());
     let mut rest = trim_blanks(command);
+    let mut target = false;
     while !rest.is_empty() {
         let end = word_end(rest);
-        let word = unquote(&rest[..end]);
+        let raw = &rest[..end];
+        rest = trim_blanks(&rest[end..]);
+        if target {
+            target = false;
+            continue;
+        }
+        match redirection_len(raw) {
+            0 => {}
+            1 => continue,
+            _ => {
+                target = true;
+                continue;
+            }
+        }
+        let word = unquote(raw);
         if !out.is_empty() {
             out.push(' ');
         }
@@ -563,9 +588,8 @@ pub fn unquote_words(command: &str) -> Cow<'_, str> {
         } else {
             out.push_str(&word);
         }
-        rest = trim_blanks(&rest[end..]);
     }
-    Cow::Owned(out)
+    out
 }
 
 /// Whether bash rule `pattern` matches one command segment: as a glob over

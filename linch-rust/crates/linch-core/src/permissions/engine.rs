@@ -252,7 +252,7 @@ impl<'a> Eval<'a> {
             let allow_all = own_rule.is_some_and(|r| r.patterns.iter().any(|p| p.trim() == "*"));
             let behind = shell::strip_command_prefix(segment);
             let plain = shell::unquote_words(behind);
-            let hidden: Vec<Option<RuleDecision>> = [behind, &plain]
+            let hidden: Vec<Option<RuleDecision>> = [behind, plain.as_str()]
                 .into_iter()
                 .filter(|text| !text.is_empty() && *text != segment)
                 .map(first)

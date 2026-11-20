@@ -916,6 +916,38 @@ fn a_glob_deny_rule_covers_a_quoted_second_word() {
 }
 
 #[test]
+fn a_glob_deny_rule_covers_words_separated_by_other_blanks_or_a_redirect() {
+    let push = flat(
+        PermissionMode::SkipDangerous,
+        vec![bash_rule("git push *", Deny)],
+    );
+    for command in [
+        "git push origin",
+        "git  push origin",
+        "git\tpush origin",
+        "git \t push\t origin",
+        "git  'push' origin",
+        "git 2>&1 push origin",
+        "git >/dev/null push origin",
+        "git > /dev/null push origin",
+        "git push 2>&1 origin",
+        "X=1  git\tpush origin",
+    ] {
+        assert_eq!(bash(&push, command), "deny", "{command:?}");
+    }
+    for command in ["git  status", "git\tlog origin", "git 2>&1 pull origin"] {
+        assert_eq!(bash(&push, command), "allow", "{command:?}");
+    }
+    let touch = flat(
+        PermissionMode::SkipDangerous,
+        vec![bash_rule("touch *", Deny)],
+    );
+    for command in ["touch\tM", "touch\t'M'", "touch  M"] {
+        assert_eq!(bash(&touch, command), "deny", "{command:?}");
+    }
+}
+
+#[test]
 fn unparsed_floor_beats_a_generic_allow_in_any_layer_order() {
     let rules = vec![tool("Bash", Allow), bash_rule("rm -rf *", Deny)];
     let engine = flat(PermissionMode::SkipDangerous, rules);
