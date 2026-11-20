@@ -98,9 +98,10 @@ từ chối lần nữa. Hãy đặt `pricing` hoặc giới hạn `max_tokens`.
 
 `parallel`, `settled` và `pipeline` chạy trong client. Mỗi nhánh đếm các lời gọi
 của riêng nó, dưới đường dẫn nhánh của nó, nên các nhánh đến lời gọi của mình
-theo thứ tự khác khi resume vẫn tìm thấy record của chính chúng. `name`, `key`
-của một lời gọi (`key` của step được băm nên không bị chặn) và `branch` dài tối
-đa 256 byte, như id của workflow (`-32602` nếu vượt).
+theo thứ tự khác khi resume vẫn tìm thấy record của chính chúng. Trên một kết nối
+tenant, `name`, `branch` của một lời gọi và `key` của một interrupt, những thứ server
+giữ, dài tối đa 256 byte, như id của workflow (`-32602` nếu vượt); một `key` chỉ được
+băm (của step, của lời gọi agent) thì không bị chặn, kết nối cục bộ cũng vậy.
 
 Một step mà function của nó raise sẽ trả ticket lại: `wf.step` gửi
 `workflow.step.abandon` trước khi raise lại, nên một workflow bắt các step thất bại

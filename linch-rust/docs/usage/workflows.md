@@ -96,9 +96,11 @@ instead. A tenant's `max_cost_usd` ceiling (below) is a `max_cost_usd` too.
 
 `parallel`, `settled` and `pipeline` run in the client. Each branch counts
 its own calls, under its branch path, so branches that reach their calls in
-another order on a resume still find their own records. A call's `name`,
-`key` (a step's `key` is hashed, so it is not bounded) and `branch` are at
-most 256 bytes, like the workflow id (`-32602` past it).
+another order on a resume still find their own records. On a tenant connection a
+call's `name`, `branch` and an interrupt's `key`, which the server keeps, are at
+most 256 bytes, like the workflow id (`-32602` past it); a `key` that is only
+hashed (a step's, an agent call's) is not bounded, and neither is a local
+connection.
 
 A step whose function raised gives its ticket back: `wf.step` sends
 `workflow.step.abandon` before it re-raises, so a workflow that catches

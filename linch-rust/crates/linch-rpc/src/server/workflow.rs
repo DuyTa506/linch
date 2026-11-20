@@ -207,9 +207,8 @@ impl Server {
         params: WorkflowAgentParams,
     ) -> Result<serde_json::Value, ErrorObject> {
         let driven = self.driven(&params.run_id)?;
-        bounded("name", params.name.as_deref())?;
-        bounded("key", params.key.as_deref())?;
-        bounded("branch", params.branch.as_deref())?;
+        self.bounded("name", params.name.as_deref())?;
+        self.bounded("branch", params.branch.as_deref())?;
         let (token, _in_flight) = self.begin_call(&driven, params.call_id)?;
         let subagent = params.subagent.as_deref();
         let agent = match subagent {
@@ -260,8 +259,8 @@ impl Server {
         params: WorkflowStepBeginParams,
     ) -> Result<serde_json::Value, ErrorObject> {
         let driven = self.driven(&params.run_id)?;
-        bounded("name", Some(&params.name))?;
-        bounded("branch", params.branch.as_deref())?;
+        self.bounded("name", Some(&params.name))?;
+        self.bounded("branch", params.branch.as_deref())?;
         let context = driven.context();
         let path = params.branch.unwrap_or_default();
         let name = params.name;
@@ -332,8 +331,8 @@ impl Server {
         params: WorkflowInterruptParams,
     ) -> Result<serde_json::Value, ErrorObject> {
         let driven = self.driven(&params.run_id)?;
-        bounded("key", Some(&params.key))?;
-        bounded("branch", params.branch.as_deref())?;
+        self.bounded("key", Some(&params.key))?;
+        self.bounded("branch", params.branch.as_deref())?;
         let context = driven.context();
         let path = params.branch.unwrap_or_default();
         let asked = context.interrupt::<JsonValue>(&params.key, params.payload);
@@ -435,6 +434,20 @@ impl Server {
             driven.quiesce().await;
             driven.release().await;
         }
+    }
+
+    /// A name, interrupt key or branch the server keeps (in a ticket, a
+    /// counter or the stored status) for the workflow's life: on a tenant
+    /// connection, where the memory is another party's, at most
+    /// [`MAX_WORKFLOW_ID_BYTES`]. A local connection is not held to it, and
+    /// a `key` that is only hashed (a step's, an agent call's) never is.
+    fn bounded(&self, what: &str, text: Option<&str>) -> Result<(), ErrorObject> {
+        let long = text.is_some_and(|text| text.len() > MAX_WORKFLOW_ID_BYTES);
+        if long && self.0.tenant.is_some() {
+            let message = format!("{what} must be at most {MAX_WORKFLOW_ID_BYTES} bytes");
+            return Err(invalid_params(&message));
+        }
+        Ok(())
     }
 
     fn driven(&self, run_id: &str) -> Result<Arc<Driven>, ErrorObject> {
@@ -609,16 +622,6 @@ fn workflow_id(run_id: &str) -> Result<String, ErrorObject> {
         return Err(invalid_params(&message));
     }
     Ok(run_id.to_owned())
-}
-
-/// A client-supplied name, key or branch the server keeps (in a ticket or a
-/// counter) for the workflow's life: at most [`MAX_WORKFLOW_ID_BYTES`].
-fn bounded(what: &str, text: Option<&str>) -> Result<(), ErrorObject> {
-    if text.is_some_and(|text| text.len() > MAX_WORKFLOW_ID_BYTES) {
-        let message = format!("{what} must be at most {MAX_WORKFLOW_ID_BYTES} bytes");
-        return Err(invalid_params(&message));
-    }
-    Ok(())
 }
 
 /// The budget a workflow runs under: the one it asked for, held to the

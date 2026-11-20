@@ -1005,7 +1005,6 @@ async fn a_workflow_call_refuses_a_name_key_or_branch_over_the_id_bound() {
             json!({"name": "s", "branch": long}),
         ),
         (method::WORKFLOW_AGENT, json!({"prompt": "p", "name": long})),
-        (method::WORKFLOW_AGENT, json!({"prompt": "p", "key": long})),
         (
             method::WORKFLOW_AGENT,
             json!({"prompt": "p", "branch": long}),
@@ -1025,6 +1024,13 @@ async fn a_workflow_call_refuses_a_name_key_or_branch_over_the_id_bound() {
             "{name} {params}"
         );
     }
+    // A `key` that is only hashed is not bounded: the call goes on (and
+    // fails here for want of a scripted turn, not for its key).
+    let params = json!({"run_id": "w", "prompt": "p", "key": long});
+    let failed = rpc.call(method::WORKFLOW_AGENT, params).await;
+    assert_ne!(code_of_call(failed).0, code::INVALID_PARAMS);
+    let params = json!({"run_id": "w", "name": "s", "key": long});
+    rpc.call(method::WORKFLOW_STEP_BEGIN, params).await.unwrap();
     // The bound itself is allowed.
     let params = json!({"run_id": "w", "name": ok, "branch": ok});
     let begun = rpc.call(method::WORKFLOW_STEP_BEGIN, params).await.unwrap();
@@ -1200,4 +1206,27 @@ async fn a_well_behaved_flow_with_branches_and_a_replay_stays_within_max_records
         let started = start(&rpc, &agent, "w").await.unwrap();
         assert_eq!(started["records"], json!(6));
     }
+}
+
+/// A local connection (stdio, no tenant) holds its own memory: it is not
+/// held to the 256-byte bound on `name`, `key` and `branch`.
+#[tokio::test]
+async fn a_local_workflow_keeps_its_long_names_and_keys() {
+    within(async {
+        let rpc = Rpc::new();
+        let agent = rpc.open(scripted(vec![], None, "")).await;
+        start(&rpc, &agent, "w").await.unwrap();
+        let long = "x".repeat(300);
+        let step = json!({"run_id": "w", "name": long, "branch": long});
+        let begun = rpc.call(method::WORKFLOW_STEP_BEGIN, step).await;
+        let asked = json!({"run_id": "w", "key": long, "branch": long});
+        let asked = rpc.call(method::WORKFLOW_INTERRUPT, asked).await;
+        assert!(
+            begun.is_ok() && asked.is_ok(),
+            "step.begin: {:?}; interrupt: {:?}",
+            begun.err().map(|error| error.to_string()),
+            asked.err().map(|error| error.to_string())
+        );
+    })
+    .await;
 }
