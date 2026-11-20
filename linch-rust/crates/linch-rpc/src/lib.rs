@@ -350,8 +350,9 @@
 //!
 //! **`run.report`** `{agent, run_id, timeline?}` answers
 //! `{"report", "markdown", "truncated"?}`; strings over 64 KiB in it are cut
-//! with a marker and the timeline loses its last events past 8 MiB, both
-//! counted in `truncated`.
+//! with a marker, the timeline loses its last events past 8 MiB, and then the
+//! text of each tool call is cut to 8 KiB, then 1 KiB, all counted in
+//! `truncated`; a report over 8 MiB even then is `-32603`.
 //!
 //! ## Scheduler
 //!

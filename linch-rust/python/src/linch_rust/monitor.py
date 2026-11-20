@@ -195,10 +195,13 @@ class ReportTruncated(TypedDict):
             `... [truncated: N more bytes]` marker.
         timeline_omitted: How many timeline events were dropped from its end;
             absent when none was.
+        tool_call_text: How many tool calls had their text cut to 8 KiB or
+            1 KiB to fit; absent when none had.
     """
 
     strings: int
     timeline_omitted: NotRequired[int]
+    tool_call_text: NotRequired[int]
 
 
 class RunReportResult(TypedDict):

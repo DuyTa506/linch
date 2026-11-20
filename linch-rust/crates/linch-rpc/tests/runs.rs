@@ -356,6 +356,44 @@ async fn run_report_of_a_large_run_can_be_read() {
     }
 }
 
+/// Tool calls with inputs and results just under the 64 KiB a string keeps
+/// (nothing to cut) make a report over its 8 MiB outside the timeline: the
+/// text of each call is shortened, and the answer says so.
+#[tokio::test]
+async fn run_report_of_a_run_with_many_tool_results_can_be_read() {
+    let result = "r".repeat(60 * 1024);
+    let mut rpc = Rpc::with_handler(handler(move |_, _, _| {
+        let result = result.clone();
+        async move { Ok(json!({"value": result})) }
+    }));
+    let input = "q".repeat(40 * 1024);
+    let mut turns: Vec<_> = (0..90)
+        .map(|n| {
+            let input = json!({"q": format!("{n} {input}")});
+            tool_turn(&format!("call_{n}"), "lookup", input)
+        })
+        .collect();
+    turns.push(text_turn("Done."));
+    let tools = json!({"tools": [host_tool("lookup", "read")]});
+    let agent = rpc.open(hosted(turns, "default", tools)).await;
+    let run_id = rpc.start(&agent, "s1", "Go.").await;
+    let ended = rpc.until_end(&run_id).await;
+    assert!(ended.error.is_none(), "the run itself streams fine");
+    for timeline in [false, true] {
+        let params = json!({"agent": agent, "run_id": run_id, "timeline": timeline});
+        let report = rpc.call("run.report", params).await;
+        let report = report.unwrap_or_else(|error| panic!("timeline {timeline}: {error}"));
+        assert!(report.to_string().len() <= 8 * 1024 * 1024, "{timeline}");
+        assert!(
+            report["truncated"]["tool_call_text"].as_u64().unwrap() >= 1,
+            "{timeline}: {}",
+            report["truncated"]
+        );
+        let calls = report["report"]["tool_calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 90, "{timeline}: every call is still listed");
+    }
+}
+
 /// The members added for paging stay off the wire while unset.
 #[test]
 fn unset_run_events_paging_members_are_not_on_the_wire() {
