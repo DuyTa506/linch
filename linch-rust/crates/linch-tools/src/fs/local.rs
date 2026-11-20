@@ -106,6 +106,11 @@ impl LocalFs {
         beneath::locate(&self.root_fd, &self.root, &relative, path, Links::Follow)
     }
 
+    /// Every regular file under the root, as real paths. Blocking.
+    pub(crate) fn files(&self) -> Result<Vec<PathBuf>, FsError> {
+        search::files(self)
+    }
+
     /// Opens the files a search found by name, through the root descriptor.
     pub(crate) fn opener(&self) -> Opener {
         Opener::new(&self.root_fd, &self.root)

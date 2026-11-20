@@ -330,8 +330,8 @@ ignore toàn cục của host không được đọc. Một tên được liệt
 nên không có giới hạn độ sâu. Tên không qua được bước đó (không đọc được hoặc
 không tìm kiếm được, đã mất, bị hoán đổi) không bao giờ được nêu tên trong đầu ra
 hay lỗi nào: `Grep` và `Glob` kết thúc bằng một dòng cho biết có bao nhiêu mục bị
-bỏ ra, và một thư mục không đọc được tính là một. Hết descriptor là một lỗi,
-không phải câu trả lời rỗng. Không được bảo vệ: tên nào tồn tại trong một thư mục
+bỏ ra, và một thư mục không đọc được tính là một. Hết descriptor là một lỗi
+với cả ba, không phải câu trả lời rỗng hay thiếu. Không được bảo vệ: tên nào tồn tại trong một thư mục
 đã bị hoán đổi. `Glob`, `Grep` và `ls` chỉ báo một tên được liệt kê nếu nó cũng là
 tệp thường tại đường dẫn đó bên dưới thư mục gốc, nên một bên gọi đoán một tên, tạo
 nó trong workspace và đua một phép hoán đổi có thể biết thư mục host cũng có nó

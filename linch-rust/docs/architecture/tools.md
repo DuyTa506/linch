@@ -334,7 +334,7 @@ symlink allowed, one descriptor at a time, so there is no depth limit. A name
 that fails that (unreadable or not searchable, gone, swapped) is never named
 in any output or error: `Grep` and `Glob` end with a line giving how many
 entries were left out, and an unreadable directory counts as one. Running out
-of descriptors is an error, not an empty answer. Not protected: which names
+of descriptors is an error for all three, not an empty or partial answer. Not protected: which names
 exist in a directory that was swapped. `Glob`, `Grep` and `ls` report a listed
 name only if it is also a regular file at that path beneath the root, so a
 caller that guesses a name, creates it in the workspace and races a swap can

@@ -138,7 +138,9 @@ impl FileBackend for DiskBackend {
 
     async fn ls(&self, prefix: &str) -> Result<Vec<String>, VfsError> {
         let prefix = normalize_path(prefix)?;
-        let mut found = self.blocking(|fs| Ok(walk(&fs))).await?;
+        let mut found = self
+            .blocking(|fs| walk(&fs).map_err(|error| VfsError::Backend(error.into())))
+            .await?;
         found.retain(|path| is_under(path, &prefix));
         found.sort();
         Ok(found)
@@ -172,18 +174,16 @@ impl FileBackend for DiskBackend {
 /// followed, and names that are not UTF-8 are left out (no virtual path can
 /// name them). The walk only proposes names: each file is looked at again
 /// from the root descriptor, so a directory swapped for a symlink since it
-/// was listed adds nothing from outside the root.
-fn walk(fs: &LocalFs) -> Vec<String> {
+/// was listed adds nothing from outside the root. An entry that cannot be
+/// read from the root is left out without being named; running out of
+/// descriptors is an error, since a short list would pass for the whole one.
+fn walk(fs: &LocalFs) -> Result<Vec<String>, FsError> {
     let root = fs.root();
-    let mut opener = fs.opener();
-    let mut walk = ignore::WalkBuilder::new(root);
-    walk.standard_filters(false).follow_links(false);
-    walk.build()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
-        .filter(|entry| opener.stat(entry.path()).is_ok_and(|stat| stat.is_some()))
-        .filter_map(|entry| virtual_path(root, entry.path()))
-        .collect()
+    let files = fs.files()?;
+    Ok(files
+        .iter()
+        .filter_map(|real| virtual_path(root, real))
+        .collect())
 }
 
 fn virtual_path(root: &Path, real: &Path) -> Option<String> {

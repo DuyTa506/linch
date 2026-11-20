@@ -128,6 +128,24 @@ pub(super) fn grep(
     Ok(hits)
 }
 
+/// Every regular file under the root, walked with no filter and looked at
+/// again from the root descriptor. Entries that cannot be read from the root
+/// are left out; running out of descriptors is an error.
+pub(super) fn files(fs: &LocalFs) -> Result<Vec<std::path::PathBuf>, FsError> {
+    let mut opener = fs.opener();
+    let mut walk = WalkBuilder::new(fs.root());
+    walk.standard_filters(false).follow_links(false);
+    let (mut found, mut left_out) = (Vec::new(), 0);
+    for entry in walk.build() {
+        if let Some(path) = listed_file(entry, &mut left_out)?
+            && opener.stat(&path)?.is_some()
+        {
+            found.push(path);
+        }
+    }
+    Ok(found)
+}
+
 /// List files under the query's path whose names match its pattern.
 pub(super) fn glob(
     fs: &LocalFs,
