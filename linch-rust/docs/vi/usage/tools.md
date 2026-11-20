@@ -708,7 +708,9 @@ trước. Mọi thứ còn lại nằm ở [Scheduler](./scheduler.md#để-mode
 văn bản nằm trong kho, không phải trên đĩa: ghi chú nháp, kế hoạch, và cả các kết
 quả tool quá lớn cho cuộc hội thoại. Với `offload_threshold_tokens`, một kết quả
 (chuỗi, giá trị có cấu trúc hoặc lỗi) được ước tính trên số token đó sẽ được ghi vào
-`/offload/<tool>_<tool_use_id>.txt` và model nhận vài dòng đầu cùng đường dẫn:
+`/offload/<session>/<tool>_<tool_use_id>.txt` và model nhận vài dòng đầu cùng đường dẫn
+(tên đã bị chiếm trong session đó, do nhà cung cấp lặp lại call id, được thêm `_2`, `_3`;
+ký tự ngoài chữ, chữ số, `_`, `-` và `.` trong một id được ghi thành `%XX`):
 
 ```python
 import asyncio
@@ -730,7 +732,7 @@ config: AgentConfig = {
         "id": "scripted",
         "turns": [
             tool_turn("c1", "export_logs", {"service": "api"}),
-            tool_turn("c2", "read_file", {"path": "/offload/export_logs_c1.txt", "offset": 1999}),
+            tool_turn("c2", "read_file", {"path": "/offload/s1/export_logs_c1.txt", "offset": 1999}),
             text_turn("Read the tail."),
         ],
     },
@@ -752,7 +754,7 @@ asyncio.run(main())
 ```
 
 ```text
-export_logs: 371 chars, ends 'read the rest, or ls("/offload") to list offloaded results.]'
+export_logs: 380 chars, ends 'd the rest, or ls("/offload/s1") to list offloaded results.]'
 read_file: 27 chars, ends 'api line 1999\napi line 2000'
 ```
 

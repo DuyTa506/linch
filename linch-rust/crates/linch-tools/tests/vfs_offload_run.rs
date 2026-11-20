@@ -49,7 +49,7 @@ impl Tool for Big {
 
 #[tokio::test]
 async fn the_logged_result_is_the_pointer_and_reads_back() {
-    let path = "/offload/big_call_1.txt";
+    let path = "/offload/s1/big_call_1.txt";
     let provider = Arc::new(ScriptedProvider::new([
         TurnBuilder::new(MODEL)
             .tool_call("call_1", "big", &json!({}))

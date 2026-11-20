@@ -495,7 +495,10 @@ host adds it to the system prompt when it offers these tools.
 
 `ResultOffload` (`crates/linch-tools/src/vfs/offload.rs:87`) is a
 `post_tool_use` hook. A result estimated above `threshold_tokens` (four bytes
-per token) is written whole to `/offload/{tool}_{tool_use_id}.txt` and
+per token) is written whole to `/offload/{session}/{tool}_{tool_use_id}.txt` (ids escaped
+to one path segment, `%XX` for bytes outside `[A-Za-z0-9_.-]`; a taken name gets
+`_2`, `_3`, so two sessions on a shared backend, or a provider that repeats call ids
+across turns, never overwrite a logged pointer's file) and
 replaced by its first 10 lines (at most 2000 bytes; the pointer says "cut at
 2000 bytes" when the bytes ended the preview) and a pointer the model can
 follow with `read_file`. Three kinds are covered (`offload.rs:152`,

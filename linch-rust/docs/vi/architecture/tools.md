@@ -482,7 +482,10 @@ thêm nó vào system prompt khi cung cấp các tool này.
 
 `ResultOffload` (`crates/linch-tools/src/vfs/offload.rs:87`) là một hook
 `post_tool_use`. Một kết quả ước lượng vượt `threshold_tokens` (bốn byte cho mỗi token)
-được ghi nguyên vẹn vào `/offload/{tool}_{tool_use_id}.txt` và được thay bằng 10 dòng đầu
+được ghi nguyên vẹn vào `/offload/{session}/{tool}_{tool_use_id}.txt` (id được escape
+thành một đoạn đường dẫn, `%XX` cho byte ngoài `[A-Za-z0-9_.-]`; tên đã bị chiếm được thêm
+`_2`, `_3`, nên hai session dùng chung một backend, hay một nhà cung cấp lặp lại call id
+qua các lượt, không bao giờ ghi đè tệp mà một con trỏ đã ghi log trỏ tới) và được thay bằng 10 dòng đầu
 (tối đa 2000 byte; con trỏ ghi "cut at 2000 bytes" khi số byte kết thúc phần xem trước) cùng
 một con trỏ mà model có thể theo bằng `read_file`. Ba loại được phủ (`offload.rs:152`,
 `offload.rs:190`):

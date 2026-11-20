@@ -706,8 +706,10 @@ text files that live in the stores, not on disk: scratch notes, plans, and
 tool results too large for the conversation. With
 `offload_threshold_tokens`, a result estimated above that many tokens (a
 string, a structured value or an error) is written to
-`/offload/<tool>_<tool_use_id>.txt` and the model gets its first lines and the
-path:
+`/offload/<session>/<tool>_<tool_use_id>.txt` and the model gets its first lines
+and the path (a name already taken in that session, from a provider that repeats
+call ids, gets `_2`, `_3`; characters other than letters, digits, `_`, `-` and
+`.` in an id are written as `%XX`):
 
 ```python
 import asyncio
@@ -729,7 +731,7 @@ config: AgentConfig = {
         "id": "scripted",
         "turns": [
             tool_turn("c1", "export_logs", {"service": "api"}),
-            tool_turn("c2", "read_file", {"path": "/offload/export_logs_c1.txt", "offset": 1999}),
+            tool_turn("c2", "read_file", {"path": "/offload/s1/export_logs_c1.txt", "offset": 1999}),
             text_turn("Read the tail."),
         ],
     },
@@ -751,7 +753,7 @@ asyncio.run(main())
 ```
 
 ```text
-export_logs: 371 chars, ends 'read the rest, or ls("/offload") to list offloaded results.]'
+export_logs: 380 chars, ends 'd the rest, or ls("/offload/s1") to list offloaded results.]'
 read_file: 27 chars, ends 'api line 1999\napi line 2000'
 ```
 

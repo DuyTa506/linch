@@ -15,7 +15,7 @@
 //! hook answers, so a logged pointer always names a written file (for a
 //! durable backend). A crash after the write and before the tool end is
 //! durable leaves an unreferenced file; the resumed run reports the call as
-//! interrupted, and a retry of the same call overwrites the same path. With
+//! interrupted, and a retry of the same call writes a new file beside it. With
 //! [`super::MemorySessions`] the files live only as long as the process, so
 //! a run resumed elsewhere finds the pointer but not the file.
 
@@ -49,8 +49,8 @@ pub struct OffloadConfig {
     pub threshold_tokens: u64,
     /// Leading lines kept inline as a preview (default 10).
     pub preview_lines: usize,
-    /// Virtual directory offloaded results are written under (default
-    /// `/offload`).
+    /// Virtual directory offloaded results are written under, in one
+    /// directory per session (default `/offload`).
     pub path_prefix: String,
     /// Tools whose results are never offloaded. The default holds the four
     /// virtual filesystem tools, so reading an offloaded file back is never
@@ -126,24 +126,38 @@ impl ResultOffload {
             ),
             false => (lines, String::new()),
         };
-        let prefix = &self.prefix;
+        let dir = path.rsplit_once('/').map_or("/", |(dir, _)| dir);
         format!(
             "{preview}\n\n[Tool result truncated: ~{tokens} tokens ({bytes} bytes) offloaded to \
              '{path}'. Showing the first {shown} lines{note}. Use read_file(path=\"{path}\", \
-             offset=..., limit=...) to read the rest, or ls(\"{prefix}\") to list offloaded \
+             offset=..., limit=...) to read the rest, or ls(\"{dir}\") to list offloaded \
              results.]"
         )
     }
 
     /// Write `text` to the call's file and return its path.
+    ///
+    /// The file is `{prefix}/{session}/{tool}_{call id}.txt`; a name already
+    /// taken (a provider that repeats call ids across turns) gets `_2`,
+    /// `_3`... so a logged pointer keeps naming the result it was made for.
     async fn store(
         &self,
         request: &PostToolUseRequest,
         text: &str,
     ) -> Result<String, CallbackError> {
-        let name = format!("{}_{}.txt", request.tool_name, request.tool_use_id);
-        let path = normalize_path(&format!("{}/{name}", self.prefix))?;
         let backend = self.files.backend(&request.session_id);
+        let dir = format!("{}/{}", self.prefix, segment(request.session_id.as_str()));
+        let name = format!(
+            "{}_{}",
+            segment(&request.tool_name),
+            segment(&request.tool_use_id)
+        );
+        let mut path = normalize_path(&format!("{dir}/{name}.txt"))?;
+        let mut copy = 1;
+        while backend.exists(&path).await? {
+            copy += 1;
+            path = normalize_path(&format!("{dir}/{name}_{copy}.txt"))?;
+        }
         backend.write(&path, text).await?;
         Ok(path)
     }
@@ -219,6 +233,22 @@ impl ResultOffload {
             }),
         })
     }
+}
+
+/// `id` as one path segment: bytes outside `[A-Za-z0-9_.-]` become `%XX`
+/// (so `/` and `%` never occur and distinct ids stay distinct), and a
+/// segment of dots only, which names a directory, has its dots escaped.
+fn segment(id: &str) -> String {
+    let dots_only = id.bytes().all(|byte| byte == b'.');
+    let mut out = String::with_capacity(id.len());
+    for byte in id.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-' => out.push(byte as char),
+            b'.' if !dots_only => out.push('.'),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 /// The host-facing facts of an offloaded result: where it went and how big

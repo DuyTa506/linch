@@ -10,7 +10,8 @@ use linch_core::{
     ToolOutputError, ToolResult,
 };
 use linch_tools::vfs::{
-    FileBackend, MemorySessions, OffloadConfig, ResultOffload, SessionFiles, SharedFiles, VfsError,
+    FileBackend, MemoryBackend, MemorySessions, OffloadConfig, ResultOffload, SessionFiles,
+    SharedFiles, VfsError,
 };
 
 /// `n` numbered lines, `line 1` to `line n`, about 8 bytes each.
@@ -72,7 +73,7 @@ async fn an_oversized_result_is_stored_and_replaced_by_a_pointer() {
     let response = hook.call(&request("web_search", Ok(output))).await.unwrap();
     let output = replaced(response).expect("offloaded");
 
-    let path = "/offload/web_search_call_7.txt";
+    let path = "/offload/s1/web_search_call_7.txt";
     let backend = sessions.backend(&SessionId::from("s1"));
     assert_eq!(
         backend.read(path).await.unwrap(),
@@ -83,7 +84,7 @@ async fn an_oversized_result_is_stored_and_replaced_by_a_pointer() {
     let expected = format!(
         "{}\n\n[Tool result truncated: ~{tokens} tokens ({} bytes) offloaded to '{path}'. \
          Showing the first 10 lines. Use read_file(path=\"{path}\", offset=..., limit=...) \
-         to read the rest, or ls(\"/offload\") to list offloaded results.]",
+         to read the rest, or ls(\"/offload/s1\") to list offloaded results.]",
         lines(10),
         payload.len()
     );
@@ -160,7 +161,7 @@ async fn a_structured_value_is_stored_pretty_printed_and_replaced_by_a_pointer()
     let response = hook.call(&request("query", Ok(output))).await.unwrap();
     let output = replaced(response).expect("offloaded");
 
-    let path = "/offload/query_call_7.txt";
+    let path = "/offload/s1/query_call_7.txt";
     let stored = sessions
         .backend(&SessionId::from("s1"))
         .read(path)
@@ -211,14 +212,14 @@ async fn a_long_error_message_is_stored_and_keeps_its_code() {
     let response = hook.call(&request("Bash", Err(error))).await.unwrap();
     let error = replaced_error(response);
 
-    let path = "/offload/Bash_call_7.txt";
+    let path = "/offload/s1/Bash_call_7.txt";
     let backend = sessions.backend(&SessionId::from("s1"));
     assert_eq!(backend.read(path).await.unwrap(), message);
     let tokens = message.len() / 4;
     let expected = format!(
         "{}\n\n[Tool result truncated: ~{tokens} tokens ({} bytes) offloaded to '{path}'. \
          Showing the first 10 lines. Use read_file(path=\"{path}\", offset=..., limit=...) \
-         to read the rest, or ls(\"/offload\") to list offloaded results.]",
+         to read the rest, or ls(\"/offload/s1\") to list offloaded results.]",
         lines(10),
         message.len()
     );
@@ -242,7 +243,7 @@ async fn an_error_without_details_gets_the_sizes_as_its_details() {
     assert_eq!(error.code, None);
     assert_eq!(
         error.details.unwrap()["offloaded_to"],
-        "/offload/Bash_call_7.txt"
+        "/offload/s1/Bash_call_7.txt"
     );
 }
 
@@ -339,4 +340,79 @@ async fn a_failed_write_keeps_the_original_result_and_is_recorded() {
         },
         other => panic!("expected one record, got {other:?}"),
     }
+}
+
+fn request_of(session: &str, call: &str, text: &str) -> PostToolUseRequest {
+    PostToolUseRequest {
+        session_id: SessionId::from(session),
+        run_id: RunId::from("r1"),
+        tool_use_id: call.into(),
+        tool_name: "export".into(),
+        input: JsonObject::new(),
+        result: Ok(ToolOutput::new(text)),
+    }
+}
+
+/// The path a replacement points at.
+fn offloaded_to(response: PostToolUseResponse) -> String {
+    let output = replaced(response).expect("offloaded");
+    output.metadata["offloaded_to"].as_str().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn an_offloaded_result_is_not_overwritten_by_another_session() {
+    let backend = Arc::new(MemoryBackend::new());
+    let hook = offload(Arc::new(SharedFiles::new(backend.clone())), 10);
+    let alice = "alice's rows\n".repeat(50);
+    let bob = "bob's rows\n".repeat(50);
+    // A provider that names the first call of every response `call_0`.
+    let first = hook.call(&request_of("s-alice", "call_0", &alice)).await;
+    let second = hook.call(&request_of("s-bob", "call_0", &bob)).await;
+    let (first, second) = (offloaded_to(first.unwrap()), offloaded_to(second.unwrap()));
+    assert_ne!(first, second);
+    assert_eq!(backend.read(&first).await.unwrap(), alice);
+    assert_eq!(backend.read(&second).await.unwrap(), bob);
+}
+
+#[tokio::test]
+async fn a_repeated_call_id_in_one_session_does_not_overwrite_the_earlier_result() {
+    let backend = Arc::new(MemoryBackend::new());
+    let hook = offload(Arc::new(SharedFiles::new(backend.clone())), 10);
+    let turn_one = "turn one\n".repeat(50);
+    let turn_two = "turn two\n".repeat(50);
+    let first = hook.call(&request_of("s1", "call_0", &turn_one)).await;
+    let second = hook.call(&request_of("s1", "call_0", &turn_two)).await;
+    let (first, second) = (offloaded_to(first.unwrap()), offloaded_to(second.unwrap()));
+    assert_ne!(first, second);
+    assert_eq!(backend.read(&first).await.unwrap(), turn_one);
+    assert_eq!(backend.read(&second).await.unwrap(), turn_two);
+}
+
+#[tokio::test]
+async fn a_call_or_session_id_with_path_syntax_is_still_offloaded_under_the_prefix() {
+    let backend = Arc::new(MemoryBackend::new());
+    let hook = offload(Arc::new(SharedFiles::new(backend.clone())), 10);
+    let text = "rows\n".repeat(50);
+    let mut paths = Vec::new();
+    for (session, call) in [
+        ("s1", "../../etc/x"),
+        ("s1", "a/b"),
+        ("s1", ".."),
+        ("..", "call_0"),
+        (".", "call_0"),
+        ("a/b", "call_0"),
+        ("a_b", "call_0"),
+    ] {
+        let response = hook.call(&request_of(session, call, &text)).await;
+        let path = offloaded_to(response.unwrap());
+        assert!(path.starts_with("/offload/"), "{path}");
+        let parts: Vec<&str> = path.split('/').collect();
+        assert_eq!(parts.len(), 4, "/offload/<session>/<file>: {path}");
+        assert!(parts.iter().all(|part| *part != ".." && *part != "."));
+        assert_eq!(backend.read(&path).await.unwrap(), text, "{path}");
+        paths.push(path);
+    }
+    paths.sort();
+    paths.dedup();
+    assert_eq!(paths.len(), 7, "every id gets its own file: {paths:?}");
 }

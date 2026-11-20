@@ -139,7 +139,7 @@ async fn a_minified_line_is_offloaded_into_postgres_and_paged_back_by_byte() {
         .unwrap();
         config.open()
     };
-    let path = "/offload/Read_call_1.txt";
+    let path = "/offload/s1/Read_call_1.txt";
     let turns = vec![
         call("call_1", "Read", json!({"file_path": "min.json"})),
         text("Read."),
@@ -201,9 +201,9 @@ async fn an_offloaded_result_outlives_the_agent_and_stays_out_of_the_workspace()
     ];
     let opened = open(turns).await.unwrap();
     let pointer = tool_result(opened.agent(), "s1").await;
-    assert!(pointer.contains("/offload/Read_call_1.txt"), "{pointer}");
+    assert!(pointer.contains("/offload/s1/Read_call_1.txt"), "{pointer}");
     opened.close().await;
-    let path = "/offload/Read_call_1.txt";
+    let path = "/offload/s1/Read_call_1.txt";
     assert_eq!(
         db.files().await,
         [("p10a-tenant".to_owned(), path.to_owned())]

@@ -110,7 +110,7 @@ async fn an_offloaded_result_reads_back_through_read_file() {
         call(
             "call_2",
             "read_file",
-            json!({"path": "/offload/Read_call_1.txt", "offset": 150, "limit": 1}),
+            json!({"path": "/offload/s1/Read_call_1.txt", "offset": 150, "limit": 1}),
         ),
         text("Read it."),
     ];
@@ -124,7 +124,7 @@ async fn an_offloaded_result_reads_back_through_read_file() {
     assert_eq!((read.tool.as_str(), read.is_error), ("Read", false));
     assert!(
         read.text
-            .contains("offloaded to '/offload/Read_call_1.txt'"),
+            .contains("offloaded to '/offload/s1/Read_call_1.txt'"),
         "{}",
         read.text
     );

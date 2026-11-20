@@ -6,6 +6,8 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ## Unreleased
 
+- **Offload paths.** An offloaded tool result is written to `/offload/<session>/<tool>_<call id>.txt`, and a name already taken gets `_2`, `_3`, so two sessions on a shared backend, or a provider that repeats call ids, no longer overwrite each other's file; a call id with `/` or `..` is escaped instead of leaving the result inline.
+
 - **`Grep` memory.** A `Grep` pattern may compile to at most 10 MiB (a larger one is an `invalid_query`) and one matcher's lazy DFA cache is capped at 32 MiB, down from the library's 100 MiB and 1000 MiB.
 
 - **`Edit` size.** `Edit` with `replace_all` computes the size of its result before building it and refuses one past 10 MiB (`too_large`); an empty `old_string` with `replace_all` is refused (`empty_old_string`).
