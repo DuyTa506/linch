@@ -155,15 +155,38 @@ pub struct TenantConfig {
     pub allow: AllowConfig,
 }
 
-/// Where a bearer token comes from. `Debug` hides an inline value.
+/// Where a bearer token comes from. `Debug` hides an inline value, and a
+/// value in the wrong shape is refused without being repeated.
 #[derive(Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(try_from = "serde_json::Value")]
 pub enum TokenSource {
     /// `{"env": "NAME"}`: the value of an environment variable of the
     /// server, read at startup.
     Env(String),
     /// `{"value": "..."}`: the token itself.
     Value(String),
+}
+
+impl TryFrom<serde_json::Value> for TokenSource {
+    type Error = &'static str;
+
+    /// Exactly one of `env` and `value`, a string. The error never holds
+    /// the value, which may be the secret itself given in the wrong shape.
+    fn try_from(value: serde_json::Value) -> Result<Self, Self::Error> {
+        const SHAPE: &str = "expected an object with `env` or `value`";
+        let serde_json::Value::Object(map) = value else {
+            return Err(SHAPE);
+        };
+        let mut entries = map.into_iter();
+        match (entries.next(), entries.next()) {
+            (Some((key, serde_json::Value::String(text))), None) => match key.as_str() {
+                "env" => Ok(Self::Env(text)),
+                "value" => Ok(Self::Value(text)),
+                _ => Err(SHAPE),
+            },
+            _ => Err(SHAPE),
+        }
+    }
 }
 
 impl fmt::Debug for TokenSource {

@@ -351,7 +351,8 @@ curl -i -H "Authorization: Bearer $LINCH_TOKEN_ACME" \
   tenant, or the call raises `NotAllowed` (`kind == "principal"`). The server
   does not fill one in.
 - Tokens are kept only as SHA-256 digests and compared in constant time. No
-  token is written to any output.
+  token is written to any output: a token, `cache_salt_secret` or `worker.dsn` given in the wrong shape (a bare string
+  where `{"env": ...}` or `{"value": ...}` belongs) is refused with `expected an object with `env` or `value``, without the value.
 
 ### What keeps tenants apart
 

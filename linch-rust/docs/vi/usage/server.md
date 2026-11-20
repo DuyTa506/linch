@@ -350,7 +350,8 @@ curl -i -H "Authorization: Bearer $LINCH_TOKEN_ACME" \
   (`agent.run(..., principal=...)` từ Python) phải nêu tenant của kết nối, nếu không
   lệnh gọi raise `NotAllowed` (`kind == "principal"`). Server không tự điền giá trị.
 - Token chỉ được lưu dưới dạng digest SHA-256 và được so sánh trong thời gian không
-  đổi. Không token nào được ghi ra bất kỳ đầu ra nào.
+  đổi. Không token nào được ghi ra bất kỳ đầu ra nào: một token, `cache_salt_secret` hay `worker.dsn` sai dạng (một chuỗi trần
+  ở chỗ cần `{"env": ...}` hoặc `{"value": ...}`) bị từ chối với `expected an object with `env` or `value``, không kèm giá trị.
 
 ### Điều gì giữ các tenant tách nhau
 
