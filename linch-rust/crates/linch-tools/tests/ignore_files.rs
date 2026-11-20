@@ -157,3 +157,28 @@ async fn a_grep_glob_finds_the_hidden_files_it_matches() {
         [".top.rs", "src/.plain.rs", "src/m.rs"]
     );
 }
+
+/// The rules of a directory apply to it and below, not to its siblings or to
+/// the entries that follow it in the parent.
+#[tokio::test]
+async fn ignore_rules_do_not_leak_between_sibling_directories() {
+    let ws = Workspace::new();
+    ws.put("a/.gitignore", "x.txt\n");
+    ws.put("a/sub/.gitignore", "y.txt\n");
+    for name in [
+        "a/x.txt",
+        "a/y.txt",
+        "a/sub/x.txt",
+        "a/sub/y.txt",
+        "a/z.txt",
+        "b/x.txt",
+        "b/y.txt",
+        "x.txt",
+    ] {
+        ws.put(name, "needle\n");
+    }
+    assert_eq!(
+        grepped(&ws, None).await,
+        ["a/y.txt", "a/z.txt", "b/x.txt", "b/y.txt", "x.txt"]
+    );
+}

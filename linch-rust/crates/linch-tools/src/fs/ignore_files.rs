@@ -14,7 +14,6 @@
 //! also those above the searched path. `.git/info/exclude` and the host's
 //! global ignore file are not read.
 
-use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -50,7 +49,9 @@ struct State {
     /// When the search's time limit passes; every entry after it is dropped.
     deadline: Option<Instant>,
     expired: bool,
-    dirs: HashMap<PathBuf, Dir>,
+    /// The rules of the directories from the workspace root down to the one
+    /// the walk is in.
+    chain: Vec<(PathBuf, Dir)>,
     /// The first error that is not "cannot be read from the root": the
     /// process is out of descriptors.
     error: Option<FsError>,
@@ -76,7 +77,7 @@ impl IgnoreFiles {
             hide_hidden,
             deadline,
             expired: false,
-            dirs: HashMap::new(),
+            chain: Vec::new(),
             error: None,
         })))
     }
@@ -139,8 +140,8 @@ impl State {
         if !self.overrides.matched(path, is_dir).is_none() {
             return true;
         }
-        for dir in self.dirs_above(path) {
-            self.load(&dir);
+        if let Some(parent) = path.parent() {
+            self.enter(parent);
         }
         let verdict = self
             .verdict(path, is_dir, |dir| dir.ignore.as_ref())
@@ -155,12 +156,34 @@ impl State {
         }
     }
 
-    /// The directories of the workspace that hold `path`, nearest first.
-    fn dirs_above(&self, path: &Path) -> Vec<PathBuf> {
-        (path.ancestors().skip(1))
-            .take_while(|dir| dir.starts_with(&self.root))
-            .map(Path::to_owned)
-            .collect()
+    /// Make `chain` the directories from the workspace root down to `dir`.
+    /// Consecutive entries of a walk share most of it, so only the directories
+    /// the walk has just entered are read.
+    fn enter(&mut self, dir: &Path) {
+        if self.chain.last().is_some_and(|(last, _)| last == dir) {
+            return;
+        }
+        while (self.chain.last()).is_some_and(|(last, _)| !dir.starts_with(last)) {
+            self.chain.pop();
+        }
+        if self.chain.is_empty() {
+            let root = self.root.clone();
+            let rules = self.load(&root);
+            self.chain.push((root, rules));
+        }
+        let mut at = self
+            .chain
+            .last()
+            .map(|(last, _)| last.clone())
+            .unwrap_or_default();
+        let Ok(below) = dir.strip_prefix(&at) else {
+            return;
+        };
+        for part in below.components() {
+            at.push(part);
+            let rules = self.load(&at);
+            self.chain.push((at.clone(), rules));
+        }
     }
 
     /// What the nearest matching rule of one kind says: `Some(true)` to
@@ -169,24 +192,18 @@ impl State {
     where
         F: Fn(&Dir) -> Option<&Gitignore>,
     {
-        path.ancestors()
-            .skip(1)
-            .take_while(|dir| dir.starts_with(&self.root))
-            .filter_map(|dir| pick(self.dirs.get(dir)?))
+        (self.chain.iter().rev())
+            .filter_map(|(_, dir)| pick(dir))
             .map(|rules| rules.matched(path, is_dir))
             .find(|found| !found.is_none())
             .map(|found| found.is_ignore())
     }
 
-    fn load(&mut self, dir: &Path) {
-        if self.dirs.contains_key(dir) {
-            return;
-        }
-        let rules = Dir {
+    fn load(&mut self, dir: &Path) -> Dir {
+        Dir {
             ignore: self.read(dir, ".ignore"),
             git: self.read(dir, ".gitignore"),
-        };
-        self.dirs.insert(dir.to_owned(), rules);
+        }
     }
 
     fn read(&mut self, dir: &Path, name: &str) -> Option<Gitignore> {
