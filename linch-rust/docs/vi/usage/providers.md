@@ -515,7 +515,12 @@ context window của model (`context_length`) không bao giờ được thử l�
 ([Memory](./memory.md#when-the-prompt-does-not-fit)). Một lời gọi bị hủy kết thúc run ở
 trạng thái `aborted`. Mỗi
 adapter có timeout kết nối 30 giây và timeout đọc giữa các lần đọc (300 giây hoặc
-600 giây); không có hạn chót cho cả một lời gọi.
+600 giây); không có hạn chót cho cả một lời gọi. Hai giới hạn khác áp dụng cho
+một response dạng stream: một event giữ tối đa 16 MiB (tính từ cuối event trước,
+gồm cả một dòng không có điểm kết thúc), và một body không phải UTF-8 hợp lệ làm
+lời gọi thất bại tại byte sai đầu tiên; cả hai kết thúc lời gọi bằng lỗi
+`transport`, loại lỗi được thử lại. Văn bản lỗi mà provider gửi trong stream bị
+cắt còn 500 ký tự, giống một body lỗi HTTP.
 
 Hai trường của [`spec`](./agent.md#spec) quyết định việc này:
 

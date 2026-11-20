@@ -344,19 +344,29 @@ Read timeouts:
 ### The single SSE loop
 
 All five wire formats run through one loop, `sse::events`
-(`crates/linch-providers/src/sse.rs:45`). An adapter supplies a crate-private
-`Decoder` (`sse.rs:19`): `data` translates one non-blank `data:` payload and
+(`crates/linch-providers/src/sse.rs:202`). An adapter supplies a crate-private
+`Decoder` (`sse.rs:32`): `data` translates one non-blank `data:` payload and
 says whether the response is complete; `close` handles a body that ended
 early (a format with an end marker fails, one without finishes). The loop:
 
+- frames the body itself (`Framer`, `sse.rs:88`), in one pass over a buffer
+  with a cursor, so the cost is linear in the bytes whatever the chunk size.
+  It reads LF, CRLF and CR line ends, drops a leading byte order mark, joins
+  the `data` lines of an event, and drops comments and the `event`, `id` and
+  `retry` fields, which no decoder reads. The body end delivers a last event
+  with no trailing blank line;
+- bounds one event: the bytes read since the last event end, an unterminated
+  line included, may not pass `MAX_EVENT_BYTES` (16 MiB, `sse.rs:25`; the
+  largest real event is the Responses terminal event, which repeats the whole
+  output, about 2 MiB for a 128 000-token answer), and a byte that is not
+  UTF-8 fails the call when it is read. Both are `Transport` errors;
 - checks the cancel token before each read and races the read against it;
 - once the response is complete, yields what is queued even if a cancel
-  arrives, so the end and its usage are not lost (`sse.rs:99-103`);
-- yields nothing after an error (`sse.rs:156`);
+  arrives, so the end and its usage are not lost (`sse.rs:242`);
+- yields nothing after an error (`sse.rs:327`);
 - scrubs the API key and every `Bearer <token>` from transport and status
-  messages (`sse.rs:137`);
-- appends a closing blank line so a last event with no trailing blank line
-  is still dispatched (`sse.rs:57-61`).
+  messages, then cuts them to 500 characters (`MAX_ERROR_CHARS`), like an
+  HTTP error body (`sse.rs:301`).
 
 ### Credentials
 

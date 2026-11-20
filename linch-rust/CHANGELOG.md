@@ -6,6 +6,10 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ## Unreleased
 
+- SSE framing reads the body in one pass and no longer depends on `eventsource-stream`: the cost is linear in the bytes whatever the chunk size (the 20 000-delta Anthropic stream decodes in about 12 ms at any chunk size, where it took 190 ms at 256 KiB chunks and 358 ms at 512 KiB; case 6 `rs-kernel`, median per iteration: Anthropic 313 to 25 ms, DeepSeek 221 to 27 ms), a leading byte order mark is dropped instead of panicking, and a body that is not UTF-8 fails the call at the first bad byte.
+- One streamed event may hold at most 16 MiB (`sse::MAX_EVENT_BYTES`), an unterminated line included; a stream that passes it fails the call with a `transport` error.
+- Error text a provider sends inside a stream (error frames, unknown stop reasons) is cut to 500 characters after scrubbing, like an HTTP error body.
+
 ## 0.2.0 - 2026-11-19
 
 0.1.1 was uploaded to PyPI from commit `e102d938` and never tagged; this is the first tagged release. The Python client of this build refuses a server without `server.info` (`IncompatibleServer`), so ship the client and the `linch-server` binary together.

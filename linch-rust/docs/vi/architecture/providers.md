@@ -340,19 +340,29 @@ Read timeout:
 ### Vòng lặp SSE duy nhất
 
 Cả năm wire format chạy qua một vòng lặp, `sse::events`
-(`crates/linch-providers/src/sse.rs:45`). Một adapter cung cấp một `Decoder` riêng của
-crate (`sse.rs:19`): `data` dịch một payload `data:` không rỗng và
+(`crates/linch-providers/src/sse.rs:202`). Một adapter cung cấp một `Decoder` riêng của
+crate (`sse.rs:32`): `data` dịch một payload `data:` không rỗng và
 cho biết response đã hoàn tất chưa; `close` xử lý một body kết thúc sớm
 (một format có dấu kết thúc thì thất bại, format không có thì hoàn tất). Vòng lặp:
 
+- tự tách khung body (`Framer`, `sse.rs:88`), trong một lượt qua bộ đệm có con
+  trỏ, nên chi phí tuyến tính theo số byte bất kể kích thước chunk. Nó đọc dấu
+  xuống dòng LF, CRLF và CR, bỏ byte order mark ở đầu, nối các dòng `data` của
+  một event, và bỏ comment cùng các trường `event`, `id`, `retry` mà không
+  decoder nào đọc. Khi body kết thúc, event cuối không có dòng trống theo sau
+  vẫn được giao;
+- chặn kích thước một event: số byte đọc từ cuối event trước, gồm cả một dòng
+  chưa kết thúc, không được vượt `MAX_EVENT_BYTES` (16 MiB, `sse.rs:25`; event
+  thật lớn nhất là event kết thúc của Responses, lặp lại toàn bộ output, khoảng
+  2 MiB cho một câu trả lời 128 000 token), và một byte không phải UTF-8 làm
+  lời gọi thất bại ngay khi được đọc. Cả hai là lỗi `Transport`;
 - kiểm tra cancel token trước mỗi lần đọc và cho lần đọc chạy đua với nó;
 - khi response đã hoàn tất, yield những gì đang xếp hàng kể cả khi một lệnh hủy
-  đến, để phần kết thúc và usage của nó không bị mất (`sse.rs:99-103`);
-- không yield gì sau một lỗi (`sse.rs:156`);
-- xóa API key và mọi `Bearer <token>` khỏi các thông báo transport và status
-  (`sse.rs:137`);
-- thêm một dòng trống kết thúc để event cuối không có dòng trống theo sau
-  vẫn được dispatch (`sse.rs:57-61`).
+  đến, để phần kết thúc và usage của nó không bị mất (`sse.rs:242`);
+- không yield gì sau một lỗi (`sse.rs:327`);
+- xóa API key và mọi `Bearer <token>` khỏi các thông báo transport và status,
+  rồi cắt còn 500 ký tự (`MAX_ERROR_CHARS`), giống một body lỗi HTTP
+  (`sse.rs:301`).
 
 ### Thông tin xác thực
 
