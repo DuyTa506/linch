@@ -283,12 +283,14 @@ async fn a_required_policy_the_agent_cannot_meet_refuses_the_open() {
     assert!(!message.contains("update") && !message.contains("lookup"));
     assert_eq!(code_of(error), code::BUILD_INVALID);
 
-    // A check of the operator's that cannot compile is not echoed either,
-    // and the tenant's own is refused with its reason.
-    let broken: linch::ReliabilityPolicy = serde_json::from_value(json!({"gates": [
-        {"name": "g", "check": {"type": "matches", "pattern": "secret-sauce("}}]}))
+    // A tool of the operator's gate that the agent lacks is not echoed
+    // either (a check that does not compile never reaches an open: the
+    // server refuses such a required policy at start), and the tenant's own
+    // is refused with its reason.
+    let named: linch::ReliabilityPolicy = serde_json::from_value(json!({"gates": [
+        {"name": "g", "succeeded": ["secret-sauce"]}]}))
     .unwrap();
-    let remote = Rpc::remote(acme(Allowlists::new().required_policy(Some(broken))));
+    let remote = Rpc::remote(acme(Allowlists::new().required_policy(Some(named))));
     let error = remote
         .call(method::AGENT_OPEN, remote_config(vec![], None))
         .await
