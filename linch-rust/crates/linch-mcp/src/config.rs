@@ -80,7 +80,31 @@ impl McpTransport {
     }
 }
 
-/// Environment and header values are left out: they often hold secrets.
+/// `url` as `Debug` shows it: the user name, password and query replaced,
+/// since a token often sits in them. A string that is not a URL is replaced
+/// whole. The facade's `redact::url` does the same for an `AgentConfig`
+/// (`linch` depends on this crate, so the small function is repeated here).
+fn redacted_url(url: &str) -> String {
+    const REDACTED: &str = "redacted";
+    let Ok(mut parsed) = reqwest::Url::parse(url) else {
+        return "[redacted]".to_owned();
+    };
+    if parsed.username().is_empty() && parsed.password().is_none() && parsed.query().is_none() {
+        return url.to_owned();
+    }
+    let user = parsed.username().is_empty() || parsed.set_username(REDACTED).is_ok();
+    let password = parsed.password().is_none() || parsed.set_password(Some(REDACTED)).is_ok();
+    if !(user && password) {
+        return "[redacted]".to_owned();
+    }
+    if parsed.query().is_some() {
+        parsed.set_query(Some(REDACTED));
+    }
+    parsed.into()
+}
+
+/// Environment and header values are left out: they often hold secrets. A
+/// URL's user name, password and query are replaced.
 impl fmt::Debug for McpTransport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -92,7 +116,7 @@ impl fmt::Debug for McpTransport {
                 .finish(),
             Self::Http { url, headers } => f
                 .debug_struct("Http")
-                .field("url", url)
+                .field("url", &redacted_url(url))
                 .field("headers", &headers.keys().collect::<Vec<_>>())
                 .finish(),
             Self::Custom(_) => f.write_str("Custom(..)"),
@@ -253,6 +277,25 @@ mod tests {
         let delays: Vec<_> = (0..8).map(|n| policy.delay(n).as_millis()).collect();
         assert_eq!(delays, [500, 1000, 2000, 4000, 8000, 16000, 30000, 30000]);
         assert_eq!(policy.delay(u32::MAX), policy.max_delay);
+    }
+
+    #[test]
+    fn debug_hides_the_userinfo_and_query_of_a_url() {
+        let http = McpTransport::Http {
+            url: "https://user:tok-pass@mcp.internal:8443/mcp?key=tok-query".into(),
+            headers: BTreeMap::new(),
+        };
+        let shown = format!("{http:?}");
+        assert!(
+            !shown.contains("tok-pass") && !shown.contains("tok-query"),
+            "{shown}"
+        );
+        assert!(!shown.contains("user:"), "{shown}");
+        assert!(shown.contains("mcp.internal:8443/mcp"), "{shown}");
+        let plain = McpTransport::http("http://127.0.0.1:8000/mcp");
+        assert!(format!("{plain:?}").contains("http://127.0.0.1:8000/mcp"));
+        let not_a_url = McpTransport::http("not a url?tok-query");
+        assert!(!format!("{not_a_url:?}").contains("tok-query"));
     }
 
     #[test]

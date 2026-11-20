@@ -193,8 +193,9 @@ Những gì một server có thể khiến client giữ hoặc chờ
   dùng; mọi thứ khác đến từ `env` của cấu hình
   (`connector.rs:27-29`, `connector.rs:146-153`).
 - **Đầu ra debug.** `Debug` của `McpTransport` in tên của biến môi trường và header,
-  không bao giờ in giá trị của chúng (`config.rs:83-101`), nên ghi log một cấu hình
-  không làm lộ token.
+  không bao giờ in giá trị của chúng (`config.rs:83-101`), và hiện URL HTTP với
+  user name, mật khẩu và query được thay bằng `redacted` (một chuỗi không phải
+  URL hiện là `[redacted]`), nên ghi log một cấu hình không làm lộ token.
 
 ## Ví dụ
 

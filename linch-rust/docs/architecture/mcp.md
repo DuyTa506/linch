@@ -197,8 +197,10 @@ What one server can make the client hold or wait for
   uses; everything else comes from the config's `env`
   (`connector.rs:27-29`, `connector.rs:146-153`).
 - **Debug output.** `McpTransport`'s `Debug` prints environment and header
-  names, never their values (`config.rs:83-101`), so logging a config does not
-  leak a token.
+  names, never their values (`config.rs:83-101`), and shows an HTTP URL with
+  its user name, password and query replaced by `redacted` (a string that is
+  not a URL is shown as `[redacted]`), so logging a config does not leak a
+  token.
 
 ## Example
 

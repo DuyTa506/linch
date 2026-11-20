@@ -8,6 +8,7 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 - The MCP streamable HTTP client no longer follows redirects, so the transport's headers stay on the configured URL; it still keeps no idle connection (pooling showed 31 to 48 ms stalls in 2 of 9 runs of 50 calls on loopback).
 - An MCP server's JSON-RPC error message is cut at 30 000 bytes like result text, and a result keeps at most 8 images and 4 MiB of image data in `metadata.images`; later images are left out with a note in the text.
+- `Debug` of an MCP HTTP transport shows its URL with the user name, password and query replaced by `redacted`.
 
 ## 0.2.0 - 2026-11-19
 
