@@ -114,35 +114,75 @@ async fn a_json_rpc_error_message_is_capped_like_result_text() {
     server.disconnect().await;
 }
 
-/// Eight tools of 1 MiB of description are 8 MiB for the model every turn:
-/// the first listing past the byte bound is refused, and registers nothing.
+/// A listing past the byte bound is cut like one past the tool count: the
+/// tools that fit, in order, are kept and the rest are left out.
 #[tokio::test]
-async fn a_tool_list_over_the_byte_bound_is_refused() {
+async fn a_tool_list_over_the_byte_bound_is_cut_in_order() {
     let huge = (0..8)
         .map(|i| tool_described(format!("t{i}"), "d".repeat(1024 * 1024)))
         .collect();
+    let (server, _duplex, _registry) = connect(Fixture::new(huge)).await;
+    assert_eq!(server.tools(), ["mcp__t__t0", "mcp__t__t1", "mcp__t__t2"]);
+    server.disconnect().await;
+}
+
+/// The bound counts the whole tool as received, not only the fields the
+/// model sees: a megabyte of `title`, `_meta` or `outputSchema` is held in
+/// the listing all the same.
+#[tokio::test]
+async fn megabytes_in_the_other_fields_of_a_tool_count_toward_the_byte_bound() {
+    let titled = (0..8)
+        .map(|i| {
+            let mut tool = tool(format!("t{i}"), "Small.");
+            tool.title = Some("t".repeat(1024 * 1024));
+            tool
+        })
+        .collect();
+    let (server, _duplex, _registry) = connect(Fixture::new(titled)).await;
+    assert_eq!(server.tools(), ["mcp__t__t0", "mcp__t__t1", "mcp__t__t2"]);
+    server.disconnect().await;
+}
+
+/// A server whose first tool alone is over the bound cannot be used.
+#[tokio::test]
+async fn a_first_tool_over_the_byte_bound_refuses_the_server() {
+    let mut huge = tool("t0", "Small.");
+    huge.title = Some("t".repeat(5 * 1024 * 1024));
     let registry = Arc::new(ToolRegistry::new());
-    let duplex = Duplex::new(Fixture::new(huge));
+    let duplex = Duplex::new(Fixture::new(vec![huge, tool("t1", "Small.")]));
     let connected = McpServer::connect(config("t", duplex), Arc::clone(&registry)).await;
-    assert!(
-        connected.is_err(),
-        "8 MiB of tool descriptions were accepted"
-    );
+    let error = connected.err().expect("the listing is refused");
+    assert!(error.to_string().contains("bytes"), "{error}");
     assert!(registry.snapshot().definitions().is_empty());
 }
 
-/// A relist over the byte bound keeps the tools the server has, like a
-/// relist that failed.
+/// A relist over the byte bound is cut like the first listing.
 #[tokio::test]
-async fn a_relist_over_the_byte_bound_keeps_the_current_tools() {
+async fn a_relist_over_the_byte_bound_is_cut_in_order() {
     let fixture = Fixture::new(standard_tools());
     let (server, _duplex, _registry) = connect(fixture.clone()).await;
-    let before = fixture.lists.load(Ordering::SeqCst);
     fixture.set_tools(
         (0..8)
             .map(|i| tool_described(format!("t{i}"), "d".repeat(1024 * 1024)))
             .collect(),
     );
+    eventually("the cut listing", || async {
+        server.tools() == ["mcp__t__t0", "mcp__t__t1", "mcp__t__t2"]
+    })
+    .await;
+    server.disconnect().await;
+}
+
+/// A relist whose first tool alone is over the bound keeps the tools the
+/// server has, like a relist that failed.
+#[tokio::test]
+async fn a_relist_with_a_first_tool_over_the_byte_bound_keeps_the_current_tools() {
+    let fixture = Fixture::new(standard_tools());
+    let (server, _duplex, _registry) = connect(fixture.clone()).await;
+    let before = fixture.lists.load(Ordering::SeqCst);
+    let mut huge = tool("t0", "Small.");
+    huge.title = Some("t".repeat(5 * 1024 * 1024));
+    fixture.set_tools(vec![huge]);
     eventually("the relist to reach the server", || async {
         fixture.lists.load(Ordering::SeqCst) > before
     })

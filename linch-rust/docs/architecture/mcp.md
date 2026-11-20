@@ -124,8 +124,14 @@ notification after a quiet spell relists at once, and one that arrives within
 1 s of the last relist's start, or while a relist runs, waits for the end of
 that second; the notifications that arrive meanwhile share the one relist that
 follows, so a server that sends a burst costs at most one listing a second
-(a reconnect relists at once, as before). A listing over 4 MiB of tool names,
-descriptions and input schemas (`MAX_LIST_BYTES`) is refused whole.
+(a reconnect relists at once, as before). A listing is
+cut at 1000 tools (`MAX_TOOLS`) or 4 MiB of tools as the server sent them
+(`MAX_LIST_BYTES`: the JSON of each tool, so the title, the output schema, the
+icons and `_meta` count with the name, the description and the input schema):
+the tools before the bound are kept in order, the rest are left out, no further
+page is asked for, and a `tracing` warning (target `linch_mcp`, with the server
+name, the tools kept and their bytes) says so. A listing whose first tool alone
+is over 4 MiB is refused.
 
 A failed, refused or timed-out relist keeps the current tools; a closed
 transport during a relist starts a reconnect.
@@ -189,8 +195,8 @@ What one server can make the client hold or wait for
 | Limit | Value | Where |
 |---|---|---|
 | `tools/list` pages per listing | 100 | `server.rs:22` |
-| Tools kept from one listing | 1000 | `server.rs:25` |
-| Bytes in one listing (names, descriptions and input schemas as JSON) | 4 MiB, checked after each page; over it the first listing fails the connect with `ConnectError::ListTooLarge` and a relist keeps the current tools | `server.rs` (`MAX_LIST_BYTES`) |
+| Tools kept from one listing | 1000; the rest are left out, with a `tracing` warning | `server.rs:25` |
+| Bytes kept from one listing (each tool as the server sent it, as JSON) | 4 MiB; the tools before the bound are kept in order and the rest are left out, with a `tracing` warning; a first tool alone over it fails the connect with `ConnectError::ListTooLarge`, and a relist then keeps the current tools | `server.rs` (`MAX_LIST_BYTES`) |
 | Time between two `list_changed` relists | 1 s, notifications in between share one relist | `server.rs` (`MIN_RELIST_INTERVAL`) |
 | One connect, resubscribe or relist attempt | `attempt_timeout` (30 s) | `server.rs:257`, `server.rs:323` |
 | One tool call | `call_timeout` (300 s) | `tool.rs:264` |

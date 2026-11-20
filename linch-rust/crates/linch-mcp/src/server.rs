@@ -25,10 +25,12 @@ const MAX_LIST_PAGES: usize = 100;
 /// Most tools kept from one listing; the rest are left out.
 const MAX_TOOLS: usize = 1_000;
 
-/// Most bytes in one listing: the sum, over its tools, of the name, the
-/// description and the input schema as JSON. They go into the model's prompt
-/// every turn. A listing past it is refused whole: the first one fails the
-/// connect, a relist keeps the tools the server already has.
+/// Most bytes kept from one listing: the sum, over its tools, of each tool
+/// as the server sent it (JSON), the title, the schemas, the icons and the
+/// metadata with the rest. The tools that fit, in order, are kept and the
+/// rest are left out, like the tools past [`MAX_TOOLS`]. A listing whose
+/// first tool alone is over it is refused: the first one fails the connect,
+/// a relist keeps the tools the server already has.
 const MAX_LIST_BYTES: usize = 4 * 1024 * 1024;
 
 /// Shortest time between the starts of two relists that
@@ -303,7 +305,11 @@ impl Supervisor {
             let _ = tokio::time::timeout(Duration::ZERO, list_changed.notified()).await;
         }
         *last = Some(Instant::now());
-        tokio::time::timeout(self.policy.attempt_timeout, list_tools(peer)).await
+        tokio::time::timeout(
+            self.policy.attempt_timeout,
+            list_tools(&self.link.server, peer),
+        )
+        .await
     }
 
     async fn reconnect(&self, close: &CancellationToken) -> Option<(Live, Vec<rmcp::model::Tool>)> {
@@ -337,7 +343,7 @@ impl Supervisor {
             .connect(Handler::new(Arc::clone(&list_changed)))
             .await?;
         let lost = CancellationToken::new();
-        match prepare(service.peer(), &list_changed, &lost).await {
+        match prepare(&self.link.server, service.peer(), &list_changed, &lost).await {
             Ok((listener, tools)) => Ok((
                 Live {
                     service,
@@ -388,6 +394,7 @@ impl Supervisor {
 /// Subscribe to tool changes when the protocol needs it, then list the
 /// tools. Subscribing first means no change is missed in between.
 async fn prepare(
+    server: &str,
     peer: &Peer<RoleClient>,
     list_changed: &Arc<Notify>,
     lost: &CancellationToken,
@@ -395,7 +402,7 @@ async fn prepare(
     let listener = Listener::start(peer, list_changed, lost)
         .await
         .map_err(ConnectError::Listen)?;
-    match list_tools(peer).await {
+    match list_tools(server, peer).await {
         Ok(tools) => Ok((listener, tools)),
         Err(error) => {
             if let Some(listener) = listener {
@@ -406,12 +413,17 @@ async fn prepare(
     }
 }
 
-/// Follow `tools/list` pages to the end, or until [`MAX_LIST_PAGES`] pages
-/// or [`MAX_TOOLS`] tools, so a server cannot keep the client listing or
-/// holding tools without end. A listing over [`MAX_LIST_BYTES`] is
-/// [`ConnectError::ListTooLarge`], checked after each page so later pages
-/// are not asked for.
-async fn list_tools(peer: &Peer<RoleClient>) -> Result<Vec<rmcp::model::Tool>, ConnectError> {
+/// Follow `tools/list` pages to the end, or until [`MAX_LIST_PAGES`] pages,
+/// [`MAX_TOOLS`] tools or [`MAX_LIST_BYTES`] bytes, so a server cannot keep
+/// the client listing or holding tools without end. A listing that reaches
+/// the tool or byte bound keeps the tools before it, asks for no further
+/// page and logs a warning (`tracing`, target `linch_mcp`) naming the
+/// server; a first tool over the byte bound is
+/// [`ConnectError::ListTooLarge`].
+async fn list_tools(
+    server: &str,
+    peer: &Peer<RoleClient>,
+) -> Result<Vec<rmcp::model::Tool>, ConnectError> {
     let mut tools = Vec::new();
     let mut bytes = 0usize;
     let mut cursor = None;
@@ -420,28 +432,37 @@ async fn list_tools(peer: &Peer<RoleClient>) -> Result<Vec<rmcp::model::Tool>, C
             .list_tools(Some(PaginatedRequestParams::default().with_cursor(cursor)))
             .await
             .map_err(ConnectError::ListTools)?;
-        bytes += page.tools.iter().map(listed_bytes).sum::<usize>();
-        if bytes > MAX_LIST_BYTES {
-            return Err(ConnectError::ListTooLarge {
-                limit: MAX_LIST_BYTES,
-            });
+        for tool in page.tools {
+            let size = listed_bytes(&tool);
+            if tools.len() >= MAX_TOOLS || bytes.saturating_add(size) > MAX_LIST_BYTES {
+                if tools.is_empty() {
+                    return Err(ConnectError::ListTooLarge {
+                        limit: MAX_LIST_BYTES,
+                    });
+                }
+                tracing::warn!(
+                    server,
+                    kept = tools.len(),
+                    bytes,
+                    "the MCP server's tool list is over {MAX_TOOLS} tools or {MAX_LIST_BYTES} bytes; the rest are left out"
+                );
+                return Ok(tools);
+            }
+            bytes += size;
+            tools.push(tool);
         }
-        tools.extend(page.tools);
         cursor = page.next_cursor;
-        if cursor.is_none() || tools.len() >= MAX_TOOLS {
+        if cursor.is_none() {
             break;
         }
     }
-    tools.truncate(MAX_TOOLS);
     Ok(tools)
 }
 
-/// What one tool adds to the model's prompt, in bytes: its name, its
-/// description and its input schema as JSON.
+/// What one tool holds in the listing, in bytes: the tool as the server
+/// sent it, as JSON.
 fn listed_bytes(tool: &rmcp::model::Tool) -> usize {
-    let description = tool.description.as_deref().map_or(0, str::len);
-    let schema = serde_json::to_vec(tool.input_schema.as_ref()).map_or(0, |json| json.len());
-    tool.name.len() + description + schema
+    serde_json::to_vec(tool).map_or(usize::MAX, |json| json.len())
 }
 
 fn lock(catalog: &Mutex<Catalog>) -> MutexGuard<'_, Catalog> {
