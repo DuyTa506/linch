@@ -96,7 +96,21 @@ instead. A tenant's `max_cost_usd` ceiling (below) is a `max_cost_usd` too.
 
 `parallel`, `settled` and `pipeline` run in the client. Each branch counts
 its own calls, under its branch path, so branches that reach their calls in
-another order on a resume still find their own records.
+another order on a resume still find their own records. On a tenant connection a
+call's `name`, `branch` and an interrupt's `key`, which the server keeps, are at
+most 256 bytes, like the workflow id (`-32602` past it); a `key` that is only
+hashed (a step's, an agent call's) is not bounded, and neither is a local
+connection.
+
+A step whose function raised gives its ticket back: `wf.step` sends
+`workflow.step.abandon` before it re-raises, so a workflow that catches
+failed steps (to fall back, or in a `settled` fan-out) never runs out of
+places. On a tenant connection a workflow also holds at most 10,000 pending steps
+(the same number as the call keys above, or `max_records` if larger; `-32005`,
+`kind: pending_steps`), not counted against `max_records`, so a client that
+never gives tickets back (one that predates the call) cannot pin memory; a
+local connection has no such cap, and a fan-out of any width may be in flight.
+The server drops every ticket when the connection ends.
 
 ## How replay works
 
@@ -229,8 +243,14 @@ turns them on and sets the caps:
 | `max_workflows` | 4 | Workflows the tenant drives at once, across its connections (`-32005`, `kind: workflows`) |
 | `max_records` | 10000 | Journal records of one workflow, replays included (`-32005`, `kind: journal_records`); checked before a call spends |
 | `max_fan_out` | 8 | Agent calls of one workflow in flight at once (`-32005`, `kind: agent_calls_in_flight`); the client lowers its `max_concurrency` to it |
-| `max_record_bytes` | 1 MiB | One record's JSON value |
+| `max_record_bytes` | 1 MiB | One record's JSON value, and the payload of an interrupt (which the workflow's stored status keeps), refused with `kind: bytes_in_an_interrupt_payload` |
 | `max_tokens`, `max_cost_usd` | none | A ceiling on a workflow's `budget`; a workflow with none gets it, and one that asks for more is refused (`-32004`, `kind: workflow_budget`) |
+
+Whatever `max_records` is, the server keeps counters for at most 10,000 distinct
+call keys per workflow drive (more when `max_records` is larger): a call that
+failed, or an interrupt that suspended, journals nothing but keeps its key. Past
+it a call with a new key is refused (`-32005`, `kind: call_keys`); a call that
+replays a record never is. These keys do not count against `max_records`.
 
 Each live agent call also takes one of the tenant's `max_runs` places.
 Each workflow holds one database connection for its hold, so

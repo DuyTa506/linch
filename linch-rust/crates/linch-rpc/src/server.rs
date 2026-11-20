@@ -366,6 +366,9 @@ impl Server {
                 .workflow_step_complete(parse(params)?)
                 .await
                 .map(Reply::Value),
+            method::WORKFLOW_STEP_ABANDON => {
+                self.workflow_step_abandon(parse(params)?).map(Reply::Value)
+            }
             method::WORKFLOW_INTERRUPT => self
                 .workflow_interrupt(parse(params)?)
                 .await
