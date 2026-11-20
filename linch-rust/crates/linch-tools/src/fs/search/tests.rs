@@ -190,12 +190,13 @@ fn a_slow_search_stops_at_the_time_limit_and_says_how_far_it_got() {
         began.elapsed()
     );
     match &error {
-        FsError::TimedOut { files, at, .. } => assert_eq!((*files, at.as_str()), (1, "big.txt")),
+        // The walk's order is not promised: `a.txt` may come before or after.
+        FsError::TimedOut { files, at, .. } => assert!(*files <= 1 && at == "big.txt", "{error:?}"),
         other => panic!("expected a timeout, got {other:?}"),
     }
     let message = error.to_string();
     assert!(
-        message.contains("1 file(s) searched, at big.txt"),
+        message.contains("file(s) searched, at big.txt"),
         "{message}"
     );
     let reported = linch_core::ToolOutputError::from(error);
