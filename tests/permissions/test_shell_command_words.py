@@ -204,3 +204,85 @@ def test_a_passthrough_rule_is_skipped_for_the_command_behind_a_prefix() -> None
     rules: list[PermissionRule] = [BashRule("rm *", "passthrough"), BashRule("rm *", "deny")]
     assert _bash(rules, "X=1 rm x", "skip-dangerous") == "deny"
     assert _bash([rules[0]], "X=1 rm x", "skip-dangerous") == "allow"
+
+
+# Source: the wrapper-option tests of the Rust kernel's permission tests.
+def _deny_touch(command: str) -> str:
+    return _bash([BashRule("touch *", "deny")], command, "skip-dangerous")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "env -i touch M",
+        "env X=1 touch M",
+        'env "-i" touch M',
+        "env \\-i touch M",
+        "env '-u' X touch M",
+        'env "X=1" touch M',
+        "env 'X=1' touch M",
+        "env X\\=1 touch M",
+        'command "-p" touch M',
+        'time "-o" f touch M',
+        'exec "-a" n touch M',
+    ],
+)
+def test_a_deny_rule_covers_a_command_behind_a_quoted_wrapper_option(command: str) -> None:
+    assert _deny_touch(command) == "deny"
+
+
+@pytest.mark.parametrize("command", ["env \"-S\" 'touch M'", "env '-S' 'touch M'"])
+def test_a_quoted_env_split_string_is_unparsed(command: str) -> None:
+    assert _deny_touch(command) == "ask"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "env -u X touch M",
+        "env -iu X touch M",
+        "env -uX touch M",
+        "env --uns X touch M",
+        "env --unset=X touch M",
+        "env -iC . touch M",
+        "env --chd . touch M",
+        "env -a n touch M",
+        "env --argv0 n touch M",
+        "time -po f touch M",
+        "time -ao f touch M",
+        "time -ofile touch M",
+        "time --outp f touch M",
+        "time --format=x touch M",
+        "exec -la n touch M",
+        "exec -ca n touch M",
+        "exec -cla n touch M",
+    ],
+)
+def test_a_deny_rule_covers_a_command_behind_a_bundled_or_abbreviated_wrapper_option(
+    command: str,
+) -> None:
+    assert _deny_touch(command) == "deny"
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["env -iS 'touch M'", "env --split-str 'touch M'", "env --split-string='touch M'"],
+)
+def test_a_bundled_or_abbreviated_env_split_string_is_unparsed(command: str) -> None:
+    assert _deny_touch(command) == "ask"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "env -iu rm make",
+        "env --uns rm make",
+        "exec -la rm sleep 1",
+        "time -po rm make",
+        'env "-u" rm make',
+    ],
+)
+def test_a_deny_rule_does_not_match_the_argument_of_a_bundled_wrapper_option(
+    command: str,
+) -> None:
+    assert _bash([BashRule("rm", "deny")], command, "skip-dangerous") == "allow"

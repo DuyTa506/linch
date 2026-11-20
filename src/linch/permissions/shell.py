@@ -286,19 +286,63 @@ def _is_fd_redirection(word: str) -> bool:
     return sep != "" and name != "" and _is_name(name) and after[:1] in ("<", ">")
 
 
+# Long options of `env` and `time` (GNU accepts any unique prefix) and what they do.
+_ENV_LONG = (
+    ("ignore-environment", "plain"),
+    ("null", "plain"),
+    ("unset", "takes"),
+    ("chdir", "takes"),
+    ("argv0", "takes"),
+    ("split-string", "split"),
+    ("debug", "plain"),
+    ("block-signal", "plain"),
+    ("default-signal", "plain"),
+    ("ignore-signal", "plain"),
+    ("list-signal-handling", "plain"),
+)
+_TIME_LONG = (
+    ("format", "takes"),
+    ("output", "takes"),
+    ("append", "plain"),
+    ("portability", "plain"),
+    ("verbose", "plain"),
+    ("quiet", "plain"),
+)
+# Short options that take an argument, and those that split a string into the command.
+_SHORT_OPTIONS = {"env": ("uCa", "S"), "time": ("fo", ""), "exec": ("a", "")}
+
+
 def _wrapper_option(wrapper: str, option: str) -> str:
-    """Classify a wrapper option as ``plain``, ``takes`` an argument, ``split`` or ``query``."""
-    if (
-        (wrapper == "env" and option in ("-u", "-C", "--unset", "--chdir"))
-        or (wrapper == "time" and option in ("-f", "-o", "--format", "--output"))
-        or (wrapper == "exec" and option == "-a")
-    ):
-        return "takes"
-    if wrapper == "env" and option.startswith(("-S", "--split-string")):
-        return "split"
-    if wrapper == "command" and not option.startswith("--") and ("v" in option or "V" in option):
-        return "query"
-    return "plain"
+    """Classify an unquoted wrapper option as plain, taking an argument, split or query.
+
+    A cluster of short options (``-iu``) is read letter by letter: a letter that takes
+    an argument takes the rest of the word or else the next word. A long option is
+    matched by exact name or unique prefix, with an optional ``=value``.
+    """
+    if not option.startswith("--"):
+        letters = option.lstrip("-")
+        if wrapper == "command":
+            return "query" if "v" in letters or "V" in letters else "plain"
+        takes, split = _SHORT_OPTIONS.get(wrapper, ("", ""))
+        for i, letter in enumerate(letters):
+            if letter in split:
+                return "split"
+            if letter in takes:
+                return "plain" if letters[i + 1 :] else "takes"
+        return "plain"
+    name, equals, _ = option[2:].partition("=")
+    table = {"env": _ENV_LONG, "time": _TIME_LONG}.get(wrapper, ())
+    exact = [kind for long, kind in table if long == name]
+    prefixed = [kind for long, kind in table if long.startswith(name)]
+    if name == "":
+        kind = "plain"
+    elif exact:
+        kind = exact[0]
+    elif len(prefixed) == 1:
+        kind = prefixed[0]
+    else:
+        kind = "plain"
+    return "plain" if equals and kind == "takes" else kind
 
 
 def _strip_prefix(segment: str) -> tuple[str, bool]:
@@ -311,8 +355,10 @@ def _strip_prefix(segment: str) -> tuple[str, bool]:
         operator = word.lstrip(_DIGITS)
         if _is_array_assignment(word) or _is_fd_redirection(word):
             return rest, True
-        assignment = _is_assignment(word)
-        name = "" if assignment else _unquote(word)
+        plain_assignment = _is_assignment(word)
+        name = "" if plain_assignment else _unquote(word)
+        # `env "X=1" cmd`: the wrapper reads the word unquoted.
+        assignment = plain_assignment or (wrapper is not None and _is_assignment(name))
         skip = 1
         if assignment:
             pass
@@ -320,7 +366,7 @@ def _strip_prefix(segment: str) -> tuple[str, bool]:
             wrapper = None
         elif name in _WRAPPERS:
             wrapper = (name, rest)
-        elif wrapper is not None and word.startswith("-"):
+        elif wrapper is not None and name.startswith("-"):
             kind = _wrapper_option(wrapper[0], name)
             if kind == "takes":
                 skip = 2

@@ -30,6 +30,11 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
   word is matched unquoted (`\rm`, `r""m`) while arguments stay as written, so a deny rule
   `* --force` does not match a commit message that contains `--force`. Allow rules still match
   the segment as written. Regex patterns follow the same rule.
+- Bash deny and ask rules read wrapper options unquoted (`env "-i" cmd`, `env "X=1" cmd`) and as
+  GNU does: bundled short options (`env -iu NAME`, `time -po FILE`, `exec -la NAME`), unique
+  prefixes of long options (`env --uns NAME`, `time --outp FILE`) with an optional `=value`, and
+  the argument of `env -u`/`-C`/`-a`, `time -f`/`-o` and `exec -a`. `env -S` and
+  `--split-string`, quoted or bundled, make the command unparsed.
 - `>&` followed by anything other than exactly digits or `-` is a file redirect for Bash allow
   rules (`>&2file`, `>&2-`, `>&-file`), not a descriptor duplication; a narrow allow rule asks and
   the allow-all rule still allows. A blank after `>&` is unparsed.

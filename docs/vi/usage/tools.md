@@ -716,13 +716,16 @@ Cách Bash rule đọc một lệnh:
   phép gán `NAME=value`, chuyển hướng (`>f`, `2>&1`), các từ dành riêng `if`,
   `then`, `else`, `elif`, `do`, `while`, `until`, `!` và `{`, cùng `time`,
   `exec`, `command`, `builtin` và `env` (có hoặc không có dấu nháy) với các tùy
-  chọn của chúng, gồm đối số của `env -u`/`-C`, `time -f`/`-o` và `exec -a`.
+  chọn của chúng, được đọc sau khi bỏ dấu nháy: tùy chọn ngắn gộp (`env -iu
+  NAME`, `exec -la NAME`), tiền tố duy nhất của tùy chọn dài (`env --uns NAME`)
+  và đối số của `env -u`/`-C`/`-a`, `time -f`/`-o` và `exec -a`. `env -S` là cú
+  pháp chưa phân tích được.
   `command -v NAME` không phải là lệnh tên `NAME`. Các đối số giữ nguyên như đã
   viết, nên rule deny `* --force` không khớp một commit message có chứa
   `--force`. Rule allow luôn khớp đoạn lệnh như được viết: `X=1 echo` không phải
-  `echo`. Các cách viết khác của một lệnh, như `/bin/rm`, `sudo rm`, `xargs rm`,
-  `eval rm x` và `sh -c 'rm x'`, là những lệnh khác đối với rule; ranh giới là
-  sandbox.
+  `echo`. Các cách viết và wrapper khác, như `/bin/rm`, `sudo rm`, `nice`,
+  `nohup`, `setsid`, `timeout`, `xargs`, `eval rm x` và `sh -c 'rm x'`, không
+  được bao phủ: chúng là những lệnh khác đối với rule. Ranh giới là sandbox.
 
 Khi không rule nào khớp, tool scope read và bốn task tool được cho phép ở mọi
 mode. Các mặc định còn lại là:
