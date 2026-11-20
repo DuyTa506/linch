@@ -701,6 +701,12 @@ Cách Bash rule đọc một lệnh:
   `function`, `coproc`, phép gán phần tử mảng (`a[0]=1`) hoặc chuyển hướng
   `{fd}>file`. Here-string (`<<<`) và nhân đôi descriptor (`2>&1`, `>&2`, `<&3`,
   `>&-`) được mô hình hóa.
+- Rule allow không bao phủ một đoạn lệnh chuyển hướng đầu ra vào tệp
+  (`echo x > file`, `>>`, `2>file`, `>|`, `<>`, có hoặc không có số
+  descriptor): lệnh đó bị hỏi (hoặc rơi về mặc định của mode khi không rule nào
+  quyết định). Nhân đôi descriptor (`2>&1`, `>&2`, `>&-`, `<&3`) và đúng
+  `/dev/null`, `/dev/stdout`, `/dev/stderr` không phải là tệp. Rule deny và ask
+  không đổi.
 
 Khi không rule nào khớp, tool scope read và bốn task tool được cho phép ở mọi
 mode. Các mặc định còn lại là:

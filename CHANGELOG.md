@@ -18,6 +18,10 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
   Words are separated by space and tab only, and inside double quotes a backslash is kept before
   any character except `$`, backtick, `"`, `\` and newline, so a pattern such as `cat "a\nb"`
   matches only that text.
+- A Bash allow rule no longer covers a command segment that redirects output to a file (`>`, `>>`,
+  `>|`, `<>`, with or without a descriptor number): the call asks, or falls to the mode default
+  when no rule decides it. Descriptor duplication (`2>&1`, `>&2`, `>&-`, `<&3`) and exactly
+  `/dev/null`, `/dev/stdout` and `/dev/stderr` are not files. Deny and ask rules are unchanged.
 - The compaction summary no longer loses early content. The summary request ended with the
   folded history's last user message, which the model answered ("Acknowledged. Received log
   excerpt 2...") instead of summarizing. It now ends with one user message carrying a guard

@@ -413,3 +413,47 @@ def pattern_matches(pattern: str, segment: str) -> bool:
         return True
     prefix = tokenize(pattern)
     return bool(prefix) and tokenize(segment)[: len(prefix)] == prefix
+
+
+def redirects_to_file(segment: str) -> bool:
+    """Return whether ``segment`` opens a file for writing with a redirection.
+
+    Covers ``>``, ``>>``, ``>|`` and ``<>``, with or without a descriptor number.
+    Descriptor duplication (``2>&1``, ``>&2``, ``>&-``) and ``/dev/null``,
+    ``/dev/stdout`` and ``/dev/stderr`` are not files.
+
+    Args:
+        segment: One command segment.
+
+    Returns:
+        Whether an unquoted, unescaped redirection targets a file.
+    """
+    quote: str | None = None
+    escaped = False
+    i, n = 0, len(segment)
+    while i < n:
+        c = segment[i]
+        if escaped:
+            escaped = False
+        elif c == "\\" and quote != "'":
+            escaped = True
+        elif quote is not None:
+            if c == quote:
+                quote = None
+        elif c in "'\"":
+            quote = c
+        elif c == ">" or (c == "<" and segment[i + 1 : i + 2] == ">"):
+            end = i + 1
+            if c == "<" or segment[end : end + 1] in (">", "|"):
+                end += 1
+            if c == ">" and segment[end : end + 1] == "&":
+                # `>&2`, `>&-`: duplicates a descriptor.
+                i = end + 1
+                continue
+            rest = trim_blanks(segment[end:])
+            if _unquote(rest[: _word_end(rest)]) not in _DEVICES:
+                return True
+            i = end
+            continue
+        i += 1
+    return False

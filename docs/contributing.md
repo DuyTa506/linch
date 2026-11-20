@@ -574,6 +574,7 @@ tests/permissions/test_principal_roles.py
 tests/permissions/test_rules.py
 tests/permissions/test_ruleset.py
 tests/permissions/test_shell.py
+tests/permissions/test_shell_redirects.py
 tests/permissions/test_shell_rules.py
 tests/providers/test_anthropic_provider.py
 tests/providers/test_client_loop_affinity.py

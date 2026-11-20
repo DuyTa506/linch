@@ -4,7 +4,13 @@ import re
 from pathlib import Path
 from typing import Any, Literal, TypeAlias, cast
 
-from .shell import has_unparsed_construct, pattern_matches, split_composite, trim_blanks
+from .shell import (
+    has_unparsed_construct,
+    pattern_matches,
+    redirects_to_file,
+    split_composite,
+    trim_blanks,
+)
 
 RuleDecision = Literal["allow", "deny", "ask", "passthrough"]
 BashPattern: TypeAlias = str | dict[str, str]
@@ -306,7 +312,8 @@ def evaluate_bash_rules(
             return "deny"
         if decision == "ask":
             saw_ask = True
-        if decision != "allow":
+        # An allow covers a command, not what it writes to a file.
+        if decision != "allow" or redirects_to_file(segment):
             all_allowed = False
     if saw_ask:
         return "ask"

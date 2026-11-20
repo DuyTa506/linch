@@ -12,6 +12,7 @@ import pytest
 from linch.permissions.shell import (
     has_unparsed_construct,
     pattern_matches,
+    redirects_to_file,
     split_composite,
     strip_command_prefix,
     tokenize,
@@ -178,3 +179,42 @@ def test_prefix_words_are_stripped_before_the_command(segment: str, expected: st
 )
 def test_patterns_match_by_glob_or_word_prefix(pattern: str, segment: str, expected: bool) -> None:
     assert pattern_matches(pattern, segment) is expected
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "a > f",
+        "a >f",
+        "a >> f",
+        "a 2>f",
+        "a >| f",
+        "a <> f",
+        'a >"f"',
+        "a 2>&1 > f",
+        "a >",
+    ],
+)
+def test_file_redirects_are_found(command: str) -> None:
+    assert redirects_to_file(command)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "a",
+        "a 2>&1",
+        "a >&2",
+        "a >&-",
+        "a <&3",
+        "a < f",
+        "a <<< f",
+        "a > /dev/null",
+        "a 2>/dev/stderr >/dev/stdout",
+        "a '>f' \"> f\" \\>f",
+    ],
+)
+def test_file_redirects_are_not_found_in_quotes_or_for_descriptors_and_devices(
+    command: str,
+) -> None:
+    assert not redirects_to_file(command)

@@ -703,6 +703,12 @@ How Bash rules read a command:
   (`{rm,-rf}`), `function`, `coproc`, an array assignment (`a[0]=1`) or a
   `{fd}>file` redirection. A here-string (`<<<`) and a descriptor duplication
   (`2>&1`, `>&2`, `<&3`, `>&-`) are modelled.
+- An allow rule does not cover a segment that redirects output to a file
+  (`echo x > file`, `>>`, `2>file`, `>|`, `<>`, with or without a descriptor
+  number): the command asks (or falls to the mode default when no rule
+  decides it). Descriptor duplication (`2>&1`, `>&2`, `>&-`, `<&3`) and exactly
+  `/dev/null`, `/dev/stdout` and `/dev/stderr` are not files. Deny and ask rules
+  are unchanged.
 
 When no rule matches, read-scoped tools and the four task tools are allowed in
 every mode. The remaining defaults are:
