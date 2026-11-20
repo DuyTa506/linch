@@ -254,6 +254,21 @@ nêu tên một đoạn bắt đầu bằng dấu chấm (`crates/linch-tools/sr
 10 MiB (`REGEX_SIZE_LIMIT`; mẫu lớn hơn là `invalid_query`) và bộ nhớ đệm DFA lười của một
 matcher chứa tối đa 32 MiB (`REGEX_DFA_CACHE_LIMIT`; mẫu cần nhiều hơn chạy trên engine
 chậm hơn), nên bộ nhớ của một lần gọi bị chặn, ngoài 10 MiB mà searcher giữ của một tệp.
+Cái giá đã đo: một dòng 64 KiB gồm `a` và `b` ngẫu nhiên với `[ab]{1,20000}c` mất 6,3 s và
+386 MiB với giới hạn của thư viện và nay mất 16,2 s và 36 MiB (17,3 s và 68 MiB ở 64 MiB,
+5,3 s và 131 MiB ở 128 MiB, nên không giá trị nào vừa giữ dưới khoảng 100 MiB vừa trong
+hai lần thời gian), và một lớp Unicode lặp nhiều lần (`\w{300}`, `\w{500}`, `\p{L}{500}`,
+`\w{1000}`) nay là `invalid_query` (nó biên dịch được trong 20 đến 50 MiB). Lỗi nêu cách
+thoát: đếm nhỏ hơn hoặc một lớp ASCII.
+
+Một lần gọi cũng có giới hạn thời gian thực, `SEARCH_TIME_LIMIT` (30 s,
+`crates/linch-tools/src/fs/local.rs`). Nó được kiểm tra giữa các tệp và mỗi lần việc tìm
+đọc thêm một tệp (một lần cho mỗi buffer), và quá mức đó lời gọi thất bại với `timed_out`,
+nói đã tìm xong bao nhiêu tệp và đang ở tệp nào; một lời gọi bị hủy dừng ở cùng các điểm đó.
+Phần còn lại: một lần tìm regex trên một dòng rất dài không thể bị ngắt, nên một dòng tới
+10 MiB (mức tối đa searcher giữ) có thể chạy quá giới hạn. Trường hợp 64 KiB ở trên mất 6
+đến 17 s; chi phí tăng theo dòng, và một dòng 10 MiB sẽ mất khoảng 160 lần (khoảng 15 đến
+45 phút, một ước tính theo tỉ lệ, không phải số đo).
 
 ### Đọc trước khi ghi
 

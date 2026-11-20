@@ -1,6 +1,7 @@
 //! One file's search against inputs too big to write to disk in a test.
 
 use std::io::{self, Read};
+use std::time::{Duration, Instant};
 
 use super::*;
 
@@ -26,7 +27,9 @@ fn query(pattern: &str, multiline: bool) -> GrepQuery {
 fn search_input(query: &GrepQuery, input: impl Read, stop: &CancellationToken) -> io::Result<()> {
     let mut sink = Collect::new(query.mode, query.limit + 1);
     let matcher = matcher(query).unwrap();
-    search(&mut searcher(query, CAP), &matcher, input, stop, &mut sink)
+    let deadline = Instant::now() + Duration::from_secs(3600);
+    let searcher = &mut searcher(query, CAP);
+    search(searcher, &matcher, input, (stop, deadline), &mut sink)
 }
 
 #[test]
@@ -151,5 +154,61 @@ async fn before_context_over_the_limit_is_reported_not_hidden() {
     assert_eq!(
         run_grep(fs, wide).await,
         "No matches found.\n… (not searched in full, so matches may be missing: ctx.txt)"
+    );
+}
+
+/// 2 MiB of 100-digit lines of `0` and `1`: the pattern below takes seconds
+/// to search it, and finishes.
+fn slow_bits() -> String {
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut bits = String::new();
+    while bits.len() < 2 * 1024 * 1024 {
+        for _ in 0..100 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            bits.push(if seed & 1 == 0 { '0' } else { '1' });
+        }
+        bits.push('\n');
+    }
+    bits
+}
+
+const SLOW_PATTERN: &str = "(0|1)*1(0|1){22}";
+
+#[test]
+fn a_slow_search_stops_at_the_time_limit_and_says_how_far_it_got() {
+    let (_dir, fs) = workspace(&[("a.txt", "x\n"), ("big.txt", &slow_bits())]);
+    let fs = fs.with_search_time_limit(Duration::from_millis(200));
+    let mut query = query(SLOW_PATTERN, false);
+    query.mode = GrepMode::Count;
+    let began = Instant::now();
+    let error = grep(&fs, &query, &CancellationToken::new()).unwrap_err();
+    assert!(
+        began.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        began.elapsed()
+    );
+    match &error {
+        FsError::TimedOut { files, at, .. } => assert_eq!((*files, at.as_str()), (1, "big.txt")),
+        other => panic!("expected a timeout, got {other:?}"),
+    }
+    let message = error.to_string();
+    assert!(
+        message.contains("1 file(s) searched, at big.txt"),
+        "{message}"
+    );
+    let reported = linch_core::ToolOutputError::from(error);
+    assert_eq!(reported.code.as_deref(), Some("timed_out"));
+}
+
+#[test]
+fn the_time_limit_is_checked_between_files() {
+    let (_dir, fs) = workspace(&[("a.txt", "needle\n"), ("b.txt", "needle\n")]);
+    let fs = fs.with_search_time_limit(Duration::ZERO);
+    let error = grep(&fs, &query("needle", false), &CancellationToken::new()).unwrap_err();
+    assert!(
+        matches!(error, FsError::TimedOut { files: 0, .. }),
+        "{error:?}"
     );
 }

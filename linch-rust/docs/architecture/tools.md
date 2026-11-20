@@ -258,6 +258,24 @@ may compile to at most 10 MiB (`REGEX_SIZE_LIMIT`; a larger one is an
 `invalid_query`) and one matcher's lazy DFA cache holds at most 32 MiB
 (`REGEX_DFA_CACHE_LIMIT`; a pattern that needs more runs on a slower engine),
 so one call's memory is bounded besides the 10 MiB the searcher holds of a file.
+The measured price: a 64 KiB line of random `a` and `b` with `[ab]{1,20000}c`
+took 6.3 s and 386 MiB with the library's limits and takes 16.2 s and 36 MiB
+with these (17.3 s and 68 MiB at 64 MiB, 5.3 s and 131 MiB at 128 MiB, so no
+value keeps both under about 100 MiB and within twice the time), and a Unicode
+class repeated many times (`\w{300}`, `\w{500}`, `\p{L}{500}`, `\w{1000}`) is
+now an `invalid_query` (it compiles in 20 to 50 MiB). The error names the way
+out: a smaller count or an ASCII class.
+
+A call also has a wall-clock limit, `SEARCH_TIME_LIMIT` (30 s,
+`crates/linch-tools/src/fs/local.rs`). It is checked between files and each
+time the search reads more of a file (once per buffer), and past it the call
+fails with `timed_out`, saying how many files were searched in full and which
+file it was in, and a cancelled call stops at the same points. The residual:
+one regex search over a single very long line cannot be interrupted, so a
+line of up to 10 MiB (the most the searcher holds) can run past the limit. The
+64 KiB case above took 6 to 17 s; the cost grows with the line, and a 10 MiB
+line would take about 160 times that (about 15 to 45 minutes, an estimate by
+scaling, not a measurement).
 
 ### Read before write
 
