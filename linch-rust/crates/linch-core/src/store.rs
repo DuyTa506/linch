@@ -196,7 +196,9 @@ pub enum StoreError {
 pub trait RunStore: Send + Sync {
     /// Create a run with its first checkpoint and events, in one write.
     ///
-    /// Refuses, writing nothing, with `Conflict` when the run id exists and
+    /// Refuses, writing nothing, with `Conflict` when the run id exists or
+    /// retention pruned it (its tombstone keeps the id from being used
+    /// again, also against a `create` that overlaps the delete), and
     /// with [`StoreError::SessionBusy`] when the namespace already holds a
     /// run of the same session that is not terminal. The check and the
     /// insert are one atomic step, so of two creates racing on one session
@@ -245,7 +247,10 @@ pub trait RunStore: Send + Sync {
     /// Extend `lease` by a whole [`RunStore::lease_ttl`] from now.
     ///
     /// Raises:
-    ///     StoreError: `LeaseLost` once a later claim moved the epoch.
+    ///     StoreError: `LeaseLost` once a later claim moved the epoch, or,
+    ///         in a store whose claims expire, once the lease was released
+    ///         (a renewal that lands after the release must not lease the
+    ///         run again).
     async fn renew(&self, lease: &Lease) -> Result<(), StoreError> {
         let _ = lease;
         Ok(())

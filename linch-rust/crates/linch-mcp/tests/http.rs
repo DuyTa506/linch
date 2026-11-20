@@ -4,13 +4,14 @@ mod common;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use common::{
     Fixture, PATIENCE, TestServer, call, call_with, eventually, standard_tools, text_input, tool,
 };
@@ -199,4 +200,119 @@ async fn an_http_error_on_one_post_fails_only_that_call() {
 
     server.disconnect().await;
     http.stop().await;
+}
+
+/// A server at the configured path that answers 307 sends a redirect-following
+/// client, with the transport's headers, to another path of the origin. The
+/// client stays on the path it was configured with.
+#[tokio::test]
+async fn a_redirect_does_not_take_the_client_off_the_configured_path() {
+    let elsewhere = Arc::new(AtomicUsize::new(0));
+    let with_header = Arc::new(AtomicUsize::new(0));
+    let count = {
+        let (elsewhere, with_header) = (Arc::clone(&elsewhere), Arc::clone(&with_header));
+        move |request: Request, next: Next| {
+            let (elsewhere, with_header) = (Arc::clone(&elsewhere), Arc::clone(&with_header));
+            async move {
+                if request.uri().path().starts_with("/mcp") {
+                    elsewhere.fetch_add(1, Ordering::SeqCst);
+                    if request.headers().contains_key("x-tenant-token") {
+                        with_header.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+                next.run(request).await
+            }
+        }
+    };
+    let http = Http::start(&Fixture::new(standard_tools()), |router| {
+        router
+            .route(
+                "/allowed",
+                axum::routing::any(|| async { Redirect::temporary("/mcp").into_response() }),
+            )
+            .layer(middleware::from_fn(count))
+    })
+    .await;
+    let mut headers = BTreeMap::new();
+    headers.insert("X-Tenant-Token".to_owned(), "tenant-secret".to_owned());
+    let transport = McpTransport::Http {
+        url: http.url.replace("/mcp", "/allowed"),
+        headers,
+    };
+    let mut config = McpServerConfig::new("web", transport);
+    config.reconnect.attempt_timeout = Duration::from_secs(5);
+    let connected = McpServer::connect(config, Arc::new(ToolRegistry::new())).await;
+    let (hits, keyed) = (
+        elsewhere.load(Ordering::SeqCst),
+        with_header.load(Ordering::SeqCst),
+    );
+    let listed = connected.as_ref().map(|server| server.tools().len()).ok();
+    if let Ok(server) = connected {
+        server.disconnect().await;
+    }
+    http.stop().await;
+    assert_eq!(
+        hits, 0,
+        "{hits} requests left /allowed for /mcp, {keyed} with the transport's header; \
+         tools listed from there: {listed:?}"
+    );
+}
+
+fn chain(error: &dyn std::error::Error) -> String {
+    let mut text = format!("{error}");
+    let mut source = error.source();
+    while let Some(inner) = source {
+        text.push_str(&format!(" | {inner}"));
+        source = inner.source();
+    }
+    text
+}
+
+/// A failed connect is shown to hosts and answered by `agent.open`: it must
+/// not print the URL's query, which often holds a token.
+#[tokio::test]
+async fn a_connect_error_does_not_print_the_query_of_the_url() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let mut config = McpServerConfig::new(
+        "web",
+        McpTransport::http(format!("http://user:tok-pass@{address}/mcp?key=tok-query")),
+    );
+    config.reconnect.attempt_timeout = Duration::from_secs(5);
+    let error = McpServer::connect(config, Arc::new(ToolRegistry::new()))
+        .await
+        .err()
+        .expect("nothing listens there");
+    let shown = format!("{} || {error:?}", chain(&error));
+    for secret in ["tok-query", "tok-pass"] {
+        assert!(!shown.contains(secret), "{shown}");
+    }
+}
+
+/// The client does not follow redirects; the error says so and what to do.
+#[tokio::test]
+async fn a_redirect_error_says_redirects_are_not_followed() {
+    let http = Http::start(&Fixture::new(standard_tools()), |router| {
+        router.route(
+            "/allowed",
+            axum::routing::any(|| async { Redirect::temporary("/mcp").into_response() }),
+        )
+    })
+    .await;
+    let mut config = McpServerConfig::new(
+        "web",
+        McpTransport::http(http.url.replace("/mcp", "/allowed")),
+    );
+    config.reconnect.attempt_timeout = Duration::from_secs(5);
+    let error = McpServer::connect(config, Arc::new(ToolRegistry::new()))
+        .await
+        .err()
+        .expect("a redirect is an error");
+    http.stop().await;
+    let shown = chain(&error);
+    assert!(
+        shown.contains("redirects are not followed; configure the final URL"),
+        "{shown}"
+    );
 }

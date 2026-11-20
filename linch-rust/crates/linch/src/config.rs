@@ -53,7 +53,8 @@ pub struct TaskLedger {
 /// Open it with [`AgentConfig::open`].
 ///
 /// Serializing is for logs and echoes, so it hides the secrets: the DSN
-/// password and the MCP env and header values. Send or store a config
+/// password, the MCP env and header values, and the user name, password and
+/// query of a provider `base_url` or an MCP URL. Send or store a config
 /// with [`AgentConfig::to_value_with_secrets`], which keeps them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -254,7 +255,9 @@ fn is_true(value: &bool) -> bool {
 ///
 /// Each live provider reads its key from the process environment when the
 /// agent opens; a config never carries a key. `base_url` overrides the
-/// provider's public endpoint.
+/// provider's public endpoint. `Debug` and serializing write a `base_url`'s
+/// user name, password and query as `redacted` and drop its fragment, as for
+/// an MCP URL; [`AgentConfig::to_value_with_secrets`] keeps them.
 ///
 /// | `id` | Key variable | Default endpoint |
 /// |---|---|---|
@@ -267,14 +270,18 @@ fn is_true(value: &bool) -> bool {
 /// | `sglang` | `SGLANG_API_KEY`, optional | none, `base_url` required |
 /// | `llamacpp` | `LLAMA_API_KEY`, optional | none, `base_url` required |
 /// | `scripted` | none | none: replays `turns` |
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "id", deny_unknown_fields)]
 pub enum ProviderConfig {
     /// DeepSeek's Chat Completions API.
     #[serde(rename = "deepseek")]
     DeepSeek {
         /// API root; the public endpoint when absent.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            serialize_with = "redact::url_option"
+        )]
         base_url: Option<String>,
         /// The context window of every model; absent: 128000.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -290,7 +297,11 @@ pub enum ProviderConfig {
     #[serde(rename = "openai-chat")]
     OpenAiChat {
         /// API root; the public endpoint when absent.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            serialize_with = "redact::url_option"
+        )]
         base_url: Option<String>,
         /// The context window of every model; absent: Python's table (gpt-5.5 and gpt-5.4 400000, o1
         /// 200000, others 128000).
@@ -307,7 +318,11 @@ pub enum ProviderConfig {
     #[serde(rename = "openai-responses")]
     OpenAiResponses {
         /// API root; the public endpoint when absent.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            serialize_with = "redact::url_option"
+        )]
         base_url: Option<String>,
         /// Reasoning summary to stream as thinking; none when absent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -328,7 +343,11 @@ pub enum ProviderConfig {
     #[serde(rename = "anthropic")]
     Anthropic {
         /// API root; `ANTHROPIC_BASE_URL` or the public endpoint when absent.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            serialize_with = "redact::url_option"
+        )]
         base_url: Option<String>,
         /// Whether a tool added or removed mid-session goes in the
         /// conversation as a tool block, keeping the prompt cache (beta
@@ -344,7 +363,11 @@ pub enum ProviderConfig {
     #[serde(rename = "gemini")]
     Gemini {
         /// API root; the public endpoint when absent.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            serialize_with = "redact::url_option"
+        )]
         base_url: Option<String>,
         /// Extra body fields, headers and a timeout for every request.
         #[serde(default, skip_serializing_if = "RequestConfig::is_default")]
@@ -354,6 +377,7 @@ pub enum ProviderConfig {
     #[serde(rename = "vllm")]
     Vllm {
         /// API root including `/v1`.
+        #[serde(serialize_with = "redact::url")]
         base_url: String,
         /// The context window of every model; absent: the server is asked when the agent opens
         /// (`max_model_len` on `/v1/models`), else 128000.
@@ -370,6 +394,7 @@ pub enum ProviderConfig {
     #[serde(rename = "sglang")]
     SgLang {
         /// API root including `/v1`.
+        #[serde(serialize_with = "redact::url")]
         base_url: String,
         /// The context window of every model; absent: the server is asked when the agent opens
         /// (`max_model_len` on `/v1/models`), else 128000.
@@ -386,9 +411,12 @@ pub enum ProviderConfig {
     #[serde(rename = "llamacpp")]
     LlamaCpp {
         /// API root including `/v1`.
+        #[serde(serialize_with = "redact::url")]
         base_url: String,
         /// The context window of every model; absent: the server is asked when the agent opens
-        /// (`n_ctx` on `/props`), else 128000.
+        /// (`n_ctx` on `{base_url}/props`, and `{base_url}/v1/props` for a base without `/v1`),
+        /// else 128000. A stock llama.cpp serves `/props` at its root only, so behind a `/v1`
+        /// base the window is 128000 unless this is set or `{base_url}/props` is served.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_window: Option<u64>,
         /// Extra body fields, headers and a timeout for every request.
@@ -413,6 +441,113 @@ pub enum ProviderConfig {
         #[serde(default = "native", skip_serializing_if = "is_native")]
         native_output_schema: bool,
     },
+}
+
+impl fmt::Debug for ProviderConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let shown = |url: &Option<String>| url.as_deref().map(redact::redact_url);
+        match self {
+            Self::DeepSeek {
+                base_url,
+                context_window,
+                request,
+                chat,
+            } => f
+                .debug_struct("DeepSeek")
+                .field("base_url", &shown(base_url))
+                .field("context_window", context_window)
+                .field("request", request)
+                .field("chat", chat)
+                .finish(),
+            Self::OpenAiChat {
+                base_url,
+                context_window,
+                request,
+                chat,
+            } => f
+                .debug_struct("OpenAiChat")
+                .field("base_url", &shown(base_url))
+                .field("context_window", context_window)
+                .field("request", request)
+                .field("chat", chat)
+                .finish(),
+            Self::OpenAiResponses {
+                base_url,
+                reasoning_summary,
+                store,
+                native_catalog_changes,
+                request,
+            } => f
+                .debug_struct("OpenAiResponses")
+                .field("base_url", &shown(base_url))
+                .field("reasoning_summary", reasoning_summary)
+                .field("store", store)
+                .field("native_catalog_changes", native_catalog_changes)
+                .field("request", request)
+                .finish(),
+            Self::Anthropic {
+                base_url,
+                native_catalog_changes,
+                request,
+            } => f
+                .debug_struct("Anthropic")
+                .field("base_url", &shown(base_url))
+                .field("native_catalog_changes", native_catalog_changes)
+                .field("request", request)
+                .finish(),
+            Self::Gemini { base_url, request } => f
+                .debug_struct("Gemini")
+                .field("base_url", &shown(base_url))
+                .field("request", request)
+                .finish(),
+            Self::Vllm {
+                base_url,
+                context_window,
+                request,
+                chat,
+            } => f
+                .debug_struct("Vllm")
+                .field("base_url", &redact::redact_url(base_url))
+                .field("context_window", context_window)
+                .field("request", request)
+                .field("chat", chat)
+                .finish(),
+            Self::SgLang {
+                base_url,
+                context_window,
+                request,
+                chat,
+            } => f
+                .debug_struct("SgLang")
+                .field("base_url", &redact::redact_url(base_url))
+                .field("context_window", context_window)
+                .field("request", request)
+                .field("chat", chat)
+                .finish(),
+            Self::LlamaCpp {
+                base_url,
+                context_window,
+                request,
+                chat,
+            } => f
+                .debug_struct("LlamaCpp")
+                .field("base_url", &redact::redact_url(base_url))
+                .field("context_window", context_window)
+                .field("request", request)
+                .field("chat", chat)
+                .finish(),
+            Self::Scripted {
+                turns,
+                context_window,
+                native_output_schema,
+            } => f
+                .debug_struct("Scripted")
+                .field("turns", turns)
+                .field("context_window", context_window)
+                .field("native_output_schema", native_output_schema)
+                .finish(),
+        }
+    }
 }
 
 impl ProviderConfig {

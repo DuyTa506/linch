@@ -528,6 +528,13 @@ A read, resume, approve, answer, steer, cancel or report of a deleted run is
 plain "not found", for `tombstone_days`. After that the server has forgotten
 it and the run reads as `RunNotFound`. A wrong id is always `RunNotFound`.
 
+Starting a run with the id of a pruned run (`agent.run(..., run_id=...)`) ends
+the run with `RunExists` (-32023) and the message `conflict: run <id> was pruned
+by retention and its id cannot be used again in <namespace>`, for as long as the
+tombstone is kept, so a client that retries a `create` of its own id cannot start
+a second run after retention deleted the first. This also holds for a `create`
+that arrives while the pruner is deleting the same id: it is refused, not started.
+
 ### Upgrading
 
 Migration 10 adds `linch_runs.ended_at` (set by the commit that makes a run

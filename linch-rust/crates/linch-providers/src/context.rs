@@ -5,9 +5,12 @@
 //! vLLM and SGLang list each served model's `max_model_len` on
 //! `GET /v1/models`; llama.cpp reports its context size as
 //! `default_generation_settings.n_ctx` (or a top-level `n_ctx`) on
-//! `GET /props`. A probe runs once, in [`linch_core::Provider::prepare`],
-//! within [`PROBE_TIMEOUT`]; one that fails or finds no positive value
-//! leaves the default.
+//! `GET /props`, which the probe asks of `{base}/props`, and of `{base}/v1/props`
+//! for a base that does not end in `/v1`, never of the base's parent. A stock
+//! llama.cpp serves `/props` at its root only, so behind a `/v1` base the
+//! window stays at the default unless the config sets it. A probe runs once,
+//! in [`linch_core::Provider::prepare`], within [`PROBE_TIMEOUT`]; one that
+//! fails or finds no positive value leaves the default.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -47,7 +50,8 @@ pub(crate) enum ContextRule {
     Known(&'static [(&'static str, u64)]),
     /// `GET {base}/models`, each model's `max_model_len`.
     Models,
-    /// `GET {base}/props`, then the other `/props` path, for `n_ctx`.
+    /// `GET {base}/props`, then `{base}/v1/props` when the base does not end
+    /// in `/v1` (see [`props_urls`]), for `n_ctx`.
     Props,
 }
 
@@ -154,15 +158,16 @@ fn n_ctx(value: &JsonValue) -> Option<u64> {
     nested.filter(|&n| n > 0).or(top.filter(|&n| n > 0))
 }
 
-/// `{base}/props`, then the root's `/props` when the base ends in `/v1`,
-/// else `{base}/v1/props`.
+/// `{base}/props`, and `{base}/v1/props` too when the base does not end in
+/// `/v1`. Never the parent of the base: a tenant's `base_url` is admitted by
+/// its path, and the probe sends the key.
 pub(crate) fn props_urls(base_url: &str) -> Vec<String> {
     let base = base_url.trim_end_matches('/');
-    let other = match base.strip_suffix("/v1") {
-        Some(root) => format!("{}/props", root.trim_end_matches('/')),
-        None => format!("{base}/v1/props"),
-    };
-    vec![format!("{base}/props"), other]
+    let mut urls = vec![format!("{base}/props")];
+    if !base.ends_with("/v1") {
+        urls.push(format!("{base}/v1/props"));
+    }
+    urls
 }
 
 #[cfg(test)]

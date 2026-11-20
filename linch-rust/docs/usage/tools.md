@@ -505,8 +505,43 @@ How rules combine:
   segment denied denies, any asked asks).
 - Across layers a deny from any layer is final; otherwise the last layer that
   decided wins. When no layer decides, the mode decides.
-- A shell command the splitter cannot model (for example with `$(...)`) can be
-  denied or asked by rules but never allowed by one.
+- A shell command the splitter cannot model can be denied or asked by rules
+  but never allowed by one, `*` included. That covers `$(...)` and backticks,
+  a background `&` or `&>`, a `#` comment, a here-document, `>|`, `>& 2`, a
+  `${...}` in double quotes whose body holds a quote, a backslash, a nested
+  `${` or `$[`, a `${` followed by a blank or `|`, `env -S`, and a command
+  position that is a `$` expansion, a brace expansion (`{rm,-rf}`),
+  `function`, `coproc`, an array assignment (`a[0]=1`) or a `{fd}>file`
+  redirection.
+- A narrow allow rule (one whose pattern is not the bare `*`) does not cover
+  a command that redirects output to a file (`echo x > file`, `>>`, `2>file`,
+  `<>`): it asks. So an allow rule for `echo` or `git *` does not let
+  `echo x > file` or `git log > file` through, while the allow-all rule `*`
+  allows `pytest -q > test.log`, as it allows every command. `>&` followed by
+  exactly digits or `-` (`2>&1`, `>&2`, `>&-`) duplicates a descriptor, and
+  `/dev/null`, `/dev/stdout` and `/dev/stderr` are not files; none of them
+  counts as a file redirect. Any other word after `>&` (`>&2file`) is a file,
+  which `*` allows like every other file redirect. The first rule that matches
+  a segment decides whether it is allow-all. Deny and ask rules are unchanged.
+- Name-based deny and ask rules are best effort against a shell the engine
+  does not run, and the sandbox is the boundary. A rule matches each segment
+  as written, and again over its words, which are always rebuilt: unquoted one
+  by one (`\rm`, `r""m`, `git 'push'`), blanks collapsed to one space,
+  redirections dropped wherever they appear, and a quoted argument kept as one
+  word (so `* --force` does not match inside a commit message). The words in
+  front of the command are removed too: `NAME=value` assignments, the
+  reserved words `if`, `then`, `else`, `elif`, `do`, `while`, `until`, `!` and
+  `{`, and `time`, `exec`, `command`, `builtin` and `env` (quoted or not) with
+  their options, read unquoted: bundled short options (`env -iu NAME`,
+  `exec -la NAME`), unique prefixes of long options (`env --uns NAME`) and the
+  argument of `env -u`/`-C`/`-a`, `time -f`/`-o` and `exec -a`; behind `env`
+  any word with a `=` is an assignment. `command -v NAME` is not a command
+  named `NAME`. An allow rule never matches these rebuilt forms: `X=1 echo`
+  is not `echo`. Not covered: other spellings and wrappers (`/bin/rm`,
+  `sudo`, `nice`, `nohup`, `setsid`, `timeout`, `xargs`, `eval`, `sh -c`), a
+  command that a substitution or a variable produces, and arithmetic
+  contexts such as `x='a[$(cmd)]'; echo $[x]`, which are not reported as
+  unparsed.
 - A path outside the project root never matches an allow rule.
 
 `auto_allow` (a list of tool names) allows those tools in every mode unless a
@@ -792,7 +827,7 @@ their own output:
 | `Bash`, `BashOutput` | the first 4000 and the last 26000 bytes of each stream |
 | `Grep` | 250 entries by default, 30000 bytes of output; a pattern that compiles past 10 MiB is an `invalid_query`; a call that runs past 30 s fails with `timed_out` (one very long line cannot be interrupted, so it can run longer) |
 | `Glob` | 1000 paths |
-| An MCP tool | 30000 bytes of result text |
+| An MCP tool | 30000 bytes of result text or error text; at most 8 images and 4 MiB of image data and MIME types, a MIME type of at most 255 bytes |
 | `memory_recall` | 8 KiB of recalled context per request |
 | `Read` | 2000 lines by default and a 10 MiB file; a line has no width limit, so one minified line can return megabytes (a known gap: the offload below reaches the result of `Read` and `read_file` pages a long line, but `Read` itself does not cut one) |
 

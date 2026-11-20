@@ -1763,14 +1763,18 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
+ "futures",
  "http",
  "linch-core",
  "process-wrap",
+ "reqwest",
  "rmcp",
  "serde_json",
+ "sse-stream",
  "thiserror",
  "tokio",
  "tokio-util",
+ "tracing",
 ]
 
 [[package]]

@@ -1,7 +1,10 @@
 //! Concurrent claims: each claim fences the one before it.
 
+use std::time::Duration;
+
 use linch_core::{Commit, RunId, RunStore, StoreError};
 use linch_postgres::PgRunStore;
+use sqlx::postgres::PgPoolOptions;
 
 use crate::common::{TestDb, envelope, new_run};
 
@@ -77,4 +80,28 @@ async fn a_commit_racing_a_claim_lands_whole_or_not_at_all() {
         outcomes[0], outcomes[1]
     );
     db.finish().await;
+}
+
+/// A claim of a run that has no row answers `NotFound` with the connection
+/// it already holds: N such claims on a pool of N must not wait on each
+/// other for the acquire timeout.
+#[tokio::test]
+async fn a_claim_of_a_missing_run_needs_one_connection() {
+    let Some(db) = TestDb::migrated("claim_missing").await else {
+        return;
+    };
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(db.options.clone())
+        .await
+        .unwrap();
+    let store = PgRunStore::new(pool.clone());
+    let id = RunId::new("never-created");
+    let claimed = tokio::time::timeout(Duration::from_secs(5), store.claim("ns", &id, "a")).await;
+    pool.close().await;
+    db.finish().await;
+    assert!(
+        matches!(claimed, Ok(Err(StoreError::NotFound { pruned: false, .. }))),
+        "the claim did not answer NotFound within 5 s: {claimed:?}"
+    );
 }
