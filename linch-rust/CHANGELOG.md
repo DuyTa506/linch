@@ -6,6 +6,7 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ## Unreleased
 
+- A streamed event over the 16 MiB bound and a byte that is not UTF-8 are `stream` errors (`StreamError::EventTooLarge` and `StreamError::NotUtf8`), which are not retried, instead of `transport` errors: the next call would meet the same body, and each default attempt paid for it again. A run that does not retry does not fail over either. Failures of the connection itself stay `transport` and are retried.
 - The SSE framer gives its buffer back once a large event has been read (a buffer over 1 MiB that a chunk leaves under a quarter full), and grows it by doubling only up to the 16 MiB bound, so one large event no longer keeps 16 to 32 MiB for the rest of the stream.
 - The events a chunk completes before a byte that is not UTF-8, or before the 16 MiB bound, are delivered before the error, so a stream gives the same events and the same error wherever its chunks end (a complete response followed by a bad byte in the same chunk used to fail).
 - Error text is cleaned in one order for every error of a provider call, an HTTP error body or a frame inside a stream: the provider key and bearer tokens, then the configured header values and the cache salt, and only then the cut to 500 characters, so a secret that straddles the cut leaves no part of itself behind (the cut used to come first).

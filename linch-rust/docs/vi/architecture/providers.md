@@ -126,7 +126,7 @@ giờ được chứa thông tin xác thực hay header của request.
 | `Status { status, retry_after, message }` | Mã trạng thái HTTP không thành công | chỉ 408, 429 và >= 500 |
 | `ContextLength { status, message }` | Provider từ chối prompt vì dài hơn cửa sổ ngữ cảnh của model. `status` là `None` với lỗi bên trong một stream. Mỗi adapter ánh xạ lần từ chối của provider của nó ([bên dưới](#context-length-refusals)) | không |
 | `InvalidRequest { message }` | Adapter từ chối request như đã được dựng | không |
-| `Stream(StreamError)` | Event stream vi phạm hợp đồng stream | không |
+| `Stream(StreamError)` | Event stream vi phạm hợp đồng stream: một event mà assembler từ chối, một event vượt giới hạn 16 MiB (`EventTooLarge`), hoặc một byte không phải UTF-8 (`NotUtf8`) | không |
 | `Cancelled` | Cancel token đã kích hoạt | không |
 
 Các adapter không bao giờ retry (`crates/linch-providers/src/lib.rs:4`); `retryable()`
@@ -355,7 +355,7 @@ cho biết response đã hoàn tất chưa; `close` xử lý một body kết th
   chưa kết thúc, không được vượt `MAX_EVENT_BYTES` (16 MiB, `sse.rs:25`; event
   thật lớn nhất là event kết thúc của Responses, lặp lại toàn bộ output, khoảng
   2 MiB cho một câu trả lời 128 000 token), và một byte không phải UTF-8 làm
-  lời gọi thất bại ngay khi được đọc. Cả hai là lỗi `Transport` và đều đến sau các
+  lời gọi thất bại ngay khi được đọc. Cả hai là lỗi `Stream`, không bao giờ được retry (lần gọi sau gặp đúng body đó), và đều đến sau các
   event mà cùng chunk đó đã hoàn tất trước lỗi, nên kết quả không phụ thuộc vào chỗ
   chunk kết thúc. Bộ đệm tăng gấp đôi nhưng không bao giờ vượt quá giới hạn, và
   một bộ đệm trên 1 MiB mà một chunk để lại gần như trống sẽ được trả lại

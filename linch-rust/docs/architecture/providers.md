@@ -124,7 +124,7 @@ the adapter and must never hold credentials or request headers.
 | `Status { status, retry_after, message }` | Non-success HTTP status | 408, 429 and >= 500 only |
 | `ContextLength { status, message }` | The provider refused the prompt as longer than the model's context window. `status` is `None` for an error inside a stream. Each adapter maps its own provider's refusal ([below](#context-length-refusals)) | no |
 | `InvalidRequest { message }` | The adapter refused the request as built | no |
-| `Stream(StreamError)` | The event stream broke the stream contract | no |
+| `Stream(StreamError)` | The event stream broke the stream contract: an event the assembler refuses, one event over the 16 MiB bound (`EventTooLarge`), or a byte that is not UTF-8 (`NotUtf8`) | no |
 | `Cancelled` | The cancel token fired | no |
 
 Adapters never retry (`crates/linch-providers/src/lib.rs:4`); `retryable()`
@@ -360,7 +360,8 @@ early (a format with an end marker fails, one without finishes). The loop:
   line included, may not pass `MAX_EVENT_BYTES` (16 MiB, `sse.rs:25`; the
   largest real event is the Responses terminal event, which repeats the whole
   output, about 2 MiB for a 128 000-token answer), and a byte that is not
-  UTF-8 fails the call when it is read. Both are `Transport` errors, and both
+  UTF-8 fails the call when it is read. Both are `Stream` errors, which are never retried
+  (the next call meets the same body), and both
   come after the events that the same chunk completed before the fault, so the
   result does not depend on where chunks end. The buffer grows by doubling
   but never past the bound, and a buffer over 1 MiB that a chunk leaves mostly

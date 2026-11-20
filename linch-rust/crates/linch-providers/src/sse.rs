@@ -8,8 +8,7 @@ use std::collections::VecDeque;
 use std::fmt::Display;
 
 use futures::{Stream, StreamExt};
-use linch_core::{ProviderError, ProviderEvent, ProviderStream};
-use thiserror::Error;
+use linch_core::{ProviderError, ProviderEvent, ProviderStream, StreamError};
 use tokio_util::sync::CancellationToken;
 
 use crate::request::ErrorScrub;
@@ -29,15 +28,6 @@ pub(crate) const MAX_EVENT_BYTES: usize = 16 * 1024 * 1024;
 /// loopback (507 904 bytes in the bench), so ordinary streams never
 /// reallocate.
 const KEEP_BYTES: usize = 1024 * 1024;
-
-/// Why a body cannot be framed into events.
-#[derive(Debug, Error)]
-enum FrameError {
-    #[error("an event stream passed {MAX_EVENT_BYTES} bytes without the end of an event")]
-    TooLarge,
-    #[error("the event stream is not valid UTF-8")]
-    NotUtf8,
-}
 
 /// One response's wire format, fed one SSE event at a time.
 pub(crate) trait Decoder: Send + 'static {
@@ -126,7 +116,7 @@ impl Framer {
 
     /// Add one body chunk; the data of each event it ends goes to `out`,
     /// also when the chunk fails.
-    fn push(&mut self, chunk: &[u8], out: &mut VecDeque<String>) -> Result<(), FrameError> {
+    fn push(&mut self, chunk: &[u8], out: &mut VecDeque<String>) -> Result<(), StreamError> {
         self.buf
             .reserve_exact(room(self.buf.capacity(), self.buf.len(), chunk.len()));
         self.buf.extend_from_slice(chunk);
@@ -142,7 +132,7 @@ impl Framer {
         };
         self.read_lines(out)?;
         if bad {
-            return Err(FrameError::NotUtf8);
+            return Err(StreamError::NotUtf8);
         }
         self.buf.drain(..self.start);
         self.scanned -= self.start;
@@ -152,17 +142,19 @@ impl Framer {
             self.buf.shrink_to(self.buf.len().max(KEEP_BYTES / 4));
         }
         if self.event_bytes + self.buf.len() > MAX_EVENT_BYTES {
-            return Err(FrameError::TooLarge);
+            return Err(StreamError::EventTooLarge {
+                limit: MAX_EVENT_BYTES,
+            });
         }
         Ok(())
     }
 
     /// The body ended: a last line and event with no end are delivered.
-    fn finish(&mut self, out: &mut VecDeque<String>) -> Result<(), FrameError> {
+    fn finish(&mut self, out: &mut VecDeque<String>) -> Result<(), StreamError> {
         self.push(b"\n\n", out)
     }
 
-    fn read_lines(&mut self, out: &mut VecDeque<String>) -> Result<(), FrameError> {
+    fn read_lines(&mut self, out: &mut VecDeque<String>) -> Result<(), StreamError> {
         if !self.bom_checked {
             let rest = &self.buf[self.start..];
             if rest.len() < Self::BOM.len() && Self::BOM.starts_with(rest) {
@@ -193,8 +185,8 @@ impl Framer {
                 return Ok(());
             };
             let end = self.scanned + at;
-            let line =
-                std::str::from_utf8(&self.buf[self.start..end]).map_err(|_| FrameError::NotUtf8)?;
+            let line = std::str::from_utf8(&self.buf[self.start..end])
+                .map_err(|_| StreamError::NotUtf8)?;
             self.event_bytes += line.len() + 1;
             if line.is_empty() {
                 self.event_bytes = 0;
@@ -203,7 +195,9 @@ impl Framer {
                 self.pending.line(line);
             }
             if self.event_bytes > MAX_EVENT_BYTES {
-                return Err(FrameError::TooLarge);
+                return Err(StreamError::EventTooLarge {
+                    limit: MAX_EVENT_BYTES,
+                });
             }
             self.skip_lf = self.buf[end] == b'\r';
             self.start = end + 1;
@@ -218,7 +212,7 @@ struct State<S, D> {
     /// The data of events framed but not yet decoded.
     frames: VecDeque<String>,
     /// Why framing stopped; the error follows the events framed before it.
-    framing: Option<FrameError>,
+    framing: Option<StreamError>,
     /// The byte stream has ended and the framer has been flushed.
     ended: bool,
     decoder: D,
@@ -230,7 +224,7 @@ struct State<S, D> {
 
 /// Drive `decoder` over an SSE byte stream until the response completes,
 /// an error or `cancel`. One event may hold [`MAX_EVENT_BYTES`]; a stream
-/// that passes it, or that is not UTF-8, fails with a `Transport` error after
+/// that passes it, or that is not UTF-8, fails with a `Stream` error after
 /// the events framed before the fault. Error text is scrubbed of the
 /// secrets `scrub` names and cut to
 /// [`MAX_ERROR_CHARS`](crate::request::MAX_ERROR_CHARS), in that order, and
@@ -297,9 +291,7 @@ where
                 Err(err) => err,
             }
         } else if let Some(err) = state.framing.take() {
-            ProviderError::Transport {
-                message: err.to_string(),
-            }
+            ProviderError::Stream(err)
         } else if state.ended {
             state.done = true;
             match state.decoder.close(&mut state.pending) {

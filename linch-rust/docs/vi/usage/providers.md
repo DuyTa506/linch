@@ -520,7 +520,8 @@ một response dạng stream: một event giữ tối đa 16 MiB (tính từ cu�
 gồm cả một dòng không có điểm kết thúc), và một body không phải UTF-8 hợp lệ làm
 lời gọi thất bại tại byte sai đầu tiên, sau khi mọi event mà body đã hoàn tất trước
 lỗi đó được giao đi (nên kết quả không phụ thuộc vào chỗ mạng cắt chunk); cả hai kết thúc lời gọi bằng lỗi
-`transport`, loại lỗi được thử lại. Văn bản lỗi mà provider gửi trong stream bị
+`stream`, loại lỗi không được thử lại (lần gọi sau sẽ gặp đúng body đó, và một run
+không retry cũng không chuyển sang model dự phòng). Văn bản lỗi mà provider gửi trong stream bị
 cắt còn 500 ký tự, giống một body lỗi HTTP, sau khi key của provider, các giá trị
 header và cache salt đã được loại khỏi nó.
 

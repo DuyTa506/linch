@@ -245,15 +245,6 @@ async fn a_body_that_ends_inside_a_character_fails_the_call() {
     assert!(matches!(items.last(), Some(Err(_))), "{items:?}");
 }
 
-#[tokio::test]
-async fn a_bound_failure_is_a_transport_error() {
-    let (first, _) = first_item(b"data: ", &[b'x'; 64 * KIB]).await;
-    assert!(
-        matches!(first, Some(Err(ProviderError::Transport { .. }))),
-        "{first:?}"
-    );
-}
-
 /// One 400 KiB chunk of comment lines (about the largest chunk reqwest
 /// hands over on loopback) frames in the time of a linear pass. Framing
 /// that copies the rest of the chunk for each line takes a second; a
@@ -633,4 +624,37 @@ fn two_large_events_in_a_row_do_not_add_up() {
     // One event is held twice at most: as the unread line and as its data.
     assert!(peak <= 2 * MAX_EVENT_BYTES, "{} MiB", peak / (KIB * KIB));
     assert!(framer.buf.capacity() <= KEEP_BYTES);
+}
+
+// ---- the class of a framing failure
+
+#[tokio::test]
+async fn a_stream_over_the_bound_fails_with_an_error_that_is_not_retried() {
+    let (first, _) = first_item(b"data: ", &[b'x'; 64 * KIB]).await;
+    let Some(Err(err)) = first else {
+        panic!("{first:?}")
+    };
+    assert!(matches!(err, ProviderError::Stream(_)), "{err:?}");
+    assert!(!err.retryable(), "{err:?}");
+}
+
+#[tokio::test]
+async fn a_byte_that_is_not_utf8_fails_with_an_error_that_is_not_retried() {
+    let (first, _) = first_item(&[0xff], b"data: x\n\n").await;
+    let Some(Err(err)) = first else {
+        panic!("{first:?}")
+    };
+    assert!(matches!(err, ProviderError::Stream(_)), "{err:?}");
+    assert!(!err.retryable(), "{err:?}");
+}
+
+#[tokio::test]
+async fn a_transport_failure_of_the_body_stays_retryable() {
+    let bytes = futures::stream::iter([Err::<Vec<u8>, _>("connection reset")]);
+    let mut stream = events(bytes, Echo, CancellationToken::new(), None::<ApiKey>);
+    let Some(Err(err)) = stream.next().await else {
+        panic!("the body fails");
+    };
+    assert!(matches!(err, ProviderError::Transport { .. }), "{err:?}");
+    assert!(err.retryable());
 }
