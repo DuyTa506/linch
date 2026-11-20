@@ -6,6 +6,23 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ## Unreleased
 
+- The usage docs state that name-based bash deny and ask rules are best effort against a shell the engine does not run, list the classes they do not cover, and describe the normalised words form exactly.
+- Behind `env`, any word that holds a `=` is an assignment for deny and ask rules, so `env a.b=1 touch M` reaches a `touch *` rule; a `${` followed by a blank or `|` counts as syntax the splitter cannot model (bash 5.3 command substitution).
+- A redirection between a wrapper option (`env -u`, `time -o`, `exec -a`) and its argument no longer makes the argument the command for deny and ask rules.
+- Bash deny and ask rules always match the words of a segment normalised (blanks collapsed, redirections dropped wherever they appear), so `git push *` covers `git  push origin`, `git<TAB>push origin` and `git 2>&1 push origin`.
+- Bash deny and ask rules match each word unquoted while keeping word boundaries, so `git push *` covers `git 'push' origin main` and `rm -rf *` covers `rm '-rf' build`, and a quoted argument stays one word; the docs list `nice`, `nohup`, `setsid`, `timeout` and `xargs` as wrappers a name-based rule does not cover.
+- Bash deny and ask rules read the options and `NAME=value` words of `env`, `time`, `exec` and `command` unquoted, accept bundled short options (`env -iu NAME`, `exec -la NAME`) and unique prefixes of long options (`env --uns NAME`), and no longer take the argument of such an option for the command.
+- `>&` followed by anything but exactly digits or `-` (`>&2file`, `>&-file`) counts as a redirect to a file, so a narrow allow rule asks for it.
+- A `${...}` in double quotes whose body holds `$[` (bash nests the old arithmetic form, so a `}` inside it does not close the expansion) counts as syntax the splitter cannot model.
+- The bash file-redirect rule applies to narrow allow rules only: the allow-all rule `*` covers `pytest -q > test.log` again, while `echo` or `git *` allow rules still ask for a command that writes a file; `&>` and `>|` stay unparsed for every rule.
+- A bash allow rule no longer covers a command that redirects output to a file (`echo x > file`); descriptor duplication (`2>&1`) and `/dev/null`, `/dev/stdout`, `/dev/stderr` are still covered, and deny and ask rules are unchanged.
+- Bash deny and ask rules match the unquoted command word with the arguments as written, so a deny pattern such as `* --force` no longer matches text inside a quoted argument; a `#` after an escaped blank or semicolon is not a comment.
+- `function`, `coproc`, an array-element assignment (`a[0]=1`), a descriptor-variable redirection (`{fd}>log`) and a brace expansion (`{rm,-rf}`) in command position count as syntax the splitter cannot model.
+- Bash deny and ask rules see the command behind a wrapper option that takes an argument (`env -u NAME`, `env -C DIR`, `time -o FILE`, `time -f FORMAT`, `exec -a NAME`) and no longer match the argument itself or `command -v NAME`; `env -S` counts as syntax the splitter cannot model.
+- Bash deny and ask rules also see a command behind a quoted or escaped `env`, `command`, `exec`, `builtin`, `time` or reserved word (`\env rm`, `"time" rm`).
+- A `${...}` inside double quotes whose body holds a quote, a backslash or a nested `${` counts as syntax the splitter cannot model, so a bash allow rule no longer covers the commands that follow it.
+- Bash deny and ask rules also match a command spelled with quotes or escapes (`\rm`, `r""m`) and a command behind leading `NAME=value` words, redirections, reserved words (`if`, `then`, `do`, `!`, `{`) and `time`, `exec`, `command`, `builtin`, `env`; a `$` expansion in command position counts as syntax the splitter cannot model.
+- Bash permission rules: `&>`, a `&` after an escaped or quoted `<`/`>`, a `#` comment, here-documents, `>|` and `>&` onto anything but a descriptor count as syntax the splitter cannot model, so allow rules no longer cover them; a backslash inside double quotes is kept before bytes other than `$`, backtick, `"`, `\` and newline.
 ### Fixed
 
 - **Interrupt payload bound.** An interrupt's payload, which the workflow's stored status keeps, is held to `max_record_bytes` like a record's value (`LimitExceeded`, `bytes in an interrupt payload`).

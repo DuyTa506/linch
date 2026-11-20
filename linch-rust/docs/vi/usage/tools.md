@@ -496,8 +496,41 @@ Cách các rule kết hợp:
 - Giữa các layer, một deny từ bất kỳ layer nào là quyết định cuối; nếu không, layer
   cuối cùng đã quyết định sẽ thắng. Khi không layer nào quyết định, mode quyết
   định.
-- Một lệnh shell mà bộ tách lệnh không mô hình hóa được (chẳng hạn có `$(...)`) có
-  thể bị rule deny hoặc ask nhưng không bao giờ được rule allow.
+- Một lệnh shell mà bộ tách lệnh không mô hình hóa được có thể bị rule deny
+  hoặc ask nhưng không bao giờ được rule allow, kể cả `*`. Gồm `$(...)` và dấu
+  backtick, dấu `&` chạy nền hoặc `&>`, chú thích `#`, here-document, `>|`,
+  `>& 2`, `${...}` trong dấu nháy kép mà phần thân có dấu nháy, dấu gạch chéo
+  ngược, `${` lồng hay `$[`, `${` theo sau bởi khoảng trắng hoặc `|`, `env -S`,
+  và vị trí lệnh là phép khai triển `$`, khai triển ngoặc nhọn (`{rm,-rf}`),
+  `function`, `coproc`, gán phần tử mảng (`a[0]=1`) hay chuyển hướng `{fd}>file`.
+- Một rule allow hẹp (pattern không phải `*` trần) không bao phủ lệnh chuyển
+  hướng đầu ra vào một tệp (`echo x > file`, `>>`, `2>file`, `<>`): lệnh đó sẽ
+  hỏi. Vì vậy rule allow cho `echo` hay `git *` không cho `echo x > file` hay
+  `git log > file` đi qua, còn rule allow-all `*` cho phép `pytest -q > test.log`
+  như mọi lệnh khác. `>&` theo sau đúng bởi chữ số hoặc `-` (`2>&1`, `>&2`,
+  `>&-`) nhân bản descriptor, còn `/dev/null`, `/dev/stdout` và `/dev/stderr`
+  không phải tệp; không cái nào tính là chuyển hướng vào tệp. Mọi từ khác sau
+  `>&` (`>&2file`) là một tệp, và `*` cho phép như mọi chuyển hướng vào tệp khác.
+  Rule khớp đầu tiên của một đoạn quyết định đoạn đó có phải allow-all hay
+  không. Rule deny và ask không đổi.
+- Các rule deny và ask dựa trên tên lệnh chỉ là nỗ lực tối đa đối với một shell
+  mà engine không chạy, và sandbox mới là ranh giới. Một rule khớp từng đoạn
+  như đã viết, rồi khớp lại trên các từ luôn được dựng lại: bỏ dấu nháy từng từ
+  (`\rm`, `r""m`, `git 'push'`), gộp khoảng trắng thành một dấu cách, bỏ các
+  chuyển hướng ở bất kỳ vị trí nào, và đối số trong dấu nháy vẫn là một từ (nên
+  `* --force` không khớp bên trong thông điệp commit). Các từ đứng trước lệnh
+  cũng bị gỡ: phép gán `NAME=value`, các từ khóa dành riêng `if`, `then`,
+  `else`, `elif`, `do`, `while`, `until`, `!` và `{`, cùng `time`, `exec`,
+  `command`, `builtin` và `env` (có hoặc không có dấu nháy) với các tùy chọn của
+  chúng, đọc sau khi bỏ dấu nháy: tùy chọn ngắn gộp (`env -iu NAME`,
+  `exec -la NAME`), tiền tố duy nhất của tùy chọn dài (`env --uns NAME`) và đối
+  số của `env -u`/`-C`/`-a`, `time -f`/`-o` và `exec -a`; sau `env`, mọi từ có
+  dấu `=` là phép gán. `command -v NAME` không phải lệnh tên `NAME`. Rule allow
+  không bao giờ khớp các dạng dựng lại này: `X=1 echo` không phải `echo`.
+  Không được bao phủ: các cách viết và wrapper khác (`/bin/rm`, `sudo`, `nice`,
+  `nohup`, `setsid`, `timeout`, `xargs`, `eval`, `sh -c`), lệnh do phép thay thế
+  hay biến tạo ra, và ngữ cảnh số học như `x='a[$(cmd)]'; echo $[x]`, không
+  được báo là không phân tích được.
 - Đường dẫn nằm ngoài project root không bao giờ khớp một rule allow.
 
 `auto_allow` (danh sách tên tool) cho phép các tool đó ở mọi mode trừ khi một rule
