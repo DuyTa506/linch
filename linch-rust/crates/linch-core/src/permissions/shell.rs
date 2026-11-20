@@ -116,7 +116,8 @@ pub fn split_composite(input: &str) -> Vec<&str> {
 /// substitution or subshell parentheses, ANSI-C quoting (`$'...'`, whose `\'`
 /// the quote tracking would misread), or an unbalanced quote or trailing
 /// backslash. `&` is a redirection only right after an unescaped, unquoted
-/// `<` or `>` (`2>&1`, `>&2`, `<&3`). The shell differs per backend (dash,
+/// `<` or `>` and names a descriptor (`2>&1`, `>&2`, `<&3`, `>&-`): what
+/// `>&file` means differs between shells. The shell differs per backend (dash,
 /// bash, busybox), so what one of them reads differently is reported. A `$`
 /// expansion in command position (`$a -rf x`) is reported too: the command it
 /// names is not in the text.
@@ -167,7 +168,7 @@ pub fn has_unparsed_construct(command: &str) -> bool {
                 b'>' if next == Some(b'|') => return true,
                 b'<' | b'>' => redirect_end = i + 1,
                 // `2>&1`, `>&2`, `<&3`: a redirection.
-                b'&' if redirect_end == i => {}
+                b'&' if redirect_end == i && matches!(next, Some(b'0'..=b'9' | b'-')) => {}
                 b'&' if next == Some(b'&') => {
                     i += 2;
                     continue;
@@ -359,6 +360,8 @@ mod tests {
             "echo hi &>/tmp/f touch x",
             "echo \\>& x",
             "echo \\<& x",
+            "echo >& file",
+            "echo >&$fd",
             "echo '>'& x",
             "echo hi #'\ntouch x\n#'",
             "echo hi #",
@@ -382,6 +385,8 @@ mod tests {
             "a && b",
             "a 2>&1",
             "a <&3",
+            "a >&-",
+            "a 1>&2 2>&1",
             "a <<< word",
             "a <<<\"x;y\"",
             "a $b",

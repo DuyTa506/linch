@@ -491,7 +491,7 @@ How rules combine:
 - Across layers a deny from any layer is final; otherwise the last layer that
   decided wins. When no layer decides, the mode decides.
 - A shell command the splitter cannot model (for example with `$(...)`, a
-  background `&` or `&>`, a `#` comment, a here-document or `>|`) can be
+  background `&` or `&>`, `>&file`, a `#` comment, a here-document or `>|`) can be
   denied or asked by rules but never allowed by one.
 - Name-based bash rules are best effort and the sandbox is the boundary: a
   deny or ask rule also sees the command behind leading `NAME=value` words,

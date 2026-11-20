@@ -494,7 +494,7 @@ Cách các rule kết hợp:
   cuối cùng đã quyết định sẽ thắng. Khi không layer nào quyết định, mode quyết
   định.
 - Một lệnh shell mà bộ tách lệnh không mô hình hóa được (chẳng hạn có `$(...)`, dấu
-  `&` chạy nền hoặc `&>`, chú thích `#`, here-document hay `>|`) có thể bị rule deny
+  `&` chạy nền hoặc `&>`, `>&file`, chú thích `#`, here-document hay `>|`) có thể bị rule deny
   hoặc ask nhưng không bao giờ được rule allow.
 - Các bash rule dựa trên tên lệnh chỉ là nỗ lực tối đa và sandbox mới là ranh giới:
   một rule deny hoặc ask cũng thấy lệnh nằm sau các từ `NAME=value`, chuyển hướng,

@@ -332,6 +332,125 @@ fn an_expansion_in_command_position_is_unparsed() {
 }
 
 #[test]
+fn a_here_document_is_unparsed_and_never_allowed() {
+    for command in [
+        "echo hi <<EOF",
+        "echo hi <<-EOF",
+        "echo hi <<'EOF'",
+        "echo hi <<EOF\ntouch pwned\nEOF",
+    ] {
+        assert_eq!(bash(&allow_echo(), command), "ask", "{command:?}");
+    }
+    let deny = flat(PermissionMode::SkipDangerous, vec![bash_rule("rm *", Deny)]);
+    assert_eq!(bash(&deny, "rm -rf build <<EOF"), "deny");
+}
+
+#[test]
+fn a_here_string_is_modelled_and_covered_by_the_rule_of_its_command() {
+    assert_eq!(bash(&allow_echo(), "echo hi <<< word"), "allow");
+    assert_eq!(bash(&allow_echo(), "echo hi <<< 'a;b'"), "allow");
+    assert_eq!(bash(&allow_echo(), "echo hi <<< a; touch x"), "ask");
+}
+
+#[test]
+fn a_clobber_redirect_is_unparsed_and_never_allowed() {
+    assert_eq!(bash(&allow_echo(), "echo hi >| out"), "ask");
+}
+
+#[test]
+fn a_pipe_and_ampersand_is_unparsed_and_never_allowed() {
+    assert_eq!(bash(&allow_echo(), "echo hi |& cat"), "ask");
+}
+
+#[test]
+fn a_backslash_inside_double_quotes_is_kept_before_an_ordinary_byte() {
+    let engine = flat(
+        PermissionMode::Default,
+        vec![bash_rule("cat \"a\\nb\"", Allow)],
+    );
+    assert_eq!(bash(&engine, "cat \"a\\nb\""), "allow");
+    assert_eq!(bash(&engine, "cat \"anb\""), "ask");
+    assert_eq!(bash(&engine, "cat 'a\\nb'"), "allow");
+}
+
+/// Commands that try to run a second command under a lone `echo` allow
+/// rule, in `default` mode. The ones expected `allow` run exactly one
+/// command in `sh` (checked against dash and bash); the rest must ask.
+const ECHO_VARIANTS: &[(&str, &str)] = &[
+    ("echo hi; touch pwned", "ask"),
+    ("echo hi;touch pwned", "ask"),
+    ("echo hi && touch pwned", "ask"),
+    ("echo hi || touch pwned", "ask"),
+    ("echo hi | touch pwned", "ask"),
+    ("echo hi |& touch pwned", "ask"),
+    ("echo hi & touch pwned", "ask"),
+    ("echo hi\ntouch pwned", "ask"),
+    ("echo hi \\\ntouch pwned", "ask"),
+    ("echo hi #\ntouch pwned", "ask"),
+    ("echo hi #'\ntouch pwned\n#'", "ask"),
+    ("echo $(touch pwned)", "ask"),
+    ("echo \"$(touch pwned)\"", "ask"),
+    ("echo `touch pwned`", "ask"),
+    ("echo \"`touch pwned`\"", "ask"),
+    ("echo ${x:-$(touch pwned)}", "ask"),
+    ("echo $((1))", "ask"),
+    ("echo $'a'; touch pwned", "ask"),
+    ("echo $'\\''; touch pwned; echo '\\''", "ask"),
+    ("echo hi <(touch pwned)", "ask"),
+    ("echo hi >(touch pwned)", "ask"),
+    ("(echo hi; touch pwned)", "ask"),
+    ("echo hi <<EOF\ntouch pwned\nEOF", "ask"),
+    ("echo hi <<-EOF\n\ttouch pwned\n\tEOF", "ask"),
+    ("echo hi &>/dev/null touch pwned", "ask"),
+    ("echo hi >|f touch pwned", "ask"),
+    ("echo \\>& touch pwned", "ask"),
+    ("echo '>'& touch pwned", "ask"),
+    ("echo hi >& touch pwned", "ask"),
+    ("echo hi >&$fd; touch pwned", "ask"),
+    ("echo \\$(touch pwned)", "ask"),
+    ("echo hi; X=1 touch pwned", "ask"),
+    ("echo hi && { touch pwned; }", "ask"),
+    ("echo hi && if true; then touch pwned; fi", "ask"),
+    ("echo hi && ! touch pwned", "ask"),
+    ("echo hi && $t pwned", "ask"),
+    ("echo hi; \"$t\" pwned", "ask"),
+    ("echo hi | $SHELL", "ask"),
+    ("X=1 echo hi", "ask"),
+    ("time echo hi", "ask"),
+    ("echo hi; function f { touch pwned; }; f", "ask"),
+    ("echo 'a", "ask"),
+    ("echo \"a", "ask"),
+    ("echo a\\", "ask"),
+    // One command each: quotes and escapes keep the operators literal.
+    ("echo 'a;touch pwned'", "allow"),
+    ("echo \"a;touch pwned\"", "allow"),
+    ("echo a\\;touch pwned", "allow"),
+    ("echo \"a\\\";touch pwned\"", "allow"),
+    ("echo '\\'", "allow"),
+    ("echo \"a\nb\"", "allow"),
+    ("echo a\\&touch pwned", "allow"),
+    ("echo \"\\$(touch pwned)\"", "allow"),
+    ("echo \"\\`touch pwned\\`\"", "allow"),
+    ("echo '$(touch pwned)' '`x`'", "allow"),
+    ("echo a\\ b", "allow"),
+    ("echo 1>&2", "allow"),
+    ("echo hi 2>&1 >&2 <&0", "allow"),
+    ("echo hi <<< 'a;touch pwned'", "allow"),
+    ("echo hi\u{ff1b}touch pwned", "allow"),
+    ("echo a\\>b", "allow"),
+];
+
+#[test]
+fn a_lone_echo_allow_rule_never_covers_a_second_command() {
+    let engine = allow_echo();
+    let wrong: Vec<_> = ECHO_VARIANTS
+        .iter()
+        .filter(|(command, expected)| bash(&engine, command) != *expected)
+        .collect();
+    assert!(wrong.is_empty(), "{wrong:?}");
+}
+
+#[test]
 fn unparsed_floor_beats_a_generic_allow_in_any_layer_order() {
     let rules = vec![tool("Bash", Allow), bash_rule("rm -rf *", Deny)];
     let engine = flat(PermissionMode::SkipDangerous, rules);
