@@ -310,6 +310,9 @@ impl PgRunStore {
             .await
             .map_err(backend)?;
         let Some((status, epoch, held_by, holder, left_ms)) = row else {
+            // Back to the pool first: `missing` reads on a connection of its
+            // own, and a pool of one has no second one to give.
+            tx.rollback().await.map_err(backend)?;
             return Err(self.missing(namespace, run_id).await);
         };
         let (status, epoch) = (parse_status(&status)?, to_u64(epoch, "epoch")?);
