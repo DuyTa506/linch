@@ -14,9 +14,18 @@ pub enum BuildError {
     /// A required binding was not set.
     #[error("agent builder is missing its {0}")]
     Missing(&'static str),
-    /// The spec or a binding is unusable as given.
+    /// The spec or a binding is unusable as given. A defect in the text of
+    /// one policy rule or gate (a blank gate name, `min_calls` of 0) is
+    /// reported here, since only its author can have it.
     #[error("invalid agent: {0}")]
     Invalid(String),
+    /// The reliability policy cannot run on this agent for a reason that
+    /// can come from rules read together (a policy merged from two
+    /// authors): a rule names a tool the agent lacks, a check does not
+    /// compile, the rules contradict each other, or the tool choice defeats
+    /// them. Its text may echo what a rule says.
+    #[error("invalid agent: {0}")]
+    Policy(String),
     /// The tool definitions could not be encoded for the contract digest.
     #[error("agent contract could not be digested: {0}")]
     Contract(#[from] CanonicalError),

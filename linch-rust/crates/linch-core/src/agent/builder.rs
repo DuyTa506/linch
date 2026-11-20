@@ -18,6 +18,7 @@ use crate::provider::{ContextSource, Provider, ProviderGate};
 use crate::redaction::Redactor;
 use crate::registration::Registration;
 use crate::registry::ToolRegistry;
+use crate::scheduler::PathBase;
 use crate::skills::{Skill, SkillSet, SkillTool};
 use crate::store::{RunStore, SessionStore};
 use crate::structured::{FINAL_TOOL_FEATURE, FinalTool, OutputContract};
@@ -37,6 +38,7 @@ pub struct AgentBuilder {
     provider: Option<Arc<dyn Provider>>,
     tools: Arc<ToolRegistry>,
     permissions: Option<PermissionEngine>,
+    path_base: Option<PathBase>,
     hooks: Arc<Hooks>,
     runs: Option<Arc<dyn RunStore>>,
     sessions: Option<Arc<dyn SessionStore>>,
@@ -62,6 +64,7 @@ impl AgentBuilder {
             provider: None,
             tools: Arc::new(ToolRegistry::new()),
             permissions: None,
+            path_base: None,
             hooks: Arc::new(Hooks::default()),
             runs: None,
             sessions: None,
@@ -95,6 +98,32 @@ impl AgentBuilder {
     /// The permission engine that decides every tool call.
     pub fn permissions(mut self, permissions: PermissionEngine) -> Self {
         self.permissions = Some(permissions);
+        self
+    }
+
+    /// Have permission judge a relative path in a call of `tools` where those
+    /// tools resolve it, instead of in the policy's project root.
+    ///
+    /// For file tools that join a path to a directory other than the project
+    /// root (a workspace): without this a rule is matched against a path the
+    /// tool never touches. Other tools keep the project root, and the
+    /// run contract does not change: it holds the policy given to
+    /// [`permissions`](Self::permissions), not the one given here.
+    ///
+    /// Args:
+    ///     base: The absolute directory the tools resolve a relative path in.
+    ///     engine: The agent's policy with its project root spelled in the
+    ///         same canonical form as `base`, so a relative path is
+    ///         compared with the root as the tool will reach it.
+    ///     tools: Names of the tools that resolve a relative path in it.
+    pub fn path_base(
+        mut self,
+        base: impl Into<String>,
+        engine: PermissionEngine,
+        tools: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        let tools = tools.into_iter().map(Into::into).collect();
+        self.path_base = Some(PathBase::new(base.into(), engine, tools));
         self
     }
 
@@ -481,14 +510,14 @@ impl AgentBuilder {
                 };
                 let named = final_tool.as_ref().map(|tool| tool.name.as_str());
                 if let Some(problem) = policy.problem(offered, named) {
-                    return Err(BuildError::Invalid(problem));
+                    return Err(problem.into());
                 }
                 let choice = self.spec.tool_choice.as_ref();
                 if let Some(problem) = choice.and_then(|c| policy.choice_problem(c, named)) {
-                    return Err(BuildError::Invalid(problem));
+                    return Err(BuildError::Policy(problem));
                 }
                 Some(Arc::new(
-                    Rules::new(policy.clone()).map_err(BuildError::Invalid)?,
+                    Rules::new(policy.clone()).map_err(BuildError::Policy)?,
                 ))
             }
             None => None,
@@ -506,6 +535,7 @@ impl AgentBuilder {
         let inner = Arc::new(AgentInner {
             provider,
             permissions,
+            path_base: self.path_base,
             runs,
             sessions,
             spec: self.spec,

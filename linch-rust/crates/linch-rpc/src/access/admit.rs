@@ -25,16 +25,30 @@ impl Tenant {
     /// required policy holds: a rule naming a tool the tenant's agent lacks,
     /// or a check that does not compile (its message echoes the pattern),
     /// would otherwise tell the tenant.
+    ///
+    /// Only an error of kind `policy` is replaced: the problems that can
+    /// come from the operator's rules read with the tenant's (a tool the
+    /// agent lacks, a cycle, a check that does not compile). A defect in the
+    /// text of the tenant's own rule keeps its message. The original text of
+    /// a replaced error goes to the server log with the tenant's name.
     pub(crate) fn open_error(&self, error: ErrorObject) -> ErrorObject {
         let unmet = error.code == code::BUILD_INVALID
-            && error.message.contains("policy:")
-            && (error.message.contains("not a tool the agent has")
-                || error.message.contains("verifier \""));
+            && error
+                .data
+                .as_ref()
+                .is_some_and(|data| data["kind"] == "policy");
         match (&self.allow.required_policy, unmet) {
-            (Some(_), true) => ErrorObject::new(
-                error.code,
-                "policy: the policy required for this tenant cannot run on this agent",
-            ),
+            (Some(_), true) => {
+                tracing::warn!(
+                    tenant = %self.name,
+                    error = %error.message,
+                    "an agent.open of this tenant failed on a policy problem that can involve the required policy; the tenant is told only that the policy cannot run"
+                );
+                ErrorObject::new(
+                    error.code,
+                    "policy: the policy required for this tenant cannot run on this agent",
+                )
+            }
             _ => error,
         }
     }
@@ -260,7 +274,7 @@ impl Tenant {
                     }
                 }
                 McpTransportConfig::Http { url, .. } => {
-                    (!allows(&allow.mcp_origins, url)).then_some("mcp_url")
+                    (!allows(&allow.mcp_endpoints, url)).then_some("mcp_url")
                 }
             };
             if let Some(kind) = refusal {

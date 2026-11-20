@@ -34,6 +34,7 @@ use crate::registration::Registration;
 use crate::registry::{ToolRegistry, ToolSnapshot};
 use crate::run::RunStatus;
 use crate::runner::{self, Families, Releases, RunStream};
+use crate::scheduler::PathBase;
 use crate::skills::SkillSet;
 use crate::store::{RunRecord, RunStore, SessionStore};
 use crate::structured::{FinalTool, OutputContract};
@@ -190,6 +191,9 @@ pub(crate) struct AgentInner {
     /// The tools a subagent's run sees of `tools`; `None` for all.
     pub(crate) filter: Option<ChildTools>,
     pub(crate) permissions: PermissionEngine,
+    /// Where the workspace tools resolve a relative path, when that is not
+    /// the project root; outside the contract.
+    pub(crate) path_base: Option<PathBase>,
     pub(crate) hooks: Arc<Hooks>,
     pub(crate) runs: Arc<dyn RunStore>,
     pub(crate) sessions: Arc<dyn SessionStore>,

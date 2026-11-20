@@ -557,7 +557,7 @@
 //! | -32004 | not allowed | a tenant check refused the request; `data: {kind}` |
 //! | -32005 | limit reached | a cap on runs, agents, connections or pending logins; nothing started; `data: {kind, max}` |
 //! | -32010 | missing binding | `BuildError::Missing` |
-//! | -32011 | invalid agent | `BuildError::Invalid`, workspace, policy, tool name clash |
+//! | -32011 | invalid agent | `BuildError::Invalid`, workspace, policy, tool name clash; `BuildError::Policy` (a policy problem that can involve rules read together) adds `data: {kind: policy}` |
 //! | -32012 | contract not digestible | `BuildError::Contract` |
 //! | -32013 | provider unavailable | key unset (`data.env` names it), client build |
 //! | -32014 | store unavailable | Postgres connect (or its 5 s timeout) or migrate (or its 30 s timeout) |

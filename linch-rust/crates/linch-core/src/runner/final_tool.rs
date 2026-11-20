@@ -190,8 +190,14 @@ impl Runner {
             }
         };
         let (agent, run) = (&self.agent, &self.run);
-        let planned =
-            scheduler::plan_one(block, &registered, &agent.permissions, &agent.hooks, run);
+        let planned = scheduler::plan_one(
+            block,
+            &registered,
+            &agent.permissions,
+            &agent.hooks,
+            run,
+            agent.path_base.as_ref(),
+        );
         let Some(planned) = self.cancel.run_until_cancelled(planned).await else {
             self.abort().await?;
             return Ok(Decided::Over(None));

@@ -20,6 +20,6 @@ mod tests;
 pub use benchmark::{
     EvalBenchmarkResult, EvalBenchmarkTarget, EvalTargetResult, run_eval_benchmark,
 };
-pub use harness::{CaseResult, EvalCase, EvalResult, Score, run_eval};
+pub use harness::{CaseResult, EvalCase, EvalResult, Score, run_eval, run_eval_as};
 pub use scorers::Scorer;
 pub use suite::{EvalSuite, SuiteError, load_eval_suite};

@@ -90,6 +90,16 @@ impl TestDb {
         query.fetch_one(&self.admin).await.expect("count the runs") > 0
     }
 
+    /// The `owner` that claimed run `run_id` in `linch_runs`.
+    pub async fn run_owner(&self, run_id: &str) -> String {
+        let sql = format!(
+            "SELECT owner FROM {}.linch_runs WHERE run_id = $1",
+            self.schema
+        );
+        let query = sqlx::query_scalar::<_, String>(AssertSqlSafe(sql)).bind(run_id);
+        query.fetch_one(&self.admin).await.expect("read the owner")
+    }
+
     /// Drop the schema.
     pub async fn drop(self) {
         let sql = format!("DROP SCHEMA IF EXISTS {} CASCADE", self.schema);

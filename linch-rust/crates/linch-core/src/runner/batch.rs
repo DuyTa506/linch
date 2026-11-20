@@ -74,6 +74,7 @@ impl Runner {
             &agent.hooks,
             run,
             &approvals,
+            agent.path_base.as_ref(),
             &held_back,
         );
         // A cancel, even one that came before approve or resume, aborts
