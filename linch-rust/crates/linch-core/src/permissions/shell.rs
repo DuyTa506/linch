@@ -120,8 +120,8 @@ pub fn split_composite(input: &str) -> Vec<&str> {
 /// `<` or `>` and names a descriptor (`2>&1`, `>&2`, `<&3`, `>&-`): what
 /// `>&file` means differs between shells. The shell differs per backend (dash,
 /// bash, busybox), so what one of them reads differently is reported. A `$`
-/// expansion in command position (`$a -rf x`) is reported too: the command it
-/// names is not in the text.
+/// expansion in command position (`$a -rf x`) or `env -S` is reported too:
+/// the command is not in the text.
 pub fn has_unparsed_construct(command: &str) -> bool {
     let b = command.as_bytes();
     let mut quote: Option<u8> = None;
@@ -186,7 +186,7 @@ pub fn has_unparsed_construct(command: &str) -> bool {
         || quote.is_some()
         || split_composite(command)
             .into_iter()
-            .any(expands_in_command_position)
+            .any(command_is_not_in_the_text)
 }
 
 /// Whether the body of a `${` inside double quotes, up to its first `}`,
@@ -241,40 +241,88 @@ const RESERVED: &[&str] = &[
 /// Commands that run their arguments as a command, and may take options.
 const WRAPPERS: &[&str] = &["time", "exec", "command", "builtin", "env"];
 
-/// `segment` without the words in front of its command, which may be quoted
-/// or escaped (`\env`): `NAME=value`
-/// assignments, redirections (`>f`, `2>&1`, `< in`), reserved words
-/// (`if`, `then`, `else`, `elif`, `do`, `while`, `until`, `!`, `{`) and the
-/// wrappers `time`, `exec`, `command`, `builtin` and `env` with their
-/// options. Deny and ask rules are matched against this form as well, so a
-/// prefix cannot hide the command. Allow rules never use it: `X=1 echo` is
-/// not `echo`. Name-based and best effort: `/bin/rm`, `sudo rm` and
-/// `sh -c 'rm x'` are other commands.
-pub fn strip_command_prefix(segment: &str) -> &str {
+/// What a segment's command is once the words in front of it are removed.
+struct Command<'a> {
+    /// The segment from the command word on.
+    text: &'a str,
+    /// Whether the shell reads the command from text the segment does not
+    /// hold as words (`env -S 'rm x'`).
+    opaque: bool,
+}
+
+/// How a wrapper option takes part in finding the command.
+enum WrapperOption {
+    Plain,
+    /// Takes the next word as its argument (`env -u NAME`).
+    Takes,
+    /// Splits a string into the command (`env -S`).
+    Split,
+    /// Only looks the command up (`command -v`).
+    Query,
+}
+
+fn wrapper_option(wrapper: &str, option: &str) -> WrapperOption {
+    match (wrapper, option) {
+        ("env", "-u" | "-C" | "--unset" | "--chdir")
+        | ("time", "-f" | "-o" | "--format" | "--output")
+        | ("exec", "-a") => WrapperOption::Takes,
+        ("env", o) if o.starts_with("-S") || o.starts_with("--split-string") => {
+            WrapperOption::Split
+        }
+        ("command", o) if !o.starts_with("--") && o.contains(['v', 'V']) => WrapperOption::Query,
+        _ => WrapperOption::Plain,
+    }
+}
+
+fn strip_prefix(segment: &str) -> Command<'_> {
     let mut rest = trim_blanks(segment);
-    let mut options = false;
+    // The wrapper whose options are being read, and the text from it on.
+    let mut wrapper: Option<(String, &str)> = None;
     loop {
         let end = word_end(rest);
         let word = &rest[..end];
         let operator = word.trim_start_matches(|c: char| c.is_ascii_digit());
-        let mut skip = 1;
         let assignment = is_assignment(word);
         let name = if assignment {
             String::new()
         } else {
             unquote(word)
         };
+        let mut skip = 1;
         if assignment {
-        } else if RESERVED.contains(&name.as_str()) || WRAPPERS.contains(&name.as_str()) {
-            options = WRAPPERS.contains(&name.as_str());
-        } else if options && word.starts_with('-') {
+        } else if RESERVED.contains(&name.as_str()) {
+            wrapper = None;
+        } else if WRAPPERS.contains(&name.as_str()) {
+            wrapper = Some((name, rest));
+        } else if let Some((wrapper, at)) = &wrapper
+            && word.starts_with('-')
+        {
+            match wrapper_option(wrapper, &name) {
+                WrapperOption::Plain => {}
+                WrapperOption::Takes => skip = 2,
+                WrapperOption::Split => {
+                    return Command {
+                        text: rest,
+                        opaque: true,
+                    };
+                }
+                WrapperOption::Query => {
+                    return Command {
+                        text: at,
+                        opaque: false,
+                    };
+                }
+            }
         } else if operator.starts_with(['<', '>']) {
             // A bare operator (`>`, `2>&`) takes the next word as its target.
             if operator.trim_start_matches(['<', '>', '&', '|']).is_empty() {
                 skip = 2;
             }
         } else {
-            return rest;
+            return Command {
+                text: rest,
+                opaque: false,
+            };
         }
         for _ in 0..skip {
             let end = word_end(rest);
@@ -283,10 +331,29 @@ pub fn strip_command_prefix(segment: &str) -> &str {
     }
 }
 
-/// Whether the command word of `segment` (after [`strip_command_prefix`])
-/// holds a `$` expansion outside single quotes.
-fn expands_in_command_position(segment: &str) -> bool {
-    let rest = strip_command_prefix(segment);
+/// `segment` without the words in front of its command, which may be quoted
+/// or escaped (`\env`): `NAME=value` assignments, redirections (`>f`,
+/// `2>&1`, `< in`), reserved words (`if`, `then`, `else`, `elif`, `do`,
+/// `while`, `until`, `!`, `{`) and the wrappers `time`, `exec`, `command`,
+/// `builtin` and `env` with their options (`env -u NAME`, `time -o FILE`,
+/// `exec -a NAME` take an argument; `command -v` only looks a name up and is
+/// kept whole). Deny and ask rules are matched against this form as well, so
+/// a prefix cannot hide the command. Allow rules never use it: `X=1 echo` is
+/// not `echo`. Name-based and best effort: `/bin/rm`, `sudo rm` and
+/// `sh -c 'rm x'` are other commands.
+pub fn strip_command_prefix(segment: &str) -> &str {
+    strip_prefix(segment).text
+}
+
+/// Whether the command of `segment` is not in its text: it is read from a
+/// string (`env -S`), or its word (after [`strip_command_prefix`]) holds a
+/// `$` expansion outside single quotes.
+fn command_is_not_in_the_text(segment: &str) -> bool {
+    let command = strip_prefix(segment);
+    if command.opaque {
+        return true;
+    }
+    let rest = command.text;
     let b = &rest.as_bytes()[..word_end(rest)];
     let mut quote: Option<u8> = None;
     let mut escaped = false;

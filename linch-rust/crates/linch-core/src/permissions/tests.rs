@@ -543,6 +543,59 @@ fn a_deny_rule_covers_a_command_behind_a_quoted_wrapper() {
 }
 
 #[test]
+fn a_deny_rule_covers_a_command_behind_a_wrapper_option_with_an_argument() {
+    let engine = flat(PermissionMode::SkipDangerous, vec![bash_rule("rm *", Deny)]);
+    for command in [
+        "env -i rm -rf build",
+        "env -u N rm -rf build",
+        "env -u N -i X=1 rm -rf build",
+        "env -C . rm -rf build",
+        "env --unset N rm -rf build",
+        "time -o f rm -rf build",
+        "time -f fmt rm -rf build",
+        "time -p rm -rf build",
+        "exec -a n rm -rf build",
+        "command -p rm -rf build",
+    ] {
+        assert_eq!(bash(&engine, command), "deny", "{command:?}");
+    }
+}
+
+#[test]
+fn an_env_split_string_is_unparsed() {
+    let engine = flat(PermissionMode::SkipDangerous, vec![bash_rule("rm *", Deny)]);
+    for command in [
+        "env -S 'rm -rf build'",
+        "env --split-string='rm x'",
+        "env -i -S 'rm x'",
+    ] {
+        assert_eq!(bash(&engine, command), "ask", "{command:?}");
+    }
+}
+
+#[test]
+fn a_deny_rule_does_not_match_the_argument_of_a_wrapper_option() {
+    let bare = flat(PermissionMode::SkipDangerous, vec![bash_rule("rm", Deny)]);
+    let glob = flat(PermissionMode::SkipDangerous, vec![bash_rule("rm *", Deny)]);
+    for command in [
+        "command -v rm",
+        "command -pv rm",
+        "env -u rm make",
+        "exec -a rm sleep 1",
+    ] {
+        assert_eq!(bash(&bare, command), "allow", "{command:?}");
+    }
+    for command in [
+        "env -u rm make",
+        "exec -a rm sleep 1",
+        "time -f rm make",
+        "command -v rm x",
+    ] {
+        assert_eq!(bash(&glob, command), "allow", "{command:?}");
+    }
+}
+
+#[test]
 fn unparsed_floor_beats_a_generic_allow_in_any_layer_order() {
     let rules = vec![tool("Bash", Allow), bash_rule("rm -rf *", Deny)];
     let engine = flat(PermissionMode::SkipDangerous, rules);
