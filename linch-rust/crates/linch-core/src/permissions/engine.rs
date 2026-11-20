@@ -244,14 +244,14 @@ impl<'a> Eval<'a> {
             };
             let first = |text: &str| matching(text).map(|r| r.decision);
             // A prefix (`X=1 rm`, `if x; then rm`) or a quoted spelling
-            // (`\rm`, `r""m`) hides the command from the segment's own text,
-            // so deny and ask rules also see it stripped and unquoted. An
+            // (`\rm`, `git 'push'`) hides the command from the segment's own
+            // text, so deny and ask rules also see it stripped and unquoted. An
             // allow never comes from those forms.
             let own_rule = matching(segment);
             let own = own_rule.map(|r| r.decision);
             let allow_all = own_rule.is_some_and(|r| r.patterns.iter().any(|p| p.trim() == "*"));
             let behind = shell::strip_command_prefix(segment);
-            let plain = shell::unquote_command_word(behind);
+            let plain = shell::unquote_words(behind);
             let hidden: Vec<Option<RuleDecision>> = [behind, &plain]
                 .into_iter()
                 .filter(|text| !text.is_empty() && *text != segment)

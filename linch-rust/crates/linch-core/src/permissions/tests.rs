@@ -873,6 +873,49 @@ fn a_deny_rule_does_not_match_the_argument_of_a_bundled_wrapper_option() {
 }
 
 #[test]
+fn a_glob_deny_rule_covers_a_quoted_second_word() {
+    let push = flat(
+        PermissionMode::SkipDangerous,
+        vec![bash_rule("git push *", Deny)],
+    );
+    for command in [
+        "git push origin main",
+        "git 'push' origin main",
+        "git \"push\" origin main",
+        "git pu\\sh origin main",
+        "git pu\"\"sh 'origin' main",
+        "X=1 git 'push' origin main",
+    ] {
+        assert_eq!(bash(&push, command), "deny", "{command:?}");
+    }
+    let flags = flat(
+        PermissionMode::SkipDangerous,
+        vec![bash_rule("rm -rf *", Deny)],
+    );
+    for command in [
+        "rm -rf build",
+        "rm -r\"\"f build",
+        "rm '-rf' build",
+        "\\rm -r'f' build",
+    ] {
+        assert_eq!(bash(&flags, command), "deny", "{command:?}");
+    }
+    // A quoted argument stays one word: its text is not matched as words.
+    let force = flat(
+        PermissionMode::SkipDangerous,
+        vec![bash_rule("* --force", Deny)],
+    );
+    for command in [
+        "git commit -m 'never --force'",
+        "git commit -m \"never --force\"",
+        "git 'commit' -m 'it'\\''s --force'",
+    ] {
+        assert_eq!(bash(&force, command), "allow", "{command:?}");
+    }
+    assert_eq!(bash(&force, "git 'push' '--force'"), "deny");
+}
+
+#[test]
 fn unparsed_floor_beats_a_generic_allow_in_any_layer_order() {
     let rules = vec![tool("Bash", Allow), bash_rule("rm -rf *", Deny)];
     let engine = flat(PermissionMode::SkipDangerous, rules);

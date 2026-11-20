@@ -509,7 +509,9 @@ How rules combine:
   never allowed, `*` included. Deny and ask rules are unchanged.
 - Name-based bash rules are best effort and the sandbox is the boundary. A
   deny or ask rule matches each segment as written, and again after its
-  command word is unquoted (`\rm`, `r""m`) and the words in front of the
+  words are unquoted one by one (`\rm`, `r""m`, `git 'push'`; a quoted argument
+  stays one word, so `* --force` does not match inside a commit message) and
+  the words in front of the
   command are removed: `NAME=value` assignments, redirections (`>f`, `2>&1`),
   the reserved words `if`, `then`, `else`, `elif`, `do`, `while`, `until`,
   `!` and `{`, and `time`, `exec`, `command`, `builtin` and `env` (quoted or
@@ -517,8 +519,9 @@ How rules combine:
   NAME`, `exec -la NAME`), unique prefixes of long options (`env --uns NAME`) and
   the argument of `env -u`/`-C`/`-a`, `time -f`/`-o` and `exec -a`. `command -v NAME` is not a command named
   `NAME`. An allow rule never matches the stripped form: `X=1 echo` is not
-  `echo`. Other spellings of a command, such as `/bin/rm`, `sudo rm`,
-  `xargs rm`, `eval rm x` and `sh -c 'rm x'`, are other commands to a rule.
+  `echo`. Other spellings and wrappers, such as `/bin/rm`, `sudo rm`,
+  `nice`, `nohup`, `setsid`, `timeout`, `xargs`, `eval rm x` and `sh -c 'rm x'`,
+  are not covered: they are other commands to a rule.
 - A path outside the project root never matches an allow rule.
 
 `auto_allow` (a list of tool names) allows those tools in every mode unless a

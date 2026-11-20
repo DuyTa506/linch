@@ -540,15 +540,32 @@ pub fn redirects_to_file(segment: &str) -> bool {
     false
 }
 
-/// `command` with the quotes and backslashes of its first word removed
-/// (`\rm -rf x` becomes `rm -rf x`) and the rest left as written, so a
-/// quoted argument keeps its boundaries.
-pub fn unquote_command_word(command: &str) -> Cow<'_, str> {
-    let end = word_end(command);
-    if !command[..end].contains(['\'', '"', '\\']) {
+/// `command` with the quotes and backslashes of every word removed and the
+/// words kept apart: a word that is empty or holds a blank, a quote or a
+/// backslash is written back in single quotes, so `git 'push' "a b"` becomes
+/// `git push 'a b'` and a quoted argument stays one word.
+pub fn unquote_words(command: &str) -> Cow<'_, str> {
+    if !command.contains(['\'', '"', '\\']) {
         return Cow::Borrowed(command);
     }
-    Cow::Owned(format!("{}{}", unquote(&command[..end]), &command[end..]))
+    let mut out = String::with_capacity(command.len());
+    let mut rest = trim_blanks(command);
+    while !rest.is_empty() {
+        let end = word_end(rest);
+        let word = unquote(&rest[..end]);
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        if word.is_empty() || word.contains([' ', '\t', '\'', '"', '\\']) {
+            out.push('\'');
+            out.push_str(&word.replace('\'', "'\\''"));
+            out.push('\'');
+        } else {
+            out.push_str(&word);
+        }
+        rest = trim_blanks(&rest[end..]);
+    }
+    Cow::Owned(out)
 }
 
 /// Whether bash rule `pattern` matches one command segment: as a glob over

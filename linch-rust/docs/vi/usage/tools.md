@@ -511,7 +511,9 @@ Cách các rule kết hợp:
   deny và ask không đổi.
 - Các bash rule dựa trên tên lệnh chỉ là nỗ lực tối đa và sandbox mới là ranh giới.
   Một rule deny hoặc ask khớp từng đoạn như đã viết, rồi khớp lại sau khi từ lệnh
-  được bỏ dấu nháy (`\rm`, `r""m`) và các từ đứng trước lệnh bị gỡ: phép gán
+  từng từ được bỏ dấu nháy (`\rm`, `r""m`, `git 'push'`; đối số trong dấu nháy vẫn là
+  một từ nên `* --force` không khớp bên trong thông điệp commit) và các từ đứng trước
+  lệnh bị gỡ: phép gán
   `NAME=value`, chuyển hướng (`>f`, `2>&1`), các từ khóa dành riêng `if`, `then`,
   `else`, `elif`, `do`, `while`, `until`, `!` và `{`, cùng `time`, `exec`,
   `command`, `builtin` và `env` (có hoặc không có dấu nháy) với các tùy chọn của
@@ -519,9 +521,9 @@ Cách các rule kết hợp:
   tiền tố duy nhất của tùy chọn dài (`env --uns NAME`) và đối số của
   `env -u`/`-C`/`-a`, `time -f`/`-o` và `exec -a`.
   `command -v NAME` không phải lệnh tên `NAME`. Rule allow không bao giờ khớp dạng
-  đã gỡ: `X=1 echo` không phải `echo`. Các cách viết khác của một lệnh, như
-  `/bin/rm`, `sudo rm`, `xargs rm`, `eval rm x` và `sh -c 'rm x'`, là những lệnh
-  khác đối với rule.
+  đã gỡ: `X=1 echo` không phải `echo`. Các cách viết và wrapper khác, như
+  `/bin/rm`, `sudo rm`, `nice`, `nohup`, `setsid`, `timeout`, `xargs`, `eval rm x`
+  và `sh -c 'rm x'`, không được bao phủ: chúng là những lệnh khác đối với rule.
 - Đường dẫn nằm ngoài project root không bao giờ khớp một rule allow.
 
 `auto_allow` (danh sách tên tool) cho phép các tool đó ở mọi mode trừ khi một rule
