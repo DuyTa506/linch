@@ -466,7 +466,10 @@ result, so every backend that edits through it (Postgres too) is bounded and
 `replace_all` cannot multiply a file without limit. `write_file` refuses
 content past it; a backend's own `write` does not check, so the offload hook
 can store a large result. The tools report both as `too_large`, naming the
-path, and leave the file as it was.
+path, and leave the file as it was. The workspace `Edit` does the same sum
+(`text.len() - n*old.len() + n*new.len()`, checked) before it builds the
+result and refuses above `MAX_READ_BYTES`; an empty `old_string` with
+`replace_all` is refused as `empty_old_string`.
 
 | Backend | Where files live |
 |---|---|

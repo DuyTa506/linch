@@ -454,7 +454,10 @@ workspace. `apply_edit` từ chối một lần sửa mà kết quả sẽ vư�
 sửa qua nó (kể cả Postgres) đều bị giới hạn và `replace_all` không thể nhân một tệp lên
 vô hạn. `write_file` từ chối nội dung vượt giới hạn; `write` riêng của một backend thì
 không kiểm tra, để hook chuyển kết quả ra ngoài có thể lưu một kết quả lớn. Các tool báo
-cả hai là `too_large`, nêu tên đường dẫn, và để tệp như cũ.
+cả hai là `too_large`, nêu tên đường dẫn, và để tệp như cũ. `Edit` của workspace tính
+cùng phép cộng (`text.len() - n*old.len() + n*new.len()`, có kiểm tra tràn số) trước khi
+dựng kết quả và từ chối khi vượt `MAX_READ_BYTES`; `old_string` rỗng với `replace_all`
+bị từ chối với mã `empty_old_string`.
 
 | Backend | Tệp nằm ở đâu |
 |---|---|

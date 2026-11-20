@@ -321,8 +321,11 @@ status: final
 - **Tệp đã thay đổi.** Nếu tệp thay đổi sau lần model đọc, `Write` và `Edit` trả lời `Read this file again before writing it.` hoặc `... before editing it.`; `Read` thấy tệp đổi giữa chừng trả lời `File changed while reading; Read this file again.`
 - **`old_string` rỗng.** `Edit` chấp nhận nó, như `Edit` của Python. Nó khớp ở
   mọi vị trí, nên với tệp rỗng thì văn bản mới được chèn vào, với tệp không rỗng
-  thì bị từ chối vì mơ hồ trừ khi đặt `replace_all` (chèn ở mọi vị trí và cần
-  đã đọc toàn bộ tệp), và dòng đầu tiên phải đã được đọc.
+  thì bị từ chối vì mơ hồ, và dòng đầu tiên phải đã được đọc. Với `replace_all`
+  nó bị từ chối với mã `empty_old_string`.
+- **Kích thước của `Edit`.** Một `Edit` mà kết quả vượt 10 MiB (giới hạn của
+  `Read`) bị từ chối với mã `too_large` trước khi kết quả được dựng, và tệp giữ
+  nguyên; điều này giới hạn `replace_all` như `edit_file` đã bị giới hạn.
 - **Giới hạn phạm vi.** Đường dẫn là tương đối so với workspace. `..`, đường dẫn
   tuyệt đối nằm ngoài nó và symlink dẫn ra ngoài đều bị từ chối.
 - **`Bash` mặc định không bị giới hạn phạm vi.** Với backend `local` mặc định, nó

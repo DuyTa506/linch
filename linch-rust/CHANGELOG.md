@@ -6,6 +6,8 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ## Unreleased
 
+- **`Edit` size.** `Edit` with `replace_all` computes the size of its result before building it and refuses one past 10 MiB (`too_large`); an empty `old_string` with `replace_all` is refused (`empty_old_string`).
+
 ## 0.2.0 - 2026-11-19
 
 0.1.1 was uploaded to PyPI from commit `e102d938` and never tagged; this is the first tagged release. The Python client of this build refuses a server without `server.info` (`IncompatibleServer`), so ship the client and the `linch-server` binary together.

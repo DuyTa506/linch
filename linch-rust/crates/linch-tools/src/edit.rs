@@ -89,6 +89,12 @@ impl Tool for Edit {
             .map_err(|error| error.doing("editing"))?;
         let text = String::from_utf8(file.bytes)
             .map_err(|_| coded(format!("{} is not UTF-8 text.", file.path), "not_text"))?;
+        if all && old.is_empty() {
+            return Err(coded(
+                "old_string must not be empty with replace_all.",
+                "empty_old_string",
+            ));
+        }
         if old.is_empty() {
             // An empty `old` matches at every position, as in Python: the
             // first line must be read, or the whole file for `replace_all`.
@@ -125,6 +131,21 @@ impl Tool for Edit {
         self.reads
             .check(session, &file.path, file.stamp, Some(&spans))
             .map_err(|error| error.doing("editing"))?;
+        // The matches never overlap, so they take `n * old.len()` bytes of
+        // `text`: the size is known before the result is built.
+        let kept = text.len() - starts.len() * old.len();
+        let size = (starts.len().checked_mul(new.len()))
+            .and_then(|added| kept.checked_add(added))
+            .unwrap_or(usize::MAX);
+        if size as u64 > MAX_READ_BYTES {
+            return Err(coded(
+                format!(
+                    "The edit would make {} larger than {MAX_READ_BYTES} bytes; use a smaller replace_all.",
+                    file.path
+                ),
+                "too_large",
+            ));
+        }
         let updated = text.replace(old, new);
         let stamp = self
             .fs

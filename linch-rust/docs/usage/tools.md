@@ -321,9 +321,11 @@ status: final
 - **A changed file.** If the file changed since the model read it, `Write` and `Edit` answer `Read this file again before writing it.` or `... before editing it.`; a `Read` that sees the file change mid-read answers `File changed while reading; Read this file again.`
 - **Empty `old_string`.** `Edit` accepts it, as Python's does. It matches at
   every position, so on an empty file the new text goes in, on a non-empty
-  file it is refused as ambiguous unless `replace_all` is set (which inserts
-  at every position and needs the whole file read), and the first line must
-  have been read.
+  file it is refused as ambiguous, and the first line must have been read.
+  With `replace_all` it is refused as `empty_old_string`.
+- **Edit size.** An `Edit` whose result would pass 10 MiB (the `Read` limit)
+  is refused as `too_large` before the result is built, and the file stays
+  as it was; this bounds `replace_all` as `edit_file` is bounded.
 - **Confinement.** Paths are relative to the workspace. `..`, absolute paths
   outside it and symlinks that lead out are refused.
 - **`Bash` is not confined by default.** With the default `local` backend it
