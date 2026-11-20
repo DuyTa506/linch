@@ -294,7 +294,12 @@ A remote tenant may hold at most 16 sections of at most 16 KiB (names up to
 64 bytes) and 64 KiB in all with `append`, since they ride every request
 ([Server](./server.md#what-admission-refuses-and-why)). The operator can add its own
 sections to every agent of a tenant; they are sent with the tenant's, cannot be
-removed or renamed, and `replace_defaults` leaves them in. Changing them
+removed or renamed, and `replace_defaults` leaves them in. A `before_provider_call`
+callback of the tenant that answers `rewrite` cannot remove them either: the
+server puts them back first, as blocks of their own, and does not repeat a block
+with their text; the rest of the rewritten system is the callback's, up to 64 KiB
+(or what the request held beyond the operator's sections, if more), else the
+answer is refused as a failed callback. Changing them
 changes the contract of the tenant's agents, so their in-flight runs are
 refused on resume until they finish.
 

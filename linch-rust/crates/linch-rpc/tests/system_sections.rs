@@ -155,3 +155,65 @@ fn the_operator_s_sections_must_be_sendable() {
             .is_err()
     );
 }
+
+/// The system blocks of the one request of a tenant's run whose
+/// `before_provider_call` callback answers `rewrite` with `system` in place
+/// of the request's own (`continue` for `None`), under an operator section
+/// "Company policy.".
+async fn blocks_sent(system: Option<Value>) -> u64 {
+    let policy = linch::SystemSection::new("policy", "Company policy.");
+    let allow = Allowlists::new()
+        .scripted_provider(true)
+        .system_sections(std::slice::from_ref(&policy))
+        .unwrap();
+    let answer = common::handler(move |_method, params, _cancel| {
+        let system = system.clone();
+        async move {
+            let Some(system) = system else {
+                return Ok(json!({"action": "continue"}));
+            };
+            let mut request = params["request"]["request"].clone();
+            request["system"] = system;
+            Ok(json!({"action": "rewrite", "request": request}))
+        }
+    });
+    let mut rpc = Rpc::remote_with(tenant("acme", allow), answer);
+    let mut config = scripted(vec![common::text_turn("One.")], None, "");
+    config["namespace"] = json!("acme");
+    config["callbacks"] = json!([
+        {"point": "before_provider_call", "policy_id": "rewrite", "policy_version": 1},
+    ]);
+    let agent = rpc.open(config).await;
+    let run_id = rpc.start(&agent, "s1", "Go.").await;
+    let ended = rpc.until_end(&run_id).await;
+    (ended.envelopes.iter())
+        .find_map(|envelope| match &envelope.event {
+            linch::Event::ContextBuild(build) => Some(build.system_blocks as u64),
+            _ => None,
+        })
+        .expect("a context_build event")
+}
+
+/// A tenant's `before_provider_call` rewrite replaces the request, system
+/// text included; the operator's sections go back in first, the rest of the
+/// rewrite stands, and what a rewrite adds to the system stays within the
+/// bound `agent.open` holds the tenant's own sections to.
+#[tokio::test]
+async fn a_tenants_rewrite_cannot_drop_the_operators_sections() {
+    assert_eq!(blocks_sent(None).await, 1, "control: the section is sent");
+    assert_eq!(blocks_sent(Some(json!([]))).await, 1, "dropped");
+    let mine = json!([{"text": "Mine."}]);
+    assert_eq!(blocks_sent(Some(mine)).await, 2, "the tenant's own stand");
+    let kept = json!([{"text": "Company policy.", "cacheable": true}, {"text": "Mine."}]);
+    assert_eq!(
+        blocks_sent(Some(kept)).await,
+        2,
+        "kept ones are not doubled"
+    );
+    let huge = json!([{"text": "x".repeat(70 * 1024)}, {"text": "y"}]);
+    assert_eq!(
+        blocks_sent(Some(huge)).await,
+        1,
+        "past the bound: not applied"
+    );
+}

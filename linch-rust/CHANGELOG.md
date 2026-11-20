@@ -9,6 +9,7 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 ### Fixed
 
 - **Workflow memory per connection.** `workflow.step.begin`, `workflow.agent` and `workflow.interrupt` refuse a `name`, `key` or `branch` over 256 bytes (`-32602`), like the workflow id; with `max_records` set, steps begun and not completed and the distinct calls a run has keyed count against it (`-32005`, `kind: journal_records`), so what the server keeps for a tenant's workflow is bounded by the cap that bounds its records. A workflow with no `max_records` is unchanged.
+- **Operator system sections and callback rewrites.** A tenant's `before_provider_call` callback that answers `rewrite` no longer removes the operator's `allow.system_sections`: they are put back first, a block repeating their text is dropped, and the rest of the rewritten system is held to 64 KiB (or what the request held beyond the sections, if more).
 
 ## 0.2.0 - 2026-11-19
 

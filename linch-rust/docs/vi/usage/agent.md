@@ -299,7 +299,12 @@ Một tenant từ xa được có tối đa 16 section, mỗi section tối đa 
 64 byte) và tổng cộng 64 KiB cùng `append`, vì chúng đi kèm mọi request
 ([Server](./server.md#những-gì-admission-từ-chối-và-lý-do)). Operator có thể thêm
 section riêng của mình vào mọi agent của một tenant; chúng được gửi cùng với của
-tenant, không thể bị gỡ hay đổi tên, và `replace_defaults` để chúng lại. Thay đổi
+tenant, không thể bị gỡ hay đổi tên, và `replace_defaults` để chúng lại. Callback
+`before_provider_call` của tenant trả lời `rewrite` cũng không gỡ được chúng: server
+đặt chúng lại ở đầu, mỗi section một block riêng, và không lặp lại block có cùng
+văn bản; phần còn lại của system sau rewrite là của callback, tối đa 64 KiB (hoặc
+phần request có ngoài các section của operator, nếu lớn hơn), nếu không câu trả lời
+bị từ chối như một callback thất bại. Thay đổi
 chúng làm thay đổi contract của các agent của tenant, nên các run đang chạy của
 chúng bị từ chối khi resume cho đến khi kết thúc.
 

@@ -10,8 +10,8 @@ use linch::permissions::RuleDecision;
 use linch::verification::Check;
 use linch::{
     AgentConfig, AgentSpec, ByteQuota, CacheScope, ExecutionConfig, McpTransportConfig,
-    PermissionMode, PermissionPolicy, Principal, ProviderConfig, ReliabilityPolicy, StoreConfig,
-    SystemSection, ToolChoice,
+    PermissionMode, PermissionPolicy, Principal, ProviderConfig, ProviderRequest,
+    ReliabilityPolicy, StoreConfig, SystemBlock, SystemSection, ToolChoice,
 };
 use serde_json::json;
 use url::Url;
@@ -37,6 +37,44 @@ impl Tenant {
             ),
             _ => error,
         }
+    }
+
+    /// The request a tenant's `before_provider_call` callback rewrote `sent`
+    /// into, with the operator's `system_sections` put back: they come
+    /// first, as blocks of their own, and a block of the rewrite with their
+    /// text is not repeated. The rest of the system is the callback's, up to
+    /// [`MAX_SYSTEM_BYTES`] (or what `sent` held beyond the sections, when
+    /// that is more).
+    ///
+    /// Raises:
+    ///     String: What the rewrite holds beyond that bound.
+    pub(crate) fn confine_rewrite(
+        &self,
+        sent: &ProviderRequest,
+        mut rewritten: ProviderRequest,
+    ) -> Result<ProviderRequest, String> {
+        let mut sections: Vec<&SystemSection> = self.allow.system_sections.iter().collect();
+        sections.sort_by_key(|section| section.order);
+        let operator: Vec<SystemBlock> = (sections.into_iter())
+            .map(|section| SystemBlock {
+                text: section.text.clone(),
+                cacheable: section.cacheable,
+            })
+            .collect();
+        let is_operator = |block: &SystemBlock| operator.iter().any(|set| set.text == block.text);
+        let beyond = |blocks: &[SystemBlock]| {
+            let own = blocks.iter().filter(|block| !is_operator(block));
+            own.map(|block| block.text.len()).sum::<usize>()
+        };
+        let allowed = MAX_SYSTEM_BYTES.max(beyond(&sent.system));
+        if beyond(&rewritten.system) > allowed {
+            return Err(format!(
+                "the rewritten system holds more than {allowed} bytes besides the operator's sections"
+            ));
+        }
+        rewritten.system.retain(|block| !is_operator(block));
+        rewritten.system.splice(0..0, operator);
+        Ok(rewritten)
     }
 
     /// With cache isolation on, give `provider` the tenant's cache salt, set
