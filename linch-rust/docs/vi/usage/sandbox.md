@@ -19,7 +19,13 @@ chọn một backend khác:
 Lựa chọn này áp dụng cho `Bash` ở foreground và background, nên cũng áp dụng cho
 `BashOutput` và `BashKill`. Các tool tệp (`Read`, `Write`, `Edit`, `Grep`, `Glob`)
 luôn chạy trong server, bị giới hạn trong workspace; mọi backend thấy cùng một thư mục
-workspace, nên một tệp `Bash` ghi chính là tệp `Read` đọc.
+workspace, nên một tệp `Bash` ghi chính là tệp `Read` đọc. Một lệnh dùng chung
+workspace không thể đẩy các tool tệp ra khỏi nó bằng cách hoán đổi một thư mục hay
+tệp thành symlink trong lúc một lệnh gọi chạy: mọi đường dẫn được đi từng tên từ một
+descriptor đang mở của thư mục gốc và symlink dẫn ra ngoài bị từ chối. Điều đó bảo vệ
+nội dung tệp, kể cả tệp ignore; tên mà một danh sách của `Grep`, `Glob` hay `ls` tìm
+thấy trong một thư mục bị hoán đổi như vậy thì không được bảo vệ (điều được và không được che:
+[Giới hạn truy cập](../architecture/tools.md#giới-hạn-truy-cập)).
 
 ```python
 from linch_rust import AgentConfig, SandboxExecution
@@ -169,6 +175,11 @@ giữ chúng.
   UDP, kể cả các dịch vụ trên `localhost`.
 - Các tool tệp, MCP stdio server và backend đĩa của hệ thống tệp ảo vẫn chạy trong
   hoặc từ server như trước; sandbox dành cho `Bash`.
+  Các tool tệp ở trong workspace nhờ lượt đi của chính chúng, không phải Landlock:
+  một symlink mà lệnh sandbox để lại trong workspace chỉ được đi theo khi đích của nó
+  còn nằm trong thư mục gốc. Các tool tệp không che hard link, nhưng dưới `sandbox` một lệnh không thể tạo hard
+  link tới tệp của host: Landlock từ chối `ln` vượt ranh giới workspace (`Invalid
+  cross-device link`, có test).
 
 ### Những gì kết thúc cùng một lệnh
 
@@ -321,8 +332,8 @@ cập được docker), nên CI không có docker vẫn xanh.
 | Lệnh bắt đầu trong workspace và tệp của nó là tệp của công cụ file | có | có | có |
 | Không bí mật nào của server lọt vào môi trường của lệnh | có | có | có |
 | `environ` của server không đọc được từ lệnh | n/a | có | có |
-| Ghi ngoài workspace không tới được host | n/a | có | có |
-| Không đọc được tệp host nằm cạnh workspace | n/a | có | có |
+| Ghi ngoài workspace không tới được host (kể cả tool tệp, khi một lệnh hoán đổi thư mục thành symlink) | n/a | có | có |
+| Không đọc được nội dung tệp host nằm cạnh workspace (kể cả tool tệp, cùng phép hoán đổi, và cả `.ignore`/`.gitignore`; tên nào tồn tại trong một thư mục bị hoán đổi thì không được bảo vệ) | n/a | có | có |
 | Syscall bị cấm cho kết quả lỗi, không làm sập | n/a | có | n/a |
 | Lệnh không `ptrace` được tiến trình ngoài sandbox | n/a | có | n/a |
 | Không có capability, `no-new-privileges`, `mount` bị từ chối | n/a | n/a | có |

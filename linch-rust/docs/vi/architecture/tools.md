@@ -252,7 +252,7 @@ nó cho `Bash`; xem [Execution backend](#execution-backend)), dùng chung một
 
 Grep và Glob bỏ qua các tệp bị ignore và không đi theo symlink; Grep cũng bỏ qua
 các tệp ẩn và nhị phân, và Glob chỉ liệt kê tệp ẩn khi mẫu
-nêu tên một đoạn bắt đầu bằng dấu chấm (`crates/linch-tools/src/fs.rs:232-248`). Một mẫu Grep biên dịch ra tối đa
+nêu tên một đoạn bắt đầu bằng dấu chấm (`crates/linch-tools/src/fs.rs:267-283`). Một mẫu Grep biên dịch ra tối đa
 10 MiB (`REGEX_SIZE_LIMIT`; mẫu lớn hơn là `invalid_query`) và bộ nhớ đệm DFA lười của một
 matcher chứa tối đa 32 MiB (`REGEX_DFA_CACHE_LIMIT`; mẫu cần nhiều hơn chạy trên engine
 chậm hơn), nên bộ nhớ của một lần gọi bị chặn, ngoài 10 MiB mà searcher giữ của một tệp.
@@ -264,8 +264,8 @@ hai lần thời gian), và một lớp Unicode lặp nhiều lần (`\w{300}`, 
 thoát: đếm nhỏ hơn hoặc một lớp ASCII.
 
 Một lần gọi cũng có giới hạn thời gian thực, `SEARCH_TIME_LIMIT` (30 s,
-`crates/linch-tools/src/fs/local.rs`). Nó được kiểm tra giữa các tệp và mỗi lần việc tìm
-đọc thêm một tệp (một lần cho mỗi buffer), và quá mức đó lời gọi thất bại với `timed_out`,
+`crates/linch-tools/src/fs/local.rs`). Nó được kiểm tra giữa các tệp, cho mỗi mục mà lượt đi
+thư mục liệt kê, và mỗi lần việc tìm đọc thêm một tệp (một lần cho mỗi buffer), và quá mức đó lời gọi thất bại với `timed_out`,
 nói đã tìm xong bao nhiêu tệp và đang ở tệp nào; một lời gọi bị hủy dừng ở cùng các điểm đó.
 Phần còn lại: một lần tìm regex trên một dòng rất dài không thể bị ngắt, nên một dòng tới
 10 MiB (mức tối đa searcher giữ) có thể chạy quá giới hạn. Trường hợp 64 KiB ở trên mất 6
@@ -284,17 +284,90 @@ session kết thúc (`tracker.rs:65`).
 
 ### Giới hạn truy cập
 
-Mọi tool tệp đều đi qua trait `ExecutionFs` (`fs.rs:209`), nên một
+Mọi tool tệp đều đi qua trait `ExecutionFs` (`fs.rs:244`), nên một
 thế giới thực thi từ xa có thể thay `LocalFs` mà không đổi các tool.
-`LocalFs` (`crates/linch-tools/src/fs/local.rs:26`) canonicalize thư mục gốc
-một lần; `new` là blocking, nên hãy gọi nó trước khi runtime khởi động hoặc từ một
-blocking task. Mỗi đường dẫn được phân giải bằng cách canonicalize tiền tố dài nhất đã
-tồn tại của nó; phần còn lại chỉ được chứa các tên thuần (`local.rs:68-72`). `..`, đường
-dẫn tuyệt đối nằm ngoài thư mục gốc và symlink dẫn ra ngoài đều bị từ chối với
-`FsError::Escape`. Các đường dẫn trả về là đường dẫn workspace: tương đối, phân tách bằng `/`,
-symlink đã được phân giải, để một tệp có một tên. Phép kiểm tra bảo vệ các đối số đường
-dẫn; nó không ngăn một process đồng thời hoán đổi một symlink giữa lúc kiểm tra
-và lúc dùng. Công việc tệp chặn chạy trên blocking pool của Tokio.
+`LocalFs` (`crates/linch-tools/src/fs/local.rs`) canonicalize thư mục gốc một
+lần và giữ một directory descriptor của nó; `new` là blocking, nên hãy gọi nó
+trước khi runtime khởi động hoặc từ một blocking task. Một đường dẫn không bao
+giờ được đưa nguyên cho kernel. `fs/beneath.rs` đi từng tên một từ descriptor
+đó bằng `openat(O_NOFOLLOW)`: symlink được đọc và đích của nó được nối vào các
+tên còn phải đi (tối đa 40 symlink), còn `..` bỏ một thư mục mà lượt đi đang giữ
+mở, không bao giờ là `..` của kernel. `Read` mở tệp qua descriptor của thư mục
+cha và stat tệp đang mở; `Write` tạo thư mục còn thiếu bằng `mkdirat`, tạo tệp
+tạm trong thư mục của đích với `O_EXCL` và chuyển nó bằng `renameat`. Các đường
+dẫn trả về là đường dẫn workspace: tương đối, phân tách bằng `/`, symlink đã
+được phân giải, để một tệp có một tên. Công việc tệp chặn chạy trên blocking
+pool của Tokio.
+
+Một đường dẫn được phép là gì:
+
+- Đường dẫn tuyệt đối chỉ được chấp nhận nếu bắt đầu bằng thư mục gốc
+  canonical hoặc bằng thư mục gốc như đã đưa cho `new` (cách viết qua một
+  symlink). Mọi đường dẫn tuyệt đối khác bị từ chối với `FsError::Escape`, dù ở
+  đó có gì hay không, nên câu trả lời không nói gì về host. Điều này gồm cả một
+  alias khác của thư mục gốc: trên macOS `/tmp` và `/var` là symlink tới
+  `/private/...`, nên đường dẫn viết `/var/...` bị từ chối khi thư mục gốc là
+  `/private/var/...` (chưa build hay kiểm thử trên macOS).
+- Đích symlink tuyệt đối nằm trong workspace cũng phải viết đúng thư mục gốc
+  canonical, vì cùng lý do; đích qua alias khác là `Escape`.
+- `..` mà vẫn ở trong thư mục gốc thì được chấp nhận (`src/../a.txt`). Đường dẫn
+  trèo lên trên thư mục gốc bị từ chối kể cả khi nó quay lại vào trong
+  (`../root/top.txt` là `Escape`; trước đây nó phân giải được). Từ chối khi nghi
+  ngờ là chủ ý: lượt đi không phân biệt được đường dẫn quay lại với đường dẫn bị
+  chuyển hướng.
+- Symlink treo là `Escape`, vì ghi vào đó sẽ tạo ra đích của nó, và mọi symlink
+  dẫn ra ngoài cũng vậy.
+- Một đường dẫn đi xuống tối đa 128 thư mục (sâu hơn là lỗi, không phải bỏ sót
+  âm thầm), và mỗi thư mục trên đó phải đọc được, không chỉ tìm kiếm được: chính
+  thư mục gốc cần quyền đọc, nếu không `new` lỗi. Độ dài đường dẫn không bị giới
+  hạn.
+- Một lượt đi của `Read`, `Write` hay `Edit` giữ một descriptor cho mỗi cấp
+  trong suốt thời gian đi, tối đa 128, nên hãy đặt `ulimit -n` cho khoảng 128
+  descriptor mỗi lượt đi sâu đồng thời; đường dẫn thường giữ vài cái. Lệnh tìm
+  kiếm chỉ giữ một.
+
+Điều được đảm bảo: một process dùng chung workspace (một lệnh `Bash` dưới
+`sandbox` hoặc `docker`) hoán đổi một thư mục hay một tệp thành symlink, hoặc đổi
+tên một thư mục, giữa hai bước bất kỳ của một lệnh gọi thì không thể làm lệnh
+gọi đó ra khỏi thư mục gốc. Thư mục đang cầm luôn là thư mục mà lượt đi đã mở
+bên dưới thư mục gốc, và một tên bị hoán đổi bị `O_NOFOLLOW` từ chối ở nơi nó được
+mở tiếp theo. Nội dung của một tệp không bao giờ được đọc từ ngoài thư mục gốc, kể cả
+`.ignore` và `.gitignore`: lệnh tìm kiếm đọc chúng qua descriptor gốc như mọi tệp
+khác, nên tệp là symlink thì không được tuân theo và không tệp host nào quyết
+định câu trả lời của một lệnh tìm kiếm.
+
+Danh sách thì yếu hơn. `Grep`, `Glob` và `DiskBackend::ls` liệt kê tên bằng lượt
+đi của `ignore` (type và glob cần nó), vốn đọc thư mục theo tên, nên một danh
+sách có thể đến từ thư mục mà một lệnh đang chạy đã hoán đổi thành symlink tới
+thư mục host. Lượt đi không đọc tệp ignore: `fs/ignore_files.rs` đọc chúng từ
+descriptor gốc (không symlink trên đường đi hay ở cuối, tệp thường tới 1 MiB; tệp
+khác bị bỏ qua không một lời) và loại các mục chúng loại trừ. Thứ tự ưu tiên giữ
+như lượt đi: mẫu glob thắng mọi tệp ignore, rồi đến quy tắc `.ignore` khớp gần
+nhất, rồi quy tắc `.gitignore` khớp gần nhất, từ thư mục gốc workspace đi xuống, kể
+cả các thư mục phía trên một thư mục con được tìm. Tệp ignore nằm trên thư mục
+gốc workspace, `.git/info/exclude` và tệp ignore toàn cục của host không được đọc:
+lượt đi của `ignore` đọc tất cả chúng theo đường dẫn, nên đây là một thay đổi, và
+một workspace nằm trong một repository nay sẽ tìm cả trong `target/` và
+`node_modules/` trừ khi workspace có `.ignore` (hoặc `.gitignore`) riêng nêu chúng. Một tên được liệt kê chỉ được tìm hoặc trả về sau khi
+được mở lại từ descriptor gốc mà không cho phép symlink nào, từng descriptor một,
+nên không có giới hạn độ sâu. Tên không qua được bước đó (không đọc được hoặc
+không tìm kiếm được, đã mất, bị hoán đổi) không bao giờ được nêu tên trong đầu ra
+hay lỗi nào: `Grep` và `Glob` kết thúc bằng một dòng cho biết có bao nhiêu mục bị
+bỏ ra, và một thư mục không đọc được tính là một. Hết descriptor là một lỗi
+với cả ba, không phải câu trả lời rỗng hay thiếu. Không được bảo vệ: tên nào tồn tại trong một thư mục
+đã bị hoán đổi. `Glob`, `Grep` và `ls` chỉ báo một tên được liệt kê nếu nó cũng là
+tệp thường tại đường dẫn đó bên dưới thư mục gốc, nên một bên gọi đoán một tên, tạo
+nó trong workspace và đua một phép hoán đổi có thể biết thư mục host cũng có nó
+hay không (tên và sự tồn tại, không phải nội dung) qua bất kỳ cái nào trong ba.
+Để đóng điều này phải đi các thư mục bằng descriptor thay cho lượt đi của
+`ignore`, tức là viết lại bộ duyệt, và chưa làm.
+
+Không được che: hard link (một tên thứ hai trong thư mục gốc cho tệp nằm ngoài
+sẽ đọc ra tệp đó; một lần ghi thay tên và để nguyên nội dung của tệp kia), mount
+nằm trong thư mục gốc, và việc chính thư mục gốc bị di chuyển hay thay thế
+(descriptor vẫn ở thư mục mà `new` đã mở). Lượt đi chỉ dùng các lời gọi POSIX `*at`
+qua `rustix`, nên không có nhánh dự phòng chỉ dành cho Linux để duy trì; nó chưa
+được build hay kiểm thử trên macOS.
 
 ### Bash
 

@@ -326,8 +326,21 @@ status: final
 - **Edit size.** An `Edit` whose result would pass 10 MiB (the `Read` limit)
   is refused as `too_large` before the result is built, and the file stays
   as it was; this bounds `replace_all` as `edit_file` is bounded.
-- **Confinement.** Paths are relative to the workspace. `..`, absolute paths
-  outside it and symlinks that lead out are refused.
+- **Confinement.** Paths are relative to the workspace. A path that climbs
+  above it with `..` (even if it comes back in), an absolute path outside it
+  (checked without looking at what exists there) and symlinks that lead out
+  are refused, also when another process swaps a directory for a symlink
+  while the call runs. A path goes down at most 128 directories, and each
+  directory on it, the workspace root included, must be readable. `Grep` and
+  `Glob` end with a line saying how many entries they could not read and left
+  out (never their names). Hard links to files outside the workspace are not
+  covered, and neither are the names in a directory a racing command swapped
+  ([Confinement](../architecture/tools.md#confinement)).
+- **Ignore files.** `Grep` and `Glob` honour the `.ignore` and `.gitignore`
+  files from the workspace root down, and not the ones above it, nor
+  `.git/info/exclude`, nor the host's global ignore file. A workspace inside a
+  repository therefore searches `target/` and `node_modules/` unless it has its
+  own ignore file: put those patterns in a `.ignore` in the workspace.
 - **`Bash` is not confined by default.** With the default `local` backend it
   starts in the workspace but can reach anything the server's user can;
   `execution` runs it in a sandbox or a container instead

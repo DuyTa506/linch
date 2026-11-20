@@ -256,7 +256,7 @@ shell for `Bash`; see [Execution backends](#execution-backends)), sharing one
 
 Grep and Glob skip ignored files and do not follow symlinks; Grep also skips
 hidden and binary files, and Glob lists hidden files only when the pattern
-names a dot segment (`crates/linch-tools/src/fs.rs:232-248`). A Grep pattern
+names a dot segment (`crates/linch-tools/src/fs.rs:267-283`). A Grep pattern
 may compile to at most 10 MiB (`REGEX_SIZE_LIMIT`; a larger one is an
 `invalid_query`) and one matcher's lazy DFA cache holds at most 32 MiB
 (`REGEX_DFA_CACHE_LIMIT`; a pattern that needs more runs on a slower engine),
@@ -270,8 +270,9 @@ now an `invalid_query` (it compiles in 20 to 50 MiB). The error names the way
 out: a smaller count or an ASCII class.
 
 A call also has a wall-clock limit, `SEARCH_TIME_LIMIT` (30 s,
-`crates/linch-tools/src/fs/local.rs`). It is checked between files and each
-time the search reads more of a file (once per buffer), and past it the call
+`crates/linch-tools/src/fs/local.rs`). It is checked between files, for each
+entry the directory walk lists, and each time the search reads more of a file
+(once per buffer), and past it the call
 fails with `timed_out`, saying how many files were searched in full and which
 file it was in, and a cancelled call stops at the same points. The residual:
 one regex search over a single very long line cannot be interrupted, so a
@@ -292,17 +293,91 @@ session ends (`tracker.rs:65`).
 
 ### Confinement
 
-Every file tool goes through the `ExecutionFs` trait (`fs.rs:209`), so a
+Every file tool goes through the `ExecutionFs` trait (`fs.rs:244`), so a
 remote execution world can replace `LocalFs` without changing the tools.
-`LocalFs` (`crates/linch-tools/src/fs/local.rs:26`) canonicalizes the root
-once; `new` is blocking, so call it before the runtime starts or from a
-blocking task. Each path is resolved by canonicalizing its longest existing
-prefix; the rest may only hold plain names (`local.rs:68-72`). `..`, absolute
-paths outside the root and symlinks that lead out are refused with
-`FsError::Escape`. Paths returned are workspace paths: relative, `/`-separated,
-symlinks resolved, so one file has one name. The check guards path arguments;
-it does not stop a concurrent process from swapping a symlink between check
-and use. Blocking file work runs on Tokio's blocking pool.
+`LocalFs` (`crates/linch-tools/src/fs/local.rs`) canonicalizes the root once
+and keeps a directory descriptor of it; `new` is blocking, so call it before
+the runtime starts or from a blocking task. A path is never handed to the
+kernel whole. `fs/beneath.rs` walks it one name at a time from that
+descriptor with `openat(O_NOFOLLOW)`: a symlink is read and its target is
+spliced into the names still to walk (at most 40 links), and `..` pops a
+directory the walk holds open, never the kernel's `..`. `Read` opens the file
+through its parent's descriptor and stats the open file; `Write` makes
+missing directories with `mkdirat`, creates the temporary file in the
+target's directory with `O_EXCL` and moves it with `renameat`. Paths returned
+are workspace paths: relative, `/`-separated, symlinks resolved, so one file
+has one name. Blocking file work runs on Tokio's blocking pool.
+
+What a path may be:
+
+- An absolute path is accepted only if it starts with the canonical root or
+  with the root as it was given to `new` (a spelling through a symlink). Any
+  other absolute path is refused with `FsError::Escape`, whether or not
+  anything exists there, so the answer says nothing about the host. This
+  includes a different alias of the root: on macOS `/tmp` and `/var` are
+  symlinks to `/private/...`, so a path spelled `/var/...` is refused when the
+  root is `/private/var/...` (not built or tested on macOS).
+- An absolute symlink target inside the workspace must spell the canonical
+  root, for the same reason; a target through another alias is `Escape`.
+- `..` that stays inside the root is accepted (`src/../a.txt`). A path that
+  climbs above the root is refused even if it comes back in
+  (`../root/top.txt` is `Escape`; it used to resolve). Failing closed is
+  intended: the walk cannot tell a path that returns from one that was
+  redirected.
+- A dangling symlink is `Escape`, because writing there would create its
+  target, and so is any symlink that leads out.
+- A path goes down at most 128 directories (deeper is an error, not a silent
+  miss), and each directory on it must be readable, not only searchable: the
+  root itself needs read permission, or `new` fails. Path length is not
+  limited.
+- A `Read`, `Write` or `Edit` walk holds one descriptor per level for its
+  duration, up to 128, so size `ulimit -n` for about 128 descriptors per
+  concurrent deep walk; ordinary paths hold a few. Searches hold one.
+
+What this guarantees: a process that shares the workspace (a `Bash` command
+under `sandbox` or `docker`) and swaps a directory or a file for a symlink,
+or renames a directory, between any two steps of a call cannot make the call
+leave the root. The directory in hand is always one the walk opened beneath
+the root, and a swapped name is refused by `O_NOFOLLOW` where it is next
+opened. The content of a file is never read from outside the root, and that
+includes `.ignore` and `.gitignore`: a search reads them through the root
+descriptor like any file, so one that is a symlink is not honoured and no host
+file decides what a search answers.
+
+Listings are weaker. `Grep`, `Glob` and `DiskBackend::ls` list names with
+`ignore`'s walk (types and globs need it), which reads directories by name, so
+a listing may come from a directory a racing command swapped for a symlink to
+a host directory. The walk does not read ignore files: `fs/ignore_files.rs`
+does, from the root descriptor (no symlink on the way or at the end, regular
+files up to 1 MiB; any other is skipped without a word), and drops the
+entries they rule out. It keeps the walk's precedence: a glob pattern beats
+every ignore file, then the nearest matching `.ignore` rule, then the nearest
+matching `.gitignore` rule, from the workspace root down, also for the
+directories above a searched subdirectory. Ignore files above the workspace
+root, `.git/info/exclude` and the host's global ignore file are not read:
+`ignore`'s own walk read all of them by path, so this is a change, and a
+workspace inside a repository now searches `target/` and `node_modules/`
+unless the workspace has its own `.ignore` (or `.gitignore`) naming them. A listed name is searched or
+returned only after it is opened again from the root descriptor with no
+symlink allowed, one descriptor at a time, so there is no depth limit. A name
+that fails that (unreadable or not searchable, gone, swapped) is never named
+in any output or error: `Grep` and `Glob` end with a line giving how many
+entries were left out, and an unreadable directory counts as one. Running out
+of descriptors is an error for all three, not an empty or partial answer. Not protected: which names
+exist in a directory that was swapped. `Glob`, `Grep` and `ls` report a listed
+name only if it is also a regular file at that path beneath the root, so a
+caller that guesses a name, creates it in the workspace and races a swap can
+learn whether the host directory also has it (names and existence, not
+contents) from any of the three. Closing this means walking the directories
+through descriptors instead of `ignore`'s walk, which is a rewrite of the
+walker and was not done.
+
+Not covered: hard links (a second name inside the root for a file outside it
+reads as that file; a write replaces the name and leaves the other file's
+content alone), mounts inside the root, and the root directory itself being
+moved or replaced (the descriptor stays on the directory `new` opened). The
+walk uses only POSIX `*at` calls through `rustix`, so there is no Linux-only
+fallback to keep; it has not been built or tested on macOS.
 
 ### Bash
 
