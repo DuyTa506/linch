@@ -219,7 +219,10 @@ fn a_base_url_matrix_hides_the_token() {
         let shown = serde_json::to_value(&config).unwrap()["provider"]["base_url"].clone();
         let debug = format!("{:?}", config.provider);
         let wire = config.to_value_with_secrets().unwrap();
-        assert_eq!(wire["provider"]["base_url"], url, "the wire form keeps the URL");
+        assert_eq!(
+            wire["provider"]["base_url"], url,
+            "the wire form keeps the URL"
+        );
         for text in [shown.to_string(), debug] {
             if text.contains("tok-secret") || text.contains("tok%2Dsecret") {
                 leaks.push(text);

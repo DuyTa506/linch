@@ -289,3 +289,30 @@ async fn a_connect_error_does_not_print_the_query_of_the_url() {
         assert!(!shown.contains(secret), "{shown}");
     }
 }
+
+/// The client does not follow redirects; the error says so and what to do.
+#[tokio::test]
+async fn a_redirect_error_says_redirects_are_not_followed() {
+    let http = Http::start(&Fixture::new(standard_tools()), |router| {
+        router.route(
+            "/allowed",
+            axum::routing::any(|| async { Redirect::temporary("/mcp").into_response() }),
+        )
+    })
+    .await;
+    let mut config = McpServerConfig::new(
+        "web",
+        McpTransport::http(http.url.replace("/mcp", "/allowed")),
+    );
+    config.reconnect.attempt_timeout = Duration::from_secs(5);
+    let error = McpServer::connect(config, Arc::new(ToolRegistry::new()))
+        .await
+        .err()
+        .expect("a redirect is an error");
+    http.stop().await;
+    let shown = chain(&error);
+    assert!(
+        shown.contains("redirects are not followed; configure the final URL"),
+        "{shown}"
+    );
+}

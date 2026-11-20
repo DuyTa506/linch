@@ -39,7 +39,10 @@ Transport HTTP dùng một client `reqwest` riêng của crate
 đi theo redirect: một phản hồi 3xx kết thúc yêu cầu đó như một lỗi HTTP, nên header của
 transport và session id ở lại trên URL đã cấu hình (client mặc định của rmcp đi theo
 307 và 308 cùng origin, sẽ đưa chúng tới một đường dẫn khác của origin; các adapter
-provider từ chối mọi redirect theo cùng cách). Nó không giữ connection nhàn rỗi, giống
+provider từ chối mọi redirect theo cùng cách). Lỗi nói rõ điều đó: `unexpected server
+response: HTTP 307 Temporary Redirect: ... (redirects are not followed; configure the
+final URL)`. Một gateway redirect bằng 307 hoặc 308 cùng origin, trước đây vẫn chạy được,
+giờ làm kết nối thất bại cho đến khi cấu hình ghi URL cuối cùng. Nó không giữ connection nhàn rỗi, giống
 client của rmcp, nên mỗi lời gọi mở một connection: trên loopback, 50 lời gọi tuần tự mất
 khoảng 0,36 ms mỗi lời gọi khi không pool và 0,26 ms khi có pool, nhưng 2 trên 9 lượt chạy
 50 lời gọi có pool có một lời gọi mất 31 đến 48 ms (cú đứng do TCP delayed ACK mà ghi chú

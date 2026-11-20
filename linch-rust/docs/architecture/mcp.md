@@ -39,7 +39,10 @@ follows a redirect: a 3xx answer ends that request as an HTTP error, so the
 transport's headers and the session id stay on the configured URL (rmcp's
 default client follows same-origin 307 and 308, which would take them to
 another path of the origin; the provider adapters refuse every redirect the
-same way). It keeps no idle connection, as rmcp's client does, so every call
+same way). The error says so: `unexpected server response: HTTP 307 Temporary
+Redirect: ... (redirects are not followed; configure the final URL)`. A gateway
+that redirects with a same-origin 307 or 308, which worked before, now fails the
+connect until the config names the final URL. It keeps no idle connection, as rmcp's client does, so every call
 opens a connection: on loopback, 50 sequential calls took about 0.36 ms each
 unpooled and 0.26 ms pooled, but 2 of 9 pooled runs of 50 calls had one call
 of 31 to 48 ms (the TCP delayed-ACK stall rmcp's comment names, after a response body

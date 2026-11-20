@@ -315,7 +315,8 @@ impl Connector for Http {
     }
 }
 
-/// The HTTP client of one connection. It never follows a redirect, so the
+/// The HTTP client of one connection. It never follows a redirect (a 3xx
+/// answer fails the call, and its error says redirects are not followed), so the
 /// transport's headers and the session id stay on the configured URL (the
 /// provider adapters refuse redirects the same way). It keeps no idle
 /// connection, as rmcp's own client does: a response body that is not read
@@ -344,6 +345,13 @@ fn quiet<T>(
 ) -> Result<T, StreamableHttpError<reqwest::Error>> {
     result.map_err(|error| match error {
         StreamableHttpError::Client(error) => StreamableHttpError::Client(error.without_url()),
+        // The client does not follow redirects (`http_client`); say so, or a
+        // gateway that redirects to its final URL only shows a status.
+        StreamableHttpError::UnexpectedServerResponse(text) if text.starts_with("HTTP 3") => {
+            StreamableHttpError::UnexpectedServerResponse(
+                format!("{text} (redirects are not followed; configure the final URL)").into(),
+            )
+        }
         other => other,
     })
 }
