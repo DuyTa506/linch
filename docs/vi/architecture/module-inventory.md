@@ -145,6 +145,7 @@ cơ sở dữ liệu/bộ lắng nghe tạm thời, thử lại các lỗi hạ 
 | `permissions/engine.py` | Quyết định quyền dựa trên đầu vào chuẩn tắc và các callback phê duyệt. |
 | `permissions/rules.py` | `ToolRule`, `PathRule` và `BashRule`, bao gồm các điều kiện vai trò. |
 | `permissions/ruleset.py` | Các bộ quy tắc quyền phân lớp. |
+| `permissions/shell.py` | Phân tích shell cho Bash rule: tách từ, tách lệnh ghép và phát hiện cú pháp mà rule không mô hình hóa được. |
 | `permissions/principal.py` | Danh tính `Principal(tenant, user, roles)` bất biến được một run và các lời gọi tool của run đó sử dụng. |
 | `context/builder.py` | Protocol bộ dựng ngữ cảnh bất đồng bộ, budget ngữ cảnh, chuỗi bộ dựng và ngữ cảnh yêu cầu tạm thời. |
 | `context/file_memory.py` | `FileMemoryContextBuilder`, lưu đệm `/memories/MEMORY.md` cho một run và giới hạn chỉ mục bộ nhớ ở 200 dòng nội dung đầu tiên. |

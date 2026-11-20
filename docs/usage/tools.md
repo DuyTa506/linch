@@ -689,6 +689,54 @@ The three rule types target different things:
 | `PathRule` | File paths (glob) | `*`/`?` do **not** cross `/`; `**` does. Anchored regex match. |
 | `BashRule` | Bash command | String patterns use fnmatch and token-prefix matching; `{"regex": "..."}` patterns use `re.search`. |
 
+How Bash rules read a command:
+
+- A composite command is split at unquoted `;`, `&&`, `||` and `|`, and each
+  segment takes the first rule that matches it. Words are separated by space and
+  tab only, and inside double quotes a backslash is dropped only before `$`,
+  backtick, `"`, `\` and newline, as in bash.
+- A command the splitter cannot model can be denied or asked by rules but never
+  allowed by one, `*` included. That covers `$(...)` and backticks, a background
+  `&` or `&>`, `|&`, a `#` comment, a here-document (`<<`, `<<-`), `>|`, a
+  newline, `>&` followed by a name or a blank (`>&file`, `>& 2`), a `${`
+  followed by a blank, tab or `|`, a `${...}` in double quotes whose body holds
+  a quote, a backslash, a nested `${` or `$[`, `env -S`, and a command position
+  that is a `$` expansion, a brace expansion (`{rm,-rf}`), `function`,
+  `coproc`, an array assignment (`a[0]=1`) or a `{fd}>file` redirection. A
+  here-string (`<<<`) and a descriptor duplication (`2>&1`, `>&2`, `<&3`,
+  `>&-`) are modelled.
+- A narrow allow rule (one whose pattern is not the bare `*`) does not cover a
+  segment that redirects output to a file (`echo x > file`, `>>`, `2>file`,
+  `<>`, with or without a descriptor number): it asks, or falls to the mode
+  default when no rule decides it. So an allow rule for `echo` or `git *` does
+  not let `echo x > file` or `git log > file` through, while the allow-all rule
+  `*` allows `pytest -q > test.log`, as it allows every command. `>&` followed
+  by exactly digits or `-` (`2>&1`, `>&2`, `>&-`) duplicates a descriptor, and
+  `/dev/null`, `/dev/stdout` and `/dev/stderr` are not files; none of them
+  counts as a file redirect. Any other word after `>&` that the splitter models
+  (`>&2file`, `>&2-`) is a file, which `*` allows like every other file
+  redirect. The first rule that matches a segment decides whether it is
+  allow-all; a later allow-all rule still covers a redirect that an earlier
+  narrow allow rule left uncovered. Deny and ask rules are unchanged.
+- Name-based deny and ask rules are best effort against a shell the engine does
+  not run, and the sandbox is the boundary. A rule matches each segment as
+  written, and again over its words, which are always rebuilt: unquoted one by
+  one (`\rm`, `r""m`, `git 'push'`), blanks collapsed to one space,
+  redirections dropped wherever they appear, and a quoted argument kept as one
+  word (so `* --force` does not match inside a commit message). The words in
+  front of the command are removed too: `NAME=value` assignments, the reserved
+  words `if`, `then`, `else`, `elif`, `do`, `while`, `until`, `!` and `{`, and
+  `time`, `exec`, `command`, `builtin` and `env` (quoted or not) with their
+  options, read unquoted: bundled short options (`env -iu NAME`, `exec -la
+  NAME`), unique prefixes of long options (`env --uns NAME`) and the argument
+  of `env -u`/`-C`/`-a`, `time -f`/`-o` and `exec -a`; behind `env` any word
+  with a `=` is an assignment. `command -v NAME` is not a command named `NAME`.
+  An allow rule never matches these rebuilt forms: `X=1 echo` is not `echo`.
+  Not covered: other spellings and wrappers (`/bin/rm`, `sudo`, `nice`,
+  `nohup`, `setsid`, `timeout`, `xargs`, `eval`, `sh -c`), a command that a
+  substitution or a variable produces, and arithmetic contexts such as
+  `x='a[$(cmd)]'; echo $[x]`, which are not reported as unparsed.
+
 When no rule matches, read-scoped tools and the four task tools are allowed in
 every mode. The remaining defaults are:
 
