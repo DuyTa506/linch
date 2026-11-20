@@ -189,6 +189,76 @@ impl TryFrom<serde_json::Value> for TokenSource {
     }
 }
 
+/// The text of a config parse error without any string of the input: serde
+/// quotes the value that did not fit (`invalid type: string "tok-..."`) and
+/// the key it did not know (`unknown field `tok-...``), and the config holds
+/// secrets, which `linch-server` would print on stderr. What stays is the
+/// kind of error, what was expected and the line and column.
+fn redact(error: &serde_json::Error) -> String {
+    // After each of these serde names the input's own value in quotes or
+    // backticks; the field and variant names that follow it are ours.
+    const VALUES: [&str; 13] = [
+        "unknown field ",
+        "unknown variant ",
+        "invalid type: string ",
+        "invalid type: integer ",
+        "invalid type: floating point ",
+        "invalid type: boolean ",
+        "invalid type: character ",
+        "invalid value: string ",
+        "invalid value: integer ",
+        "invalid value: floating point ",
+        "invalid value: boolean ",
+        "invalid value: character ",
+        "duplicate field ",
+    ];
+    let mut text = error.to_string();
+    for prefix in VALUES {
+        let Some(at) = text.find(prefix) else {
+            continue;
+        };
+        let start = at + prefix.len();
+        let rest = &text[start..];
+        let end = match rest.chars().next() {
+            Some('"') => quoted_len(rest),
+            Some('`') => rest[1..].find('`').map(|close| close + 2),
+            _ => None,
+        };
+        if let Some(end) = end {
+            text.replace_range(start..start + end, "");
+            // "unknown field , expected": drop the gap the value left.
+            if text[start..].starts_with(',') || text[start..].starts_with(' ') {
+                text.replace_range(start - 1..start, "");
+            }
+        }
+    }
+    // Whatever else quotes a string of the input is cut too.
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    while let Some(open) = rest.find('"') {
+        out.push_str(&rest[..open]);
+        let end = quoted_len(&rest[open..]).unwrap_or(rest.len() - open);
+        rest = &rest[open + end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Bytes of the string literal at the start of `text` (which starts with a
+/// `"`), its closing quote included; escapes are skipped.
+fn quoted_len(text: &str) -> Option<usize> {
+    let mut escaped = false;
+    for (at, character) in text.char_indices().skip(1) {
+        match character {
+            _ if escaped => escaped = false,
+            '\\' => escaped = true,
+            '"' => return Some(at + 1),
+            _ => {}
+        }
+    }
+    None
+}
+
 impl fmt::Debug for TokenSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -354,9 +424,11 @@ pub enum ConfigError {
     /// The file could not be read.
     #[error("cannot read the config: {0}")]
     Read(#[source] std::io::Error),
-    /// The JSON is malformed or has an unknown or mistyped field.
+    /// The JSON is malformed or has an unknown or mistyped field. The text
+    /// says where and what was expected, and never repeats a string of the
+    /// input (see [`redact`]).
     #[error("invalid config: {0}")]
-    Json(#[source] serde_json::Error),
+    Json(String),
     /// Neither `socket` nor `http` is set, and there is no `worker`.
     #[error("the config sets neither socket nor http nor worker")]
     NoListener,
@@ -449,7 +521,8 @@ impl ServerConfig {
     ///         a tenant a cap of 0, or allows `memory` without
     ///         `max_memories`.
     pub fn from_json(text: &str) -> Result<Self, ConfigError> {
-        let config: Self = serde_json::from_str(text).map_err(ConfigError::Json)?;
+        let config: Self =
+            serde_json::from_str(text).map_err(|error| ConfigError::Json(redact(&error)))?;
         if config.socket.is_none() && config.http.is_none() && config.worker.is_none() {
             return Err(ConfigError::NoListener);
         }

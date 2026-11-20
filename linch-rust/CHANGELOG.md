@@ -8,6 +8,7 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ### Fixed
 
+- **Config errors repeat no input.** A config the server cannot parse is refused with the kind of mistake, what was expected and the line and column, and never a string of the input: serde quoted the value that did not fit and the field it did not know, so a token or DSN in the wrong place reached stderr.
 - **Workflow memory per connection.** On a tenant connection, `workflow.step.begin`, `workflow.agent` and `workflow.interrupt` refuse a `name`, `branch` or interrupt `key` over 256 bytes (`-32602`), like the workflow id; a `key` that is only hashed (a step's, an agent call's) and a local connection are not bounded.
 - **Counters of calls that journal nothing.** A tenant's workflow keeps counters for at most 10,000 distinct call keys per drive (`MAX_CALL_KEYS`, or `max_records` if larger; `WorkflowOptions::max_call_keys` in `linch-ext`, `None` by default), refusing a call with a new key past it (`-32005`, `kind: call_keys`); failed agent calls and suspended interrupts no longer use up `max_records`. Replays are never refused.
 - **Failed steps give their ticket back.** New method `workflow.step.abandon` (capability `workflow_step_abandon`): the Python client's `wf.step` sends it when the step function raised, so a workflow that catches failed steps keeps its places. A workflow holds at most 1024 pending step tickets (`MAX_PENDING_STEPS`, `-32005`, `kind: pending_steps`); pending tickets do not count against `max_records`. A client that never sends it keeps working.
