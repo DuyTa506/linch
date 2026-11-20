@@ -135,7 +135,9 @@ Hai lớp fence bảo vệ một run, mỗi lớp một tầng:
   visibility timeout, đặt `owner` và cộng 1 vào `attempts`. Giá trị
   `attempts` đó là fencing token: heartbeat, record-run, ack, release
   và fail đều khớp trên nó, nên một worker đã mất job không thay đổi gì
-  (`lease.rs:1-6`). Mỗi thao tác là một câu lệnh autocommit ở mức cô lập mặc định của
+  (`lease.rs:1-6`). Heartbeat còn cần `owner` được đặt, mà release hoặc fail xóa đi,
+  nên một heartbeat đến sau khi lần thử đã trả job lại (keep-alive bị drop khi
+  đang có một heartbeat bay) trả `false` và không ẩn job lần nữa. Mỗi thao tác là một câu lệnh autocommit ở mức cô lập mặc định của
   pool. Trên `READ COMMITTED`, một thao tác đã chờ một bản cập nhật khác của hàng job
   (heartbeat của chính lần thử đó vẫn đang bay khi run kết thúc, hoặc dequeue của một
   worker khác) sẽ thất bại với lỗi serialization

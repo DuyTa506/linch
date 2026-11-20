@@ -135,7 +135,10 @@ Two fences protect a run, one per layer:
   the visibility timeout, sets `owner` and adds 1 to `attempts`. That
   `attempts` value is the fencing token: heartbeat, record-run, ack, release
   and fail all match on it, so a worker that lost the job changes nothing
-  (`lease.rs:1-6`). Each is one autocommit statement at the pool's default
+  (`lease.rs:1-6`). The heartbeat also needs `owner` set, which a release or
+  a failure clears, so a heartbeat that lands after the attempt gave the job
+  back (its keep-alive was dropped with one in flight) answers `false` and
+  does not hide the job again. Each is one autocommit statement at the pool's default
   isolation. Above `READ COMMITTED`, one that waited on another update of
   the job row (the attempt's own heartbeat still in flight when the run
   ends, or another worker's dequeue) fails with a serialization error
