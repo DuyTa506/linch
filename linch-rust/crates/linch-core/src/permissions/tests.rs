@@ -622,6 +622,32 @@ fn bash_only_command_prefixes_are_unparsed() {
 }
 
 #[test]
+fn a_deny_glob_does_not_match_inside_a_quoted_argument() {
+    let engine = flat(
+        PermissionMode::SkipDangerous,
+        vec![bash_rule("* --force", Deny)],
+    );
+    assert_eq!(bash(&engine, "git push --force"), "deny");
+    for command in [
+        "git commit -m \"do not use --force\"",
+        "git commit -m 'never --force'",
+        "echo 'x --force'",
+        "echo \"x --force\"",
+    ] {
+        assert_eq!(bash(&engine, command), "allow", "{command:?}");
+    }
+}
+
+#[test]
+fn a_hash_after_an_escaped_blank_is_not_a_comment() {
+    assert_eq!(bash(&allow_echo(), "echo a\\ #b"), "allow");
+    assert_eq!(bash(&allow_echo(), "echo a\\;#b"), "allow");
+    assert_eq!(bash(&allow_echo(), "echo a'b'#c"), "allow");
+    assert_eq!(bash(&allow_echo(), "echo a #b"), "ask");
+    assert_eq!(bash(&allow_echo(), "echo a ;#b"), "ask");
+}
+
+#[test]
 fn unparsed_floor_beats_a_generic_allow_in_any_layer_order() {
     let rules = vec![tool("Bash", Allow), bash_rule("rm -rf *", Deny)];
     let engine = flat(PermissionMode::SkipDangerous, rules);

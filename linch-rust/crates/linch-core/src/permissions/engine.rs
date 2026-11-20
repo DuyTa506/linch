@@ -249,8 +249,8 @@ impl<'a> Eval<'a> {
             // allow never comes from those forms.
             let own = first(segment);
             let behind = shell::strip_command_prefix(segment);
-            let plain = shell::tokenize(behind).join(" ");
-            let hidden: Vec<Option<RuleDecision>> = [behind, plain.as_str()]
+            let plain = shell::unquote_command_word(behind);
+            let hidden: Vec<Option<RuleDecision>> = [behind, &plain]
                 .into_iter()
                 .filter(|text| !text.is_empty() && *text != segment)
                 .map(first)

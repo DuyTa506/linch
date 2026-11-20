@@ -6,6 +6,7 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ## Unreleased
 
+- Bash deny and ask rules match the unquoted command word with the arguments as written, so a deny pattern such as `* --force` no longer matches text inside a quoted argument; a `#` after an escaped blank or semicolon is not a comment.
 - `function`, `coproc`, an array-element assignment (`a[0]=1`), a descriptor-variable redirection (`{fd}>log`) and a brace expansion (`{rm,-rf}`) in command position count as syntax the splitter cannot model.
 - Bash deny and ask rules see the command behind a wrapper option that takes an argument (`env -u NAME`, `env -C DIR`, `time -o FILE`, `time -f FORMAT`, `exec -a NAME`) and no longer match the argument itself or `command -v NAME`; `env -S` counts as syntax the splitter cannot model.
 - Bash deny and ask rules also see a command behind a quoted or escaped `env`, `command`, `exec`, `builtin`, `time` or reserved word (`\env rm`, `"time" rm`).

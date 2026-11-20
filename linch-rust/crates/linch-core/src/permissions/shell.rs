@@ -8,6 +8,8 @@
 //! the engine applies its floor to it instead of trusting the segments.
 //! Words are separated by space and tab only, as in bash.
 
+use std::borrow::Cow;
+
 use super::glob::wildcard;
 
 /// Whether bash separates words at `c`.
@@ -128,6 +130,8 @@ pub fn has_unparsed_construct(command: &str) -> bool {
     let mut escaped = false;
     // Index just past the last unescaped, unquoted `<` or `>`.
     let mut redirect_end = 0;
+    // Index just past the last unescaped, unquoted blank or operator.
+    let mut break_end = 0;
     let mut i = 0;
     while i < b.len() {
         let c = b[i];
@@ -152,19 +156,19 @@ pub fn has_unparsed_construct(command: &str) -> bool {
                 return true;
             }
         } else {
+            if matches!(c, b' ' | b'\t' | b';' | b'&' | b'|' | b'<' | b'>') {
+                break_end = i + 1;
+            }
             match c {
                 b'\'' | b'"' => quote = Some(c),
                 b'\r' | b'\n' | b'`' | b'(' | b')' => return true,
                 b'$' if matches!(next, Some(b'(' | b'\'')) => return true,
-                b'#' if i == 0
-                    || matches!(b[i - 1], b' ' | b'\t' | b';' | b'&' | b'|' | b'<' | b'>') =>
-                {
-                    return true;
-                }
+                b'#' if i == 0 || break_end == i => return true,
                 b'<' if b[i..].starts_with(b"<<<") => {
                     // A here-string: its word is an ordinary word.
                     i += 3;
                     redirect_end = i;
+                    break_end = i;
                     continue;
                 }
                 b'<' if next == Some(b'<') => return true,
@@ -174,6 +178,7 @@ pub fn has_unparsed_construct(command: &str) -> bool {
                 b'&' if redirect_end == i && matches!(next, Some(b'0'..=b'9' | b'-')) => {}
                 b'&' if next == Some(b'&') => {
                     i += 2;
+                    break_end = i;
                     continue;
                 }
                 b'&' => return true,
@@ -405,6 +410,17 @@ fn command_is_not_in_the_text(segment: &str) -> bool {
         last = c;
     }
     false
+}
+
+/// `command` with the quotes and backslashes of its first word removed
+/// (`\rm -rf x` becomes `rm -rf x`) and the rest left as written, so a
+/// quoted argument keeps its boundaries.
+pub fn unquote_command_word(command: &str) -> Cow<'_, str> {
+    let end = word_end(command);
+    if !command[..end].contains(['\'', '"', '\\']) {
+        return Cow::Borrowed(command);
+    }
+    Cow::Owned(format!("{}{}", unquote(&command[..end]), &command[end..]))
 }
 
 /// Whether bash rule `pattern` matches one command segment: as a glob over
