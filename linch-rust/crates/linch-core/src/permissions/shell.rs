@@ -234,6 +234,24 @@ fn is_assignment(word: &str) -> bool {
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// Whether `word` is an assignment to an array element (`a[0]=1`).
+fn is_array_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') && name.contains('[')
+    })
+}
+
+/// Whether `word` is a redirection with a descriptor variable (`{fd}>log`).
+fn is_fd_redirection(word: &str) -> bool {
+    word.strip_prefix('{')
+        .and_then(|rest| rest.split_once('}'))
+        .is_some_and(|(name, after)| {
+            !name.is_empty()
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && after.starts_with(['<', '>'])
+        })
+}
+
 /// Words that precede a command without being it.
 const RESERVED: &[&str] = &[
     "if", "then", "else", "elif", "do", "while", "until", "!", "{",
@@ -282,6 +300,12 @@ fn strip_prefix(segment: &str) -> Command<'_> {
         let end = word_end(rest);
         let word = &rest[..end];
         let operator = word.trim_start_matches(|c: char| c.is_ascii_digit());
+        if is_array_assignment(word) || is_fd_redirection(word) {
+            return Command {
+                text: rest,
+                opaque: true,
+            };
+        }
         let assignment = is_assignment(word);
         let name = if assignment {
             String::new()
@@ -321,7 +345,7 @@ fn strip_prefix(segment: &str) -> Command<'_> {
         } else {
             return Command {
                 text: rest,
-                opaque: false,
+                opaque: matches!(name.as_str(), "function" | "coproc"),
             };
         }
         for _ in 0..skip {
@@ -345,9 +369,11 @@ pub fn strip_command_prefix(segment: &str) -> &str {
     strip_prefix(segment).text
 }
 
-/// Whether the command of `segment` is not in its text: it is read from a
-/// string (`env -S`), or its word (after [`strip_command_prefix`]) holds a
-/// `$` expansion outside single quotes.
+/// Whether the command of `segment` is not in its text: the shell reads it
+/// from a string (`env -S`), or the segment starts with a bash construct that
+/// is not modelled (`function`, `coproc`, `a[0]=1`, `{fd}>log`), or its word
+/// (after [`strip_command_prefix`]) holds a `$` expansion outside single
+/// quotes or a brace expansion (`{rm,-rf}`).
 fn command_is_not_in_the_text(segment: &str) -> bool {
     let command = strip_prefix(segment);
     if command.opaque {
@@ -357,6 +383,7 @@ fn command_is_not_in_the_text(segment: &str) -> bool {
     let b = &rest.as_bytes()[..word_end(rest)];
     let mut quote: Option<u8> = None;
     let mut escaped = false;
+    let (mut open, mut last) = (false, 0);
     for &c in b {
         if escaped {
             escaped = false;
@@ -370,9 +397,12 @@ fn command_is_not_in_the_text(segment: &str) -> bool {
             }
         } else if c == b'\'' || c == b'"' {
             quote = Some(c);
-        } else if c == b'$' {
+        } else if c == b'$' || (open && (c == b',' || (c == b'.' && last == b'.'))) {
             return true;
+        } else if c == b'{' {
+            open = true;
         }
+        last = c;
     }
     false
 }

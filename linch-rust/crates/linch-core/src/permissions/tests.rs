@@ -596,6 +596,32 @@ fn a_deny_rule_does_not_match_the_argument_of_a_wrapper_option() {
 }
 
 #[test]
+fn bash_only_command_prefixes_are_unparsed() {
+    let engine = flat(PermissionMode::SkipDangerous, vec![bash_rule("rm *", Deny)]);
+    for command in [
+        "function f { rm -rf build; }; f",
+        "coproc rm -rf build",
+        "a[0]=1 rm -rf build",
+        "{fd}>log rm -rf build",
+        "{rm,-rf,build}",
+        "r{m,} -rf build",
+        "{1..3}",
+        "X=1 function f { rm; }",
+    ] {
+        assert_eq!(bash(&engine, command), "ask", "{command:?}");
+    }
+    for command in [
+        "echo {a,b}",
+        "echo {1..3}",
+        "echo 'function'",
+        "echo a[0]=1",
+        "git log {x}",
+    ] {
+        assert_eq!(bash(&engine, command), "allow", "{command:?}");
+    }
+}
+
+#[test]
 fn unparsed_floor_beats_a_generic_allow_in_any_layer_order() {
     let rules = vec![tool("Bash", Allow), bash_rule("rm -rf *", Deny)];
     let engine = flat(PermissionMode::SkipDangerous, rules);
