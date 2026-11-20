@@ -181,7 +181,7 @@ fn walk(fs: &LocalFs) -> Vec<String> {
     walk.build()
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
-        .filter(|entry| opener.stat(entry.path()).is_some())
+        .filter(|entry| opener.stat(entry.path()).is_ok_and(|stat| stat.is_some()))
         .filter_map(|entry| virtual_path(root, entry.path()))
         .collect()
 }

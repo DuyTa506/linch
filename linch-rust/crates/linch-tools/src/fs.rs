@@ -122,6 +122,10 @@ pub struct GrepHits {
     /// search may hold, or reading failed. Matches found before the cut are
     /// kept in [`Self::files`].
     pub skipped: Vec<String>,
+    /// Entries a directory listing proposed that could not be read from the
+    /// root (unreadable, not searchable, gone, or swapped for a symlink),
+    /// counted and never named: a listing may come from outside the root.
+    pub left_out: usize,
 }
 
 /// A file-name search under the root.
@@ -140,6 +144,16 @@ pub struct GlobHit {
     pub path: String,
     /// Last modification time, when it could be read.
     pub modified: Option<SystemTime>,
+}
+
+/// The result of a [`GlobQuery`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GlobHits {
+    /// The files found, sorted by path.
+    pub hits: Vec<GlobHit>,
+    /// Entries a directory listing proposed that could not be read from the
+    /// root, counted and never named (see [`GrepHits::left_out`]).
+    pub left_out: usize,
 }
 
 /// Why a file operation failed. The message is what the model sees.
@@ -252,5 +266,5 @@ pub trait ExecutionFs: Send + Sync {
         &self,
         query: &GlobQuery,
         cancel: &CancellationToken,
-    ) -> Result<Vec<GlobHit>, FsError>;
+    ) -> Result<GlobHits, FsError>;
 }

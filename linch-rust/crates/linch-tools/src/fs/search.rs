@@ -14,7 +14,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::beneath::stamp_of_stat;
 use super::local::is_hidden;
-use super::{FsError, GlobHit, GlobQuery, GrepFile, GrepHits, GrepLine, GrepMode, GrepQuery};
+use super::{
+    FsError, GlobHit, GlobHits, GlobQuery, GrepFile, GrepHits, GrepLine, GrepMode, GrepQuery,
+};
 use crate::fs::LocalFs;
 
 /// Longest line text kept in content output, in bytes.
@@ -55,24 +57,21 @@ pub(super) fn grep(
         if stop.is_cancelled() {
             return Err(FsError::Cancelled);
         }
-        let Some(path) = regular_file(entry) else {
+        let Some(path) = listed_file(entry, &mut hits.left_out)? else {
             continue;
         };
         // The walk only proposes names: every file is opened again from the
         // root, so a directory swapped for a symlink since it was listed
-        // cannot lead the search out of the root.
-        let opened = match opener.open(&path) {
-            Ok(Some(file)) => Ok(file),
-            // Gone, or not a regular file beneath the root: not reported,
-            // not even as skipped, since the name may be from outside.
-            Ok(None) => continue,
-            Err(error) => Err(error),
+        // cannot lead the search out of the root. A name that cannot be
+        // opened that way is counted, never named: it may come from outside.
+        let Some(file) = opener.open(&path)? else {
+            hits.left_out += 1;
+            continue;
         };
         // A pattern that can match a newline makes the searcher read the
         // whole file; skip one over the cap without reading it. Other
         // searches stream, so any size is fine.
         if searcher.multi_line_with_matcher(&matcher)
-            && let Ok(file) = &opened
             && file.metadata().is_ok_and(|meta| meta.len() > limit)
         {
             hits.skipped.push(fs.workspace_path(&path));
@@ -83,8 +82,7 @@ pub(super) fn grep(
             _ => usize::MAX,
         };
         let mut sink = Collect::new(query.mode, budget);
-        let searched =
-            opened.and_then(|file| search(&mut searcher, &matcher, file, stop, &mut sink));
+        let searched = search(&mut searcher, &matcher, file, stop, &mut sink);
         if stop.is_cancelled() {
             return Err(FsError::Cancelled);
         }
@@ -128,7 +126,7 @@ pub(super) fn glob(
     fs: &LocalFs,
     query: &GlobQuery,
     stop: &CancellationToken,
-) -> Result<Vec<GlobHit>, FsError> {
+) -> Result<GlobHits, FsError> {
     let pattern = Path::new(&query.pattern);
     if pattern.is_absolute() || pattern.components().any(|c| c == Component::ParentDir) {
         return Err(FsError::InvalidQuery(
@@ -152,26 +150,27 @@ pub(super) fn glob(
         .map_err(invalid)?;
     let mut walk = walker(&dir, dotted);
     walk.overrides(overrides);
-    let mut hits = Vec::new();
+    let mut found = GlobHits::default();
     let mut opener = fs.opener();
     for entry in walk.build() {
         if stop.is_cancelled() {
             return Err(FsError::Cancelled);
         }
-        let Some(path) = regular_file(entry) else {
+        let Some(path) = listed_file(entry, &mut found.left_out)? else {
             continue;
         };
         // A name is listed only if it is a regular file under the root when
-        // looked at again from the root descriptor.
-        let Some(stat) = opener.stat(&path) else {
+        // looked at again from the root descriptor; any other is counted.
+        let Some(stat) = opener.stat(&path)? else {
+            found.left_out += 1;
             continue;
         };
-        hits.push(GlobHit {
+        found.hits.push(GlobHit {
             path: fs.workspace_path(&path),
             modified: Some(stamp_of_stat(&stat).modified),
         });
     }
-    Ok(hits)
+    Ok(found)
 }
 
 /// The walker both searches share: sorted, symlinks not followed, the
@@ -188,12 +187,17 @@ fn walker(dir: &Path, hidden: bool) -> WalkBuilder {
 
 /// The path of a walked regular file. Directories, symlinks and unreadable
 /// entries yield `None`, so a search never leaves the root through a link.
-fn regular_file(entry: Result<DirEntry, ignore::Error>) -> Option<std::path::PathBuf> {
-    let entry = entry.ok()?;
-    entry
+fn listed_file(
+    entry: Result<DirEntry, ignore::Error>,
+    _left_out: &mut usize,
+) -> Result<Option<std::path::PathBuf>, FsError> {
+    let Ok(entry) = entry else {
+        return Ok(None);
+    };
+    Ok(entry
         .file_type()
         .is_some_and(|kind| kind.is_file())
-        .then(|| entry.into_path())
+        .then(|| entry.into_path()))
 }
 
 /// The searcher for `query`. It holds at most `limit` bytes of a file: the

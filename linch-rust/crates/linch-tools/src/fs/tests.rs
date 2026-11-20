@@ -270,8 +270,8 @@ async fn searches_never_follow_symlinks_out_of_the_root() {
         pattern: "**/*.txt".to_owned(),
         path: None,
     };
-    let hits = local.glob(&glob, &cancel).await.unwrap();
-    let paths: Vec<_> = hits.iter().map(|hit| hit.path.as_str()).collect();
+    let found = local.glob(&glob, &cancel).await.unwrap();
+    let paths: Vec<_> = found.hits.iter().map(|hit| hit.path.as_str()).collect();
     assert_eq!(paths, ["src/a.txt"]);
 }
 
@@ -481,7 +481,7 @@ async fn names_that_are_not_utf8_are_walked_and_shown_lossily() {
         pattern: "d*/*.txt".to_owned(),
         path: None,
     };
-    let hits = local.glob(&glob, &cancel).await.unwrap();
+    let hits = local.glob(&glob, &cancel).await.unwrap().hits;
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].path, "\u{fffd}/a.txt");
 }

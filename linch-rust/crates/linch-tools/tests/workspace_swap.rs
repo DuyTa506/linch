@@ -294,6 +294,7 @@ async fn grep_and_glob_stay_in_the_root_while_a_directory_is_swapped_for_a_symli
             .glob(&glob, &cancel)
             .await
             .unwrap()
+            .hits
             .into_iter()
             .map(|hit| hit.path)
             .collect();

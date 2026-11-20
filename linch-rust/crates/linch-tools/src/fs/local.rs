@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 use super::beneath::{self, Links, Located, Opener, is_file, open_file, stamp_of_stat};
 use super::search;
 use super::{
-    ExecutionFs, FileContent, FileInfo, FileStamp, FsError, GlobHit, GlobQuery, GrepHits, GrepQuery,
+    ExecutionFs, FileContent, FileInfo, FileStamp, FsError, GlobHits, GlobQuery, GrepHits, GrepQuery,
 };
 use crate::read::MAX_READ_BYTES;
 
@@ -375,7 +375,7 @@ impl ExecutionFs for LocalFs {
         &self,
         query: &GlobQuery,
         cancel: &CancellationToken,
-    ) -> Result<Vec<GlobHit>, FsError> {
+    ) -> Result<GlobHits, FsError> {
         let query = query.clone();
         let stop = cancel.child_token();
         let _guard = stop.clone().drop_guard();

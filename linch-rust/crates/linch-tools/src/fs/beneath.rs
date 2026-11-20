@@ -12,7 +12,7 @@
 //! used, so the same code runs on Linux and macOS.
 
 use std::ffi::{OsStr, OsString};
-use std::fs::{File, Metadata};
+use std::fs::File;
 use std::io;
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStringExt as _;
@@ -345,49 +345,80 @@ impl<'a> Opener<'a> {
     }
 
     /// The directory holding `real` and the file's name.
-    fn parent_of<'p>(&mut self, real: &'p Path) -> Option<(Arc<OwnedFd>, &'p OsStr)> {
-        let relative = real.strip_prefix(self.root).ok()?;
-        let name = relative.file_name()?;
-        let above = relative.parent()?;
+    fn parent_of<'p>(
+        &mut self,
+        real: &'p Path,
+    ) -> Result<Option<(Arc<OwnedFd>, &'p OsStr)>, FsError> {
+        let Some(relative) = real.strip_prefix(self.root).ok() else {
+            return Ok(None);
+        };
+        let (Some(name), Some(above)) = (relative.file_name(), relative.parent()) else {
+            return Ok(None);
+        };
         if let Some((cached, dir)) = &self.parent
             && cached == above
         {
-            return Some((Arc::clone(dir), name));
+            return Ok(Some((Arc::clone(dir), name)));
         }
-        let at = locate(self.root_fd, self.root, above, "", Links::Refuse).ok()?;
-        if !at.tail.is_empty() {
-            return None;
+        match locate(self.root_fd, self.root, above, "", Links::Refuse) {
+            Ok(at) if at.tail.is_empty() => {
+                self.parent = Some((above.to_owned(), Arc::clone(&at.dir)));
+                Ok(Some((at.dir, name)))
+            }
+            Ok(_) => Ok(None),
+            Err(FsError::Io { source, .. }) if exhausted(&source) => Err(io_error(".", source)),
+            Err(_) => Ok(None),
         }
-        self.parent = Some((above.to_owned(), Arc::clone(&at.dir)));
-        Some((at.dir, name))
     }
 
     /// Open the regular file at `real`, a path under the root.
     ///
-    /// `Ok(None)` means there is no such regular file beneath the root any
-    /// more: a symlink on the way, a name that is gone, something else in
-    /// its place. Callers drop the name without a word, since it may have
-    /// come from a directory outside the root. An error is a failure to
-    /// read a file that is there.
-    pub(crate) fn open(&mut self, real: &Path) -> io::Result<Option<File>> {
-        let Some((dir, name)) = self.parent_of(real) else {
+    /// `Ok(None)` means it could not be read from the root: a symlink on the
+    /// way, a name that is gone, something else in its place, a directory
+    /// that is not searchable. Callers count such a name and never report
+    /// it, since it may have come from a directory outside the root. An error
+    /// is the process running out of descriptors.
+    pub(crate) fn open(&mut self, real: &Path) -> Result<Option<File>, FsError> {
+        let Some((dir, name)) = self.parent_of(real)? else {
             return Ok(None);
         };
         let fd = match openat(&*dir, name, read_flags(), Mode::empty()) {
             Ok(fd) => fd,
-            Err(Errno::LOOP | Errno::NOENT | Errno::NOTDIR | Errno::NXIO) => return Ok(None),
-            Err(error) => return Err(error.into()),
+            Err(error) => return left_out(error),
         };
         let file = File::from(fd);
-        let meta: Metadata = file.metadata()?;
+        let Ok(meta) = file.metadata() else {
+            return Ok(None);
+        };
         Ok(meta.is_file().then_some(file))
     }
 
-    /// The stat of the regular file at `real`, a path under the root.
-    pub(crate) fn stat(&mut self, real: &Path) -> Option<Stat> {
-        let (dir, name) = self.parent_of(real)?;
-        statat(&*dir, name, AtFlags::SYMLINK_NOFOLLOW)
-            .ok()
-            .filter(is_file)
+    /// The stat of the regular file at `real`, a path under the root, or
+    /// `None` as for [`Self::open`].
+    pub(crate) fn stat(&mut self, real: &Path) -> Result<Option<Stat>, FsError> {
+        let Some((dir, name)) = self.parent_of(real)? else {
+            return Ok(None);
+        };
+        match statat(&*dir, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => Ok(is_file(&stat).then_some(stat)),
+            Err(error) => left_out(error),
+        }
     }
+}
+
+/// `Ok(None)` for an error that only means a name cannot be read from the
+/// root, the error itself when the process is out of descriptors.
+fn left_out<T>(error: Errno) -> Result<Option<T>, FsError> {
+    let error = io::Error::from(error);
+    if exhausted(&error) {
+        Err(io_error(".", error))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Whether `error` is the process or the system running out of descriptors.
+pub(crate) fn exhausted(error: &io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(code)
+        if code == Errno::MFILE.raw_os_error() || code == Errno::NFILE.raw_os_error())
 }
