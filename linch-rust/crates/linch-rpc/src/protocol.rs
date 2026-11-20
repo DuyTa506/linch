@@ -36,7 +36,7 @@ pub use schedule::{
 };
 
 pub use workflow::{
-    MAX_CALL_KEYS, MAX_PENDING_STEPS, MAX_WORKFLOW_ID_BYTES, WireRetry, WorkflowAgentParams,
+    MAX_CALL_KEYS, MAX_WORKFLOW_ID_BYTES, WireRetry, WorkflowAgentParams,
     WorkflowAgentResult, WorkflowBudget, WorkflowCancelParams, WorkflowCancelled,
     WorkflowEventParams, WorkflowFinishParams, WorkflowFinished, WorkflowInterruptParams,
     WorkflowInterrupted, WorkflowLimits, WorkflowStartParams, WorkflowStarted, WorkflowStatus,

@@ -260,7 +260,8 @@ Một host có hàm workflow chạy ở nơi khác (client của server RPC) dri
   RPC server đặt nó cho tenant là `MAX_CALL_KEYS` (10.000) hoặc `max_records` nếu
   lớn hơn, và `None` là không giới hạn. Một step đã begin bằng `step_begin` không
   giữ gì trong context: host giữ ticket của nó, và RPC server giới hạn số ticket
-  nó giữ (`MAX_PENDING_STEPS`).
+  nó giữ cho một tenant bằng đúng số của `max_call_keys`, và không giới hạn trên
+  kết nối cục bộ.
 - `LiveGate` (`context.rs:24`) được hỏi trước mỗi lời gọi sẽ chạy thật, không bao
   giờ cho một lần replay; server đếm các lời gọi đang chạy và lấy chỗ run của
   tenant ở đó.

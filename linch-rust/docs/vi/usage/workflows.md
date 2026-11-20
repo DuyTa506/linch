@@ -105,10 +105,12 @@ băm (của step, của lời gọi agent) thì không bị chặn, kết nối 
 
 Một step mà function của nó raise sẽ trả ticket lại: `wf.step` gửi
 `workflow.step.abandon` trước khi raise lại, nên một workflow bắt các step thất bại
-(để fallback, hoặc trong một fan-out `settled`) không bao giờ hết chỗ. Một client
-không bao giờ trả ticket (client có từ trước lời gọi này) bị giới hạn 1024 step
-đang chờ cho mỗi workflow (`-32005`, `kind: pending_steps`), không phải bởi
-`max_records`; server bỏ mọi ticket khi kết nối kết thúc.
+(để fallback, hoặc trong một fan-out `settled`) không bao giờ hết chỗ. Trên một kết nối
+tenant, một workflow cũng giữ tối đa 10.000 step đang chờ (cùng con số với call key
+ở trên, hoặc `max_records` nếu lớn hơn; `-32005`, `kind: pending_steps`), không tính
+vào `max_records`, nên một client không bao giờ trả ticket (client có từ trước lời gọi
+này) không thể ghim bộ nhớ; kết nối cục bộ không có mức trần này, và một fan-out rộng
+bao nhiêu cũng có thể đang chạy. Server bỏ mọi ticket khi kết nối kết thúc.
 
 ## Replay hoạt động thế nào
 

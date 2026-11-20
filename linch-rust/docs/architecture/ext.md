@@ -264,7 +264,8 @@ drives a `WorkflowSession` (`crates/linch-ext/src/workflow/engine.rs`):
   them; the RPC server sets it for a tenant to `MAX_CALL_KEYS` (10,000) or
   `max_records` if larger, and `None` is no cap. A step begun with
   `step_begin` holds nothing in the context: the host keeps its ticket, and
-  the RPC server caps the tickets it holds (`MAX_PENDING_STEPS`).
+  the RPC server caps the tickets it holds for a tenant at the same
+  number as `max_call_keys`, and not at all on a local connection.
 - `LiveGate` (`context.rs:24`) is asked before each call that would run
   live, never for a replay; the server counts calls in flight and takes the
   tenant's run place there.

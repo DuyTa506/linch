@@ -15,17 +15,16 @@ use serde::{Deserialize, Serialize};
 /// ids of the runs the workflow's agent calls make.
 pub const MAX_WORKFLOW_ID_BYTES: usize = 256;
 
-/// Most steps one driven workflow may have begun with `workflow.step.begin`
-/// and not completed or abandoned: past it `workflow.step.begin` is refused
-/// (`-32005`, `kind: pending_steps`). A client that gives a ticket back
-/// with `workflow.step.abandon` when its function fails never reaches it.
-pub const MAX_PENDING_STEPS: usize = 1024;
-
 /// Fewest distinct call keys a tenant's workflow may keep counters for in
 /// one drive, whatever its `max_records` (a larger `max_records` raises it
 /// to that): a call that failed or suspended journals nothing but keeps its
 /// key, which is a few hundred bytes. Past it a call with a new key is
 /// refused (`-32005`, `kind: call_keys`); replays are never refused.
+///
+/// The same number bounds the steps a tenant's workflow has begun with
+/// `workflow.step.begin` and not completed or abandoned, which the server
+/// keeps a ticket for: past it `workflow.step.begin` is refused (`-32005`,
+/// `kind: pending_steps`). A local connection has neither bound.
 pub const MAX_CALL_KEYS: usize = 10_000;
 
 /// A spending cap shared by every agent call of one workflow.

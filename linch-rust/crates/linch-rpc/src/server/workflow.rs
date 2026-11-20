@@ -33,12 +33,12 @@ use crate::access::{Tenant, WorkflowCaps};
 use crate::error::{ErrorObject, chain, code, invalid_params};
 use crate::message::Notification;
 use crate::protocol::{
-    MAX_CALL_KEYS, MAX_PENDING_STEPS, MAX_WORKFLOW_ID_BYTES, WorkflowAgentParams,
-    WorkflowAgentResult, WorkflowBudget, WorkflowCancelParams, WorkflowCancelled,
-    WorkflowEventParams, WorkflowFinishParams, WorkflowFinished, WorkflowInterruptParams,
-    WorkflowInterrupted, WorkflowLimits, WorkflowStartParams, WorkflowStarted, WorkflowStatus,
-    WorkflowStatusParams, WorkflowStepAbandonParams, WorkflowStepAbandoned,
-    WorkflowStepBeginParams, WorkflowStepBegun, WorkflowStepCompleteParams, method,
+    MAX_CALL_KEYS, MAX_WORKFLOW_ID_BYTES, WorkflowAgentParams, WorkflowAgentResult, WorkflowBudget,
+    WorkflowCancelParams, WorkflowCancelled, WorkflowEventParams, WorkflowFinishParams,
+    WorkflowFinished, WorkflowInterruptParams, WorkflowInterrupted, WorkflowLimits,
+    WorkflowStartParams, WorkflowStarted, WorkflowStatus, WorkflowStatusParams,
+    WorkflowStepAbandonParams, WorkflowStepAbandoned, WorkflowStepBeginParams, WorkflowStepBegun,
+    WorkflowStepCompleteParams, method,
 };
 
 /// The journal an agent's workflows use: its Postgres database (migrated
@@ -58,6 +58,8 @@ pub(super) struct Driven {
     next_call: AtomicU64,
     /// Steps begun and not completed.
     tickets: Mutex<HashMap<String, StepTicket>>,
+    /// Most of them a tenant's workflow holds; `None` on a local connection.
+    max_pending: Option<usize>,
     next_ticket: AtomicU64,
     /// Held by each call in flight, so a finish waits for them.
     inflight: TaskTracker,
@@ -194,6 +196,7 @@ impl Server {
             calls: Mutex::default(),
             next_call: AtomicU64::new(0),
             tickets: Mutex::default(),
+            max_pending: options.max_call_keys,
             next_ticket: AtomicU64::new(0),
             inflight: TaskTracker::new(),
             _place: place,
@@ -277,10 +280,10 @@ impl Server {
             },
             StepSlot::Run(ticket) => {
                 let mut tickets = lock(&driven.tickets);
-                if tickets.len() >= MAX_PENDING_STEPS {
+                if let Some(max) = driven.max_pending.filter(|max| tickets.len() >= *max) {
                     return Err(self.workflow_error(&WorkflowError::LimitExceeded {
                         what: "pending steps",
-                        max: MAX_PENDING_STEPS as u64,
+                        max: max as u64,
                     }));
                 }
                 let id = driven.next_ticket.fetch_add(1, Ordering::Relaxed) + 1;

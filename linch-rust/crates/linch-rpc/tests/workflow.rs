@@ -1097,23 +1097,24 @@ async fn a_given_back_ticket_cannot_be_completed_and_giving_it_back_twice_is_har
     .await;
 }
 
-/// A client that never gives tickets back cannot pin memory with them
-/// however large `max_records` is: a workflow holds at most
-/// `MAX_PENDING_STEPS` begun and unfinished steps.
+/// A client that never gives tickets back cannot pin memory with them: a
+/// tenant's workflow holds at most `MAX_CALL_KEYS` begun and unfinished
+/// steps (`max_records` is below it here). The steps share a name, so
+/// it is the tickets, not the call keys, that reach the bound.
 #[tokio::test]
-async fn a_workflow_holds_a_bounded_number_of_pending_steps() {
+async fn a_tenants_workflow_holds_a_bounded_number_of_pending_steps() {
     within(async {
-        let (mut rpc, _) = capped_tenant(1_000_000).await;
+        let (mut rpc, _) = capped_tenant(100).await;
         let mut tickets = Vec::new();
-        for number in 0..linch_rpc::protocol::MAX_PENDING_STEPS {
+        for number in 0..linch_rpc::protocol::MAX_CALL_KEYS {
             if number % 256 == 0 {
                 rpc.drain_notifications().await;
             }
-            let params = json!({"run_id": "w", "name": format!("s{number}")});
+            let params = json!({"run_id": "w", "name": "same"});
             let begun = rpc.call(method::WORKFLOW_STEP_BEGIN, params).await.unwrap();
             tickets.push(begun["ticket"].clone());
         }
-        let params = json!({"run_id": "w", "name": "one-more"});
+        let params = json!({"run_id": "w", "name": "same"});
         let (kind, data) = code_of_call(rpc.call(method::WORKFLOW_STEP_BEGIN, params).await);
         assert_eq!(
             (kind, data["kind"].clone()),
@@ -1123,10 +1124,61 @@ async fn a_workflow_holds_a_bounded_number_of_pending_steps() {
         rpc.call(method::WORKFLOW_STEP_ABANDON, abandon)
             .await
             .unwrap();
-        let params = json!({"run_id": "w", "name": "one-more"});
+        let params = json!({"run_id": "w", "name": "same"});
         rpc.call(method::WORKFLOW_STEP_BEGIN, params).await.unwrap();
     })
     .await;
+}
+
+/// Begin 1100 steps, each with its own name, before the first completes
+/// (what a `gather` of 1100 slow steps does), then complete them all: no
+/// step failed and none is refused.
+async fn fan_out_of_steps(mut rpc: Rpc, agent: String) {
+    within(async {
+        let params = json!({"agent": agent, "run_id": "w"});
+        rpc.call(method::WORKFLOW_START, params).await.unwrap();
+        let mut tickets = Vec::new();
+        for number in 0..1100 {
+            if number % 256 == 0 {
+                rpc.drain_notifications().await;
+            }
+            let params = json!({"run_id": "w", "name": format!("s{number}")});
+            let begun = rpc.call(method::WORKFLOW_STEP_BEGIN, params).await;
+            let begun = begun.unwrap_or_else(|error| panic!("step {number} refused: {error:?}"));
+            tickets.push(begun["ticket"].clone());
+        }
+        for (number, ticket) in tickets.into_iter().enumerate() {
+            if number % 256 == 0 {
+                rpc.drain_notifications().await;
+            }
+            let params = json!({"run_id": "w", "ticket": ticket, "value": 1});
+            rpc.call(method::WORKFLOW_STEP_COMPLETE, params)
+                .await
+                .unwrap();
+        }
+    })
+    .await;
+}
+
+/// A local connection has no caps: steps in flight are not refused.
+#[tokio::test]
+async fn a_local_fan_out_of_steps_in_flight_is_not_refused() {
+    let rpc = Rpc::new();
+    let agent = rpc.open(scripted(vec![], None, "")).await;
+    fan_out_of_steps(rpc, agent).await;
+}
+
+/// A tenant whose `max_records` (10,000 by default) has room for them.
+#[tokio::test]
+async fn a_tenants_fan_out_of_steps_in_flight_within_max_records_is_not_refused() {
+    let allow = Allowlists::new()
+        .scripted_provider(true)
+        .workflow(Some(WorkflowCaps::default()));
+    let rpc = Rpc::remote(tenant("acme", allow));
+    let mut config = scripted(vec![], None, "");
+    config["namespace"] = json!("acme");
+    let agent = rpc.open(config).await;
+    fan_out_of_steps(rpc, agent).await;
 }
 
 /// An agent call that fails journals nothing and a suspended interrupt

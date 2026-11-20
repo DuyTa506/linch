@@ -105,9 +105,12 @@ connection.
 A step whose function raised gives its ticket back: `wf.step` sends
 `workflow.step.abandon` before it re-raises, so a workflow that catches
 failed steps (to fall back, or in a `settled` fan-out) never runs out of
-places. A client that never gives tickets back (one that predates the call)
-is held to 1024 pending steps per workflow (`-32005`, `kind: pending_steps`),
-not to `max_records`; the server drops every ticket when the connection ends.
+places. On a tenant connection a workflow also holds at most 10,000 pending steps
+(the same number as the call keys above, or `max_records` if larger; `-32005`,
+`kind: pending_steps`), not counted against `max_records`, so a client that
+never gives tickets back (one that predates the call) cannot pin memory; a
+local connection has no such cap, and a fan-out of any width may be in flight.
+The server drops every ticket when the connection ends.
 
 ## How replay works
 
