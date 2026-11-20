@@ -414,7 +414,9 @@ pub enum ProviderConfig {
         #[serde(serialize_with = "redact::url")]
         base_url: String,
         /// The context window of every model; absent: the server is asked when the agent opens
-        /// (`n_ctx` on `/props`), else 128000.
+        /// (`n_ctx` on `{base_url}/props`, and `{base_url}/v1/props` for a base without `/v1`),
+        /// else 128000. A stock llama.cpp serves `/props` at its root only, so behind a `/v1`
+        /// base the window is 128000 unless this is set or `{base_url}/props` is served.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_window: Option<u64>,
         /// Extra body fields, headers and a timeout for every request.

@@ -66,7 +66,10 @@ pub struct ServerOptions {
     /// The context window of every model, which skips the probe. `None`
     /// asks the server once in [`linch_core::Provider::prepare`] (vLLM and
     /// SGLang: `max_model_len` on `/v1/models`; llama.cpp: `n_ctx` on
-    /// `/props`), else 128000.
+    /// `{base_url}/props`, and `{base_url}/v1/props` for a base without `/v1`),
+    /// else 128000. A stock llama.cpp serves `/props` at its root only, so
+    /// behind a `/v1` base the window is 128000 unless this is set or
+    /// `{base_url}/props` is served.
     pub context_window: Option<u64>,
     /// Extra body fields, headers and a timeout for every request.
     pub request: crate::RequestOptions,
