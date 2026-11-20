@@ -80,18 +80,28 @@ impl McpTransport {
     }
 }
 
-/// `url` as `Debug` shows it: the user name, password and query replaced,
-/// since a token often sits in them. A string that is not a URL is replaced
-/// whole. The facade's `redact::url` does the same for an `AgentConfig`
-/// (`linch` depends on this crate, so the small function is repeated here).
+/// `url` as `Debug` shows it: the user name, password and query replaced and
+/// the fragment dropped, since a token often sits in them. A string that is
+/// not a URL, or has no host (`user:token@host:8443/mcp` parses as scheme
+/// `user`), is replaced whole. The facade's `redact::redact_url` does the
+/// same for an `AgentConfig` (`linch` depends on this crate, so the small
+/// function is repeated here).
 fn redacted_url(url: &str) -> String {
     const REDACTED: &str = "redacted";
     let Ok(mut parsed) = reqwest::Url::parse(url) else {
         return "[redacted]".to_owned();
     };
-    if parsed.username().is_empty() && parsed.password().is_none() && parsed.query().is_none() {
+    if parsed.cannot_be_a_base() || parsed.host_str().is_none() {
+        return "[redacted]".to_owned();
+    }
+    if parsed.username().is_empty()
+        && parsed.password().is_none()
+        && parsed.query().is_none()
+        && parsed.fragment().is_none()
+    {
         return url.to_owned();
     }
+    parsed.set_fragment(None);
     let user = parsed.username().is_empty() || parsed.set_username(REDACTED).is_ok();
     let password = parsed.password().is_none() || parsed.set_password(Some(REDACTED)).is_ok();
     if !(user && password) {
@@ -104,7 +114,7 @@ fn redacted_url(url: &str) -> String {
 }
 
 /// Environment and header values are left out: they often hold secrets. A
-/// URL's user name, password and query are replaced.
+/// URL's user name, password and query are replaced and its fragment dropped.
 impl fmt::Debug for McpTransport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -296,6 +306,42 @@ mod tests {
         assert!(format!("{plain:?}").contains("http://127.0.0.1:8000/mcp"));
         let not_a_url = McpTransport::http("not a url?tok-query");
         assert!(!format!("{not_a_url:?}").contains("tok-query"));
+    }
+
+    /// Where a token can sit in a URL that `Debug` prints: the query, the
+    /// userinfo, escapes, the fragment, and a URL written without its
+    /// scheme (it parses as scheme `user`, with no host).
+    #[test]
+    fn debug_of_a_url_matrix() {
+        let mut leaks = Vec::new();
+        for url in [
+            "https://mcp.internal/mcp?tok-secret",
+            "https://tok-secret@mcp.internal/mcp",
+            "https://user:tok-secret@[::1]:8443/mcp",
+            "https://u:tok%2Dsecret@mcp.internal/mcp?k=tok%2Dsecret",
+            "ws://u:tok-secret@mcp.internal/mcp",
+            "unix://u:tok-secret@host/mcp",
+            "HTTPS://U:tok-secret@MCP.internal/mcp",
+            " https://u:tok-secret@mcp.internal/mcp",
+            "https://mcp.internal/mcp#access_token=tok-secret",
+            "user:tok-secret@mcp.internal:8443/mcp",
+            "mcp.internal:8443/mcp?key=tok-secret",
+            "//u:tok-secret@mcp.internal/mcp",
+        ] {
+            let shown = format!("{:?}", McpTransport::http(url));
+            if shown.contains("tok-secret") || shown.contains("tok%2Dsecret") {
+                leaks.push(shown);
+            }
+        }
+        for url in [
+            "http://127.0.0.1:8000/mcp",
+            "http://[::1]:8000/mcp/",
+            "http://GW.internal:80/a%20b",
+        ] {
+            let shown = format!("{:?}", McpTransport::http(url));
+            assert!(shown.contains(url), "{url}: {shown}");
+        }
+        assert!(leaks.is_empty(), "{leaks:#?}");
     }
 
     #[test]

@@ -52,16 +52,25 @@ pub(super) fn url_option<S: Serializer>(
     }
 }
 
-/// `url` with its user name, password and query replaced; the scheme,
-/// host, port and path stay. A URL without any of the three is returned as
-/// given, and one that does not parse is replaced whole.
+/// `url` with its user name, password and query replaced and its fragment
+/// dropped; the scheme, host, port and path stay. A URL without any of the
+/// four is returned as given. One that does not parse, or has no host
+/// (`user:token@host:8443/v1` parses as scheme `user`), is replaced whole.
 pub(super) fn redact_url(url: &str) -> String {
     let Ok(mut parsed) = Url::parse(url) else {
         return REDACTED.into();
     };
-    if parsed.username().is_empty() && parsed.password().is_none() && parsed.query().is_none() {
+    if parsed.cannot_be_a_base() || parsed.host_str().is_none() {
+        return REDACTED.into();
+    }
+    if parsed.username().is_empty()
+        && parsed.password().is_none()
+        && parsed.query().is_none()
+        && parsed.fragment().is_none()
+    {
         return url.to_owned();
     }
+    parsed.set_fragment(None);
     let user = parsed.username().is_empty() || parsed.set_username(REDACTED_IN_URL).is_ok();
     let password =
         parsed.password().is_none() || parsed.set_password(Some(REDACTED_IN_URL)).is_ok();

@@ -218,9 +218,10 @@ What one server can make the client hold or wait for
   (`connector.rs:27-29`, `connector.rs:155-162`).
 - **Debug output.** `McpTransport`'s `Debug` prints environment and header
   names, never their values (`config.rs:87-125`), and shows an HTTP URL with
-  its user name, password and query replaced by `redacted` (a string that is
-  not a URL is shown as `[redacted]`), so logging a config does not leak a
-  token.
+  its user name, password and query replaced by `redacted` and its fragment
+  dropped (a string that is not a URL, or has no host, such as
+  `user:token@host:8443/mcp`, which parses as scheme `user`, is shown as
+  `[redacted]`), so logging a config does not leak a token.
 - **Errors.** reqwest names the URL in the text of a failed request, and the
   userinfo and query of that URL often hold a token. The HTTP transport wraps
   the client (`connector.rs`, `QuietClient`) so every error it raises leaves the

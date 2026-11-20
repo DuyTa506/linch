@@ -47,8 +47,8 @@ pub struct McpConfig {
 ///
 /// `Debug` and serializing show environment and header names but not their
 /// values, which often hold secrets, nor the stdio arguments or a URL's
-/// user name, password and query: each is written as `[redacted]` (inside
-/// a URL, `redacted`).
+/// user name, password, query and fragment: each is written as `[redacted]`
+/// (inside a URL, `redacted`; the fragment is dropped).
 /// [`AgentConfig::to_value_with_secrets`](super::AgentConfig::to_value_with_secrets)
 /// keeps them.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -256,8 +256,8 @@ fn is_true(value: &bool) -> bool {
 /// Each live provider reads its key from the process environment when the
 /// agent opens; a config never carries a key. `base_url` overrides the
 /// provider's public endpoint. `Debug` and serializing write a `base_url`'s
-/// user name, password and query as `redacted`, as for an MCP URL;
-/// [`AgentConfig::to_value_with_secrets`] keeps them.
+/// user name, password and query as `redacted` and drop its fragment, as for
+/// an MCP URL; [`AgentConfig::to_value_with_secrets`] keeps them.
 ///
 /// | `id` | Key variable | Default endpoint |
 /// |---|---|---|

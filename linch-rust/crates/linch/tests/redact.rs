@@ -191,3 +191,60 @@ fn a_provider_base_url_without_secrets_is_written_as_given() {
         assert_eq!(shown["provider"]["base_url"], url);
     }
 }
+
+/// Where a token can sit in a `base_url` that is serialized or printed: the
+/// query, the userinfo, escapes, the fragment, and a URL written without its
+/// scheme (it parses as scheme `user`, with no host). The wire form keeps it.
+#[test]
+fn a_base_url_matrix_hides_the_token() {
+    let mut leaks = Vec::new();
+    for url in [
+        "https://gw.internal/v1?tok-secret",
+        "https://tok-secret@gw.internal/v1",
+        "https://user:tok-secret@[::1]:8443/v1",
+        "https://u:tok%2Dsecret@gw.internal/v1?k=tok%2Dsecret",
+        "ws://u:tok-secret@gw.internal/v1",
+        " https://u:tok-secret@gw.internal/v1",
+        "https://gw.internal/v1#access_token=tok-secret",
+        "user:tok-secret@gw.internal:8443/v1",
+        "gw.internal:8443/v1?key=tok-secret",
+        "//u:tok-secret@gw.internal/v1",
+    ] {
+        let config: AgentConfig = serde_json::from_value(json!({
+            "namespace": "t",
+            "spec": {"model": "m"},
+            "provider": {"id": "vllm", "base_url": url},
+        }))
+        .unwrap();
+        let shown = serde_json::to_value(&config).unwrap()["provider"]["base_url"].clone();
+        let debug = format!("{:?}", config.provider);
+        let wire = config.to_value_with_secrets().unwrap();
+        assert_eq!(wire["provider"]["base_url"], url, "the wire form keeps the URL");
+        for text in [shown.to_string(), debug] {
+            if text.contains("tok-secret") || text.contains("tok%2Dsecret") {
+                leaks.push(text);
+            }
+        }
+    }
+    assert!(leaks.is_empty(), "{leaks:#?}");
+}
+
+#[test]
+fn an_mcp_url_with_a_fragment_or_no_scheme_is_hidden_too() {
+    for url in [
+        "https://mcp.internal/mcp#access_token=tok-secret",
+        "user:tok-secret@mcp.internal:8443/mcp",
+    ] {
+        let config: AgentConfig = serde_json::from_value(json!({
+            "namespace": "t",
+            "spec": {"model": "m"},
+            "provider": {"id": "deepseek"},
+            "mcp_servers": [{"name": "web", "transport": {"type": "http", "url": url}}],
+        }))
+        .unwrap();
+        let text = format!("{} {config:?}", serde_json::to_string(&config).unwrap());
+        assert!(!text.contains("tok-secret"), "{text}");
+        let wire = config.to_value_with_secrets().unwrap();
+        assert_eq!(wire["mcp_servers"][0]["transport"]["url"], url);
+    }
+}

@@ -211,8 +211,9 @@ Những gì một server có thể khiến client giữ hoặc chờ
   (`connector.rs:27-29`, `connector.rs:155-162`).
 - **Đầu ra debug.** `Debug` của `McpTransport` in tên của biến môi trường và header,
   không bao giờ in giá trị của chúng (`config.rs:87-125`), và hiện URL HTTP với
-  user name, mật khẩu và query được thay bằng `redacted` (một chuỗi không phải
-  URL hiện là `[redacted]`), nên ghi log một cấu hình không làm lộ token.
+  user name, mật khẩu và query được thay bằng `redacted` và bỏ fragment (một chuỗi
+  không phải URL, hoặc không có host, như `user:token@host:8443/mcp` vốn được parse
+  thành scheme `user`, hiện là `[redacted]`), nên ghi log một cấu hình không làm lộ token.
 - **Lỗi.** reqwest ghi URL trong văn bản của một yêu cầu thất bại, và user name, mật khẩu
   hay query của URL đó thường chứa token. Transport HTTP bọc client
   (`connector.rs`, `QuietClient`) để mọi lỗi nó phát ra đều bỏ URL
