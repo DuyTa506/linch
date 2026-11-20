@@ -109,3 +109,64 @@ async fn head_limit_and_context_lines_are_bounded() {
     let query = fs.last();
     assert_eq!((query.limit, query.before, query.after), (3, 2, 0));
 }
+
+/// Peak resident memory of this process so far, in bytes.
+fn peak_rss() -> u64 {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap();
+    let line = status
+        .lines()
+        .find(|line| line.starts_with("VmHWM:"))
+        .unwrap();
+    let kb: u64 = line.split_whitespace().nth(1).unwrap().parse().unwrap();
+    kb * 1024
+}
+
+#[tokio::test]
+async fn a_pattern_that_compiles_too_large_is_an_invalid_query() {
+    let ws = Workspace::new();
+    ws.put("a.txt", "x\n");
+    let tool = Grep::new(ws.fs.clone());
+    let result = call(&tool, json!({"pattern": r"\w{1000}"})).await;
+    let error = result.expect_err("the pattern is refused");
+    assert_eq!(error.code.as_deref(), Some("invalid_query"));
+}
+
+/// A 2 MiB file and a 16-byte pattern, both the model's, must not cost the
+/// server hundreds of megabytes: the matcher's DFA cache is bounded.
+#[tokio::test]
+async fn one_grep_call_cannot_hold_hundreds_of_megabytes() {
+    let ws = Workspace::new();
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut bits = String::with_capacity(2 * 1024 * 1024 + 32_000);
+    while bits.len() < 2 * 1024 * 1024 {
+        for _ in 0..100 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            bits.push(if seed & 1 == 0 { '0' } else { '1' });
+        }
+        bits.push('\n');
+    }
+    ws.put("bits.txt", &bits);
+    let tool = Grep::new(ws.fs.clone());
+    let before = peak_rss();
+    let query = json!({"pattern": "(0|1)*1(0|1){22}", "output_mode": "count"});
+    call(&tool, query).await.unwrap();
+    let grown = peak_rss().saturating_sub(before);
+    assert!(
+        grown < 128 * 1024 * 1024,
+        "one Grep over a 2 MiB file raised the peak memory by {} MiB",
+        grown / (1024 * 1024)
+    );
+}
+
+#[tokio::test]
+async fn a_heavy_but_legitimate_pattern_still_searches() {
+    let ws = Workspace::new();
+    ws.put("a.txt", "fn main() {}\nlet x = 12345;\n");
+    let tool = Grep::new(ws.fs.clone());
+    let word = json!({"pattern": r"\b\w{1,40}\s*=\s*\d+;", "output_mode": "content"});
+    assert_eq!(text(call(&tool, word).await), "a.txt:let x = 12345;");
+    let unicode = json!({"pattern": r"\p{L}{2,100}\s\p{L}+", "output_mode": "count"});
+    assert_eq!(text(call(&tool, unicode).await), "a.txt:2");
+}

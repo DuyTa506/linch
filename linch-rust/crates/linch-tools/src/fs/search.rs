@@ -20,6 +20,14 @@ use crate::fs::LocalFs;
 /// Longest line text kept in content output, in bytes.
 const MAX_LINE: usize = 500;
 
+/// Largest compiled pattern, in bytes. A pattern that compiles larger is an
+/// invalid query (the library default is 100 MiB).
+const REGEX_SIZE_LIMIT: usize = 10 << 20;
+
+/// Largest lazy DFA cache of one matcher, in bytes (the library default is
+/// 1000 MiB). A pattern that needs more falls back to a slower engine.
+const REGEX_DFA_CACHE_LIMIT: usize = 32 << 20;
+
 /// Search file contents under the query's path.
 pub(super) fn grep(
     fs: &LocalFs,
@@ -226,6 +234,9 @@ fn matcher(query: &GrepQuery) -> Result<RegexMatcher, FsError> {
     } else {
         builder.line_terminator(Some(b'\n'));
     }
+    builder
+        .size_limit(REGEX_SIZE_LIMIT)
+        .dfa_size_limit(REGEX_DFA_CACHE_LIMIT);
     builder.build(&query.pattern).map_err(invalid)
 }
 

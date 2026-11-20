@@ -250,7 +250,10 @@ nó cho `Bash`; xem [Execution backend](#execution-backend)), dùng chung một
 
 Grep và Glob bỏ qua các tệp bị ignore và không đi theo symlink; Grep cũng bỏ qua
 các tệp ẩn và nhị phân, và Glob chỉ liệt kê tệp ẩn khi mẫu
-nêu tên một đoạn bắt đầu bằng dấu chấm (`crates/linch-tools/src/fs.rs:232-248`).
+nêu tên một đoạn bắt đầu bằng dấu chấm (`crates/linch-tools/src/fs.rs:232-248`). Một mẫu Grep biên dịch ra tối đa
+10 MiB (`REGEX_SIZE_LIMIT`; mẫu lớn hơn là `invalid_query`) và bộ nhớ đệm DFA lười của một
+matcher chứa tối đa 32 MiB (`REGEX_DFA_CACHE_LIMIT`; mẫu cần nhiều hơn chạy trên engine
+chậm hơn), nên bộ nhớ của một lần gọi bị chặn, ngoài 10 MiB mà searcher giữ của một tệp.
 
 ### Đọc trước khi ghi
 

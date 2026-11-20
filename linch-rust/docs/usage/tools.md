@@ -772,7 +772,7 @@ their own output:
 | Tool | Bound |
 |---|---|
 | `Bash`, `BashOutput` | the first 4000 and the last 26000 bytes of each stream |
-| `Grep` | 250 entries by default, 30000 bytes of output |
+| `Grep` | 250 entries by default, 30000 bytes of output; a pattern that compiles past 10 MiB is an `invalid_query` |
 | `Glob` | 1000 paths |
 | An MCP tool | 30000 bytes of result text |
 | `memory_recall` | 8 KiB of recalled context per request |

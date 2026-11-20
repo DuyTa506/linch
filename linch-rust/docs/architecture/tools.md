@@ -253,7 +253,11 @@ shell for `Bash`; see [Execution backends](#execution-backends)), sharing one
 
 Grep and Glob skip ignored files and do not follow symlinks; Grep also skips
 hidden and binary files, and Glob lists hidden files only when the pattern
-names a dot segment (`crates/linch-tools/src/fs.rs:232-248`).
+names a dot segment (`crates/linch-tools/src/fs.rs:232-248`). A Grep pattern
+may compile to at most 10 MiB (`REGEX_SIZE_LIMIT`; a larger one is an
+`invalid_query`) and one matcher's lazy DFA cache holds at most 32 MiB
+(`REGEX_DFA_CACHE_LIMIT`; a pattern that needs more runs on a slower engine),
+so one call's memory is bounded besides the 10 MiB the searcher holds of a file.
 
 ### Read before write
 

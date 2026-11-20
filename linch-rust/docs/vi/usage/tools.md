@@ -774,7 +774,7 @@ thứ compaction và context window phải trả giá. Một số tool tự gi�
 | Tool | Giới hạn |
 |---|---|
 | `Bash`, `BashOutput` | 4000 byte đầu và 26000 byte cuối của mỗi luồng |
-| `Grep` | mặc định 250 mục, đầu ra tối đa 30000 byte |
+| `Grep` | mặc định 250 mục, đầu ra tối đa 30000 byte; mẫu biên dịch quá 10 MiB là `invalid_query` |
 | `Glob` | 1000 đường dẫn |
 | Một tool MCP | 30000 byte văn bản kết quả |
 | `memory_recall` | 8 KiB ngữ cảnh được gợi lại mỗi request |
