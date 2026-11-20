@@ -77,6 +77,7 @@ pub(super) fn grep(
             .select(name)
             .build()
             .map_err(invalid)?;
+        rules.types(types.clone());
         walk.types(types);
     }
     let mut hits = GrepHits::default();

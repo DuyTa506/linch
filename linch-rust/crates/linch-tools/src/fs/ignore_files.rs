@@ -8,7 +8,8 @@
 //! any other is skipped without a word), with the precedence of the crate's
 //! walk: an override glob beats every ignore file; else the nearest `.ignore`
 //! rule that matches wins, then the nearest `.gitignore` rule; a name no rule
-//! matches is dropped only if it is hidden and hidden names are not wanted.
+//! matches is dropped only if it is hidden, hidden names are not wanted and
+//! no file type the search is limited to claims it.
 //! The directories from the workspace root down to the entry are consulted,
 //! also those above the searched path. `.git/info/exclude` and the host's
 //! global ignore file are not read.
@@ -21,6 +22,7 @@ use std::time::Instant;
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::overrides::Override;
+use ignore::types::Types;
 use ignore::{DirEntry, WalkBuilder};
 
 use super::FsError;
@@ -41,6 +43,9 @@ struct State {
     opener: Opener,
     root: PathBuf,
     overrides: Override,
+    /// The file types the search is limited to: a name of such a type is
+    /// exempt from the hidden filter, as in the crate's walk.
+    types: Option<Types>,
     hide_hidden: bool,
     /// When the search's time limit passes; every entry after it is dropped.
     deadline: Option<Instant>,
@@ -67,6 +72,7 @@ impl IgnoreFiles {
             opener,
             root: root.to_owned(),
             overrides,
+            types: None,
             hide_hidden,
             deadline,
             expired: false,
@@ -95,6 +101,11 @@ impl IgnoreFiles {
             Some(error) => Err(error),
             None => Ok(()),
         }
+    }
+
+    /// Limit the search to `types`.
+    pub(super) fn types(&self, types: Types) {
+        self.state().types = Some(types);
     }
 
     /// Whether the time limit passed while the walk was being filtered: the
@@ -136,7 +147,11 @@ impl State {
             .or_else(|| self.verdict(path, is_dir, |dir| dir.git.as_ref()));
         match verdict {
             Some(ignored) => !ignored,
-            None => !(self.hide_hidden && path.file_name().is_some_and(is_hidden)),
+            None => {
+                let typed = (self.types.as_ref())
+                    .is_some_and(|types| types.matched(path, is_dir).is_whitelist());
+                typed || !(self.hide_hidden && path.file_name().is_some_and(is_hidden))
+            }
         }
     }
 

@@ -27,11 +27,11 @@ fn needle(path: Option<&str>) -> GrepQuery {
 }
 
 async fn grepped(ws: &Workspace, path: Option<&str>) -> Vec<String> {
-    let hits = ws
-        .fs
-        .grep(&needle(path), &CancellationToken::new())
-        .await
-        .unwrap();
+    grepped_with(ws, needle(path)).await
+}
+
+async fn grepped_with(ws: &Workspace, query: GrepQuery) -> Vec<String> {
+    let hits = ws.fs.grep(&query, &CancellationToken::new()).await.unwrap();
     assert_eq!(hits.left_out, 0);
     hits.files.into_iter().map(|file| file.path).collect()
 }
@@ -117,4 +117,43 @@ async fn a_search_does_not_read_a_host_file_through_a_symlinked_ignore_file() {
             assert_eq!(grepped(&ws, None).await, all, "{dir}{name}");
         }
     }
+}
+
+fn rust_files(ws: &Workspace) {
+    for name in [".top.rs", "src/.plain.rs", "src/m.rs", "src/n.txt"] {
+        ws.put(name, "needle\n");
+    }
+}
+
+/// A file type whitelists a name, which exempts a hidden file of that type
+/// from the hidden filter; an ignore rule still beats the type.
+#[tokio::test]
+async fn a_file_type_finds_the_hidden_files_of_that_type() {
+    let ws = Workspace::new();
+    rust_files(&ws);
+    let query = GrepQuery {
+        file_type: Some("rust".to_owned()),
+        ..needle(None)
+    };
+    let all = [".top.rs", "src/.plain.rs", "src/m.rs"];
+    assert_eq!(grepped_with(&ws, query.clone()).await, all);
+    ws.put(".gitignore", "m.rs\n.plain.rs\n");
+    assert_eq!(grepped_with(&ws, query).await, [".top.rs"]);
+    // Without the type, the hidden files stay hidden.
+    assert_eq!(grepped(&ws, None).await, ["src/n.txt"]);
+}
+
+/// A `--glob` pattern beats the hidden filter too.
+#[tokio::test]
+async fn a_grep_glob_finds_the_hidden_files_it_matches() {
+    let ws = Workspace::new();
+    rust_files(&ws);
+    let query = GrepQuery {
+        glob: Some("*.rs".to_owned()),
+        ..needle(None)
+    };
+    assert_eq!(
+        grepped_with(&ws, query).await,
+        [".top.rs", "src/.plain.rs", "src/m.rs"]
+    );
 }
