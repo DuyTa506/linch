@@ -287,6 +287,18 @@ async fn cancel_mid_stream_ends_with_cancelled() {
 }
 
 #[tokio::test]
+async fn an_unknown_finish_reason_is_cut_like_an_http_error_body() {
+    let long = "r".repeat(256 * 1024);
+    let sse = frames(&[candidate(json!([{"text": "hi"}]), Some(&long))]);
+    let err = last_error(run(&sse, 4096).await);
+    assert!(
+        err.to_string().len() <= 1024,
+        "{} bytes",
+        err.to_string().len()
+    );
+}
+
+#[tokio::test]
 async fn transport_and_stream_errors_are_redacted() {
     let bytes = stream::iter([Err::<Vec<u8>, _>("reset; x-goog-api-key: AIza-test")]);
     let translator = Translator::new("m".into(), key());

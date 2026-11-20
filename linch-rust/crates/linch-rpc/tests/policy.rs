@@ -283,12 +283,14 @@ async fn a_required_policy_the_agent_cannot_meet_refuses_the_open() {
     assert!(!message.contains("update") && !message.contains("lookup"));
     assert_eq!(code_of(error), code::BUILD_INVALID);
 
-    // A check of the operator's that cannot compile is not echoed either,
-    // and the tenant's own is refused with its reason.
-    let broken: linch::ReliabilityPolicy = serde_json::from_value(json!({"gates": [
-        {"name": "g", "check": {"type": "matches", "pattern": "secret-sauce("}}]}))
+    // A tool of the operator's gate that the agent lacks is not echoed
+    // either (a check that does not compile never reaches an open: the
+    // server refuses such a required policy at start), and the tenant's own
+    // is refused with its reason.
+    let named: linch::ReliabilityPolicy = serde_json::from_value(json!({"gates": [
+        {"name": "g", "succeeded": ["secret-sauce"]}]}))
     .unwrap();
-    let remote = Rpc::remote(acme(Allowlists::new().required_policy(Some(broken))));
+    let remote = Rpc::remote(acme(Allowlists::new().required_policy(Some(named))));
     let error = remote
         .call(method::AGENT_OPEN, remote_config(vec![], None))
         .await
@@ -312,6 +314,23 @@ async fn a_required_policy_the_agent_cannot_meet_refuses_the_open() {
     .await;
     assert_eq!(found.as_deref(), Some("policy"));
 
+    // Whatever the problem, the tenant's error is the same sentence: here the
+    // tenant's own prerequisite closes a cycle with the operator's.
+    let remote = Rpc::remote(acme(Allowlists::new().required_policy(Some(operators()))));
+    let cycle = json!({"prerequisites": [{"tool": "lookup", "requires": ["update"]}]});
+    let error = (remote
+        .call(method::AGENT_OPEN, remote_config(vec![], Some(cycle)))
+        .await)
+        .unwrap_err();
+    match &error {
+        linch_rpc::ClientError::Rpc(object) => assert_eq!(
+            object.message,
+            "policy: the policy required for this tenant cannot run on this agent"
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(code_of(error), code::BUILD_INVALID);
+
     // A local connection has no tenant: its error names the tool.
     let local = Rpc::new();
     let mut open = config(
@@ -324,4 +343,22 @@ async fn a_required_policy_the_agent_cannot_meet_refuses_the_open() {
         linch_rpc::ClientError::Rpc(object) => assert!(object.message.contains("nope")),
         other => panic!("{other:?}"),
     }
+}
+
+/// A tenant under a required policy that gets its own rule wrong, with
+/// nothing of the operator's in the message, is still told what to fix.
+#[tokio::test]
+async fn a_tenants_own_policy_mistake_is_still_named() {
+    let remote = Rpc::remote(acme(Allowlists::new().required_policy(Some(operators()))));
+    let own = json!({"gates": [{"name": "mine"}]});
+    let error = (remote
+        .call(method::AGENT_OPEN, remote_config(vec![], Some(own)))
+        .await)
+        .unwrap_err();
+    let message = match &error {
+        linch_rpc::ClientError::Rpc(object) => object.message.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert!(message.contains("mine"), "{message}");
+    assert_eq!(code_of(error), code::BUILD_INVALID);
 }

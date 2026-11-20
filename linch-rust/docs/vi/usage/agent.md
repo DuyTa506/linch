@@ -299,7 +299,15 @@ Một tenant từ xa được có tối đa 16 section, mỗi section tối đa 
 64 byte) và tổng cộng 64 KiB cùng `append`, vì chúng đi kèm mọi request
 ([Server](./server.md#những-gì-admission-từ-chối-và-lý-do)). Operator có thể thêm
 section riêng của mình vào mọi agent của một tenant; chúng được gửi cùng với của
-tenant, không thể bị gỡ hay đổi tên, và `replace_defaults` để chúng lại. Thay đổi
+tenant, không thể bị gỡ hay đổi tên, và `replace_defaults` để chúng lại. Callback
+`before_provider_call` của tenant trả lời `rewrite` cũng không gỡ được chúng: server
+đặt từng section lại đúng chỗ request đã gửi có nó (system được xếp với mọi section,
+của operator lẫn của tenant, theo `order`, mỗi section kèm cờ `cacheable`), và không
+lặp lại block có cùng văn bản, nên một rewrite không đổi gì gửi đi đúng các byte system
+cũ, và request của subagent hay của model dự phòng cũng được xử lý như vậy. Phần còn
+lại của system sau rewrite là của callback, tối đa 64 KiB (hoặc phần request có ngoài
+các section của operator, nếu lớn hơn), nếu không câu trả lời bị từ chối như một
+callback thất bại. Thay đổi
 chúng làm thay đổi contract của các agent của tenant, nên các run đang chạy của
 chúng bị từ chối khi resume cho đến khi kết thúc.
 
@@ -527,7 +535,7 @@ spec = {"model": "claude-sonnet-4-6", "budget": {"max_tokens": 200_000, "max_cos
 | Trường | Mặc định | Điều khiển gì |
 |---|---|---|
 | `mode` | `default` | Quyết định khi không có rule nào khớp: `default` (lời gọi write và exec hỏi), `accept_edits` (lệnh ghi trong project root chạy; exec hỏi), `skip_dangerous` (mọi lời gọi đều chạy) |
-| `project_root` | bắt buộc khi có `permissions` | Một đường dẫn tuyệt đối (đường dẫn tương đối bị từ chối lúc mở, khác với `workspace`) mà các đường dẫn tương đối và path pattern được phân giải theo |
+| `project_root` | bắt buộc khi có `permissions` | Một đường dẫn tuyệt đối (đường dẫn tương đối bị từ chối lúc mở, khác với `workspace`) mà các path pattern được phân giải theo; một đường dẫn tương đối trong lời gọi được phân giải theo workspace, như các tool file |
 | `layers` | `[]` | Các danh sách rule có tên, từ ít cụ thể nhất đến cụ thể nhất |
 | `auto_allow` | `[]` | Tên các tool được cho phép ở mọi mode (các rule vẫn được áp dụng trước) |
 | `path_fields` | tích hợp sẵn | Trường input nào chứa đường dẫn, theo từng tool, được thêm vào bảng tích hợp sẵn |

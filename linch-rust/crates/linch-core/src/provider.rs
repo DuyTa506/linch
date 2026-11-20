@@ -18,7 +18,10 @@ mod gate;
 mod request;
 pub mod scripted;
 
-pub use assembler::{Assembler, AssistantAssembly, StreamError, assemble};
+pub use assembler::{
+    Assembler, AssistantAssembly, MAX_RESPONSE_BYTES, MAX_RESPONSE_TOOL_CALLS, StreamError,
+    assemble,
+};
 pub use capabilities::{
     ContextSource, ModelInfo, ModelList, ModelsError, OutputSchemaMode, PromptCache,
     ProviderCapabilities, Support, ThinkingCaps, ThinkingState, ToolChoiceCaps,

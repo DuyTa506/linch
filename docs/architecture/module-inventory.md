@@ -143,6 +143,7 @@ durable.
 | `permissions/engine.py` | Canonical-input permission decisions and approval callbacks. |
 | `permissions/rules.py` | `ToolRule`, `PathRule`, and `BashRule`, including role conditions. |
 | `permissions/ruleset.py` | Layered permission rule sets. |
+| `permissions/shell.py` | Shell analysis for Bash rules: word tokenizer, composite-command splitter, and the detector for syntax the rules cannot model. |
 | `permissions/principal.py` | Immutable `Principal(tenant, user, roles)` identity used by one run and its tool calls. |
 | `context/builder.py` | Async context-builder protocol, context budgets, builder chains, and ephemeral request context. |
 | `context/file_memory.py` | `FileMemoryContextBuilder`, which caches `/memories/MEMORY.md` for one run and caps its memory index at the first 200 content lines. |

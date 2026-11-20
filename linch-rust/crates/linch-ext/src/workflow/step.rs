@@ -84,7 +84,7 @@ impl WorkflowContext {
         let label = format!("step {name}");
         let content_key = step_key(name, options.key.as_ref())
             .map_err(|error| encode_error(&label, format!("its key does not encode: {error}")))?;
-        let (call_key, occurrence, cached) = self.next_occurrence(&content_key);
+        let (call_key, occurrence, cached) = self.next_occurrence(&content_key)?;
         let emit = |kind, result_text: Option<&JsonValue>| {
             let mut event = event(kind, name.to_owned(), call_key.clone(), occurrence);
             event.result_text = result_text.map(JsonValue::to_string);
@@ -159,7 +159,7 @@ impl WorkflowContext {
         let label = format!("step {name}");
         let content_key = step_key(name, key)
             .map_err(|error| encode_error(&label, format!("its key does not encode: {error}")))?;
-        let (call_key, occurrence, cached) = self.next_occurrence(&content_key);
+        let (call_key, occurrence, cached) = self.next_occurrence(&content_key)?;
         let mut event = event(
             WorkflowKind::StepReplayed,
             name.to_owned(),

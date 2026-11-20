@@ -138,7 +138,6 @@ _SUPPORTED_SHELL_COMMANDS = [
     "pytest -q > test.log",
     "pytest -q >> test.log",
     "cat < input.txt",
-    "cmd &> output.log",
     "git status | cat",
     "git diff | less",
     "ruff check . | tee ruff.log",
@@ -152,13 +151,12 @@ _SUPPORTED_SHELL_COMMANDS = [
     "cargo test --all-features 2>&1",
     "make test > make.log",
     "python script.py < input.txt > output.txt",
+    "echo ready > status.txt",
+    "sort < names.txt > sorted.txt",
     "sed -n '1,10p' README.md | cat",
     "go test ./... | tee go.log",
-    "pytest -q &>pytest.log",
     "cat input.txt 2>&1 | grep error",
-    "echo ready > status.txt",
     "tail -f app.log 2>/dev/null",
-    "sort < names.txt > sorted.txt",
     "printf '&'",
     "printf '$(literal)'",
     "printf '\\&'",
@@ -187,6 +185,8 @@ _UNPARSED_SHELL_COMMANDS = [
     "pytest -q\nrm -rf build",
     "echo $(cat secrets.txt)",
     "printf '%s' `cat token.txt`",
+    "cmd &> output.log",
+    "pytest -q &>pytest.log",
 ]
 
 

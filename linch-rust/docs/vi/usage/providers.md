@@ -30,7 +30,11 @@ server; cách mỗi adapter ánh xạ request, thinking và usage nằm ở
 
 `base_url` thay thế endpoint của provider. Mọi trường khác đều bị từ chối lúc mở
 bằng một `ProtocolError` (code -32602), nên một config không bao giờ có thể chứa
-`api_key`.
+`api_key`. Trong Rust, `Debug` và việc serialize một `AgentConfig` hiện user name, mật khẩu
+và query của `base_url` là `redacted` (`https://redacted:redacted@gw/v1?redacted`) và bỏ fragment, giống một URL MCP,
+còn `to_value_with_secrets` giữ chúng cho wire; URL không có cả bốn thì được ghi nguyên văn, còn URL không có host
+(`user:token@gw:8443/v1` được parse thành scheme `user`) được ghi là `[redacted]`.
+Hãy đặt token trong môi trường của server khi có thể.
 
 ### Cài đặt request
 
@@ -107,7 +111,7 @@ cho mọi model. Khi không có, nó là giá trị của Python Linch:
 | `openai-chat` | `gpt-5.5` và `gpt-5.4` 400000, `o1` 200000, còn lại 128000 |
 | `deepseek`, `scripted` | 128000 |
 | `vllm`, `sglang` | Được hỏi khi agent mở: `max_model_len` của model trên `GET /v1/models` (server có một model thì trả lời cho mọi tên), nếu không thì 128000 |
-| `llamacpp` | Được hỏi khi agent mở: `n_ctx` trên `GET /props`, nếu không thì 128000 |
+| `llamacpp` | Được hỏi khi agent mở: `n_ctx` trên `GET {base_url}/props`, nếu không thì 128000. Lần thăm dò ở trong `base_url` (không bao giờ hỏi đường dẫn cha của một base `/v1`), và llama.cpp gốc chỉ phục vụ `/props` ở đường dẫn gốc, nên sau một base `/v1` hãy đặt `context_window` |
 
 Server chỉ được hỏi một lần, tối đa 2 giây, với cùng key như các lời gọi của nó;
 server nào không trả lời sẽ để lại 128000 và việc mở agent vẫn tiếp tục.
@@ -515,7 +519,15 @@ context window của model (`context_length`) không bao giờ được thử l�
 ([Memory](./memory.md#when-the-prompt-does-not-fit)). Một lời gọi bị hủy kết thúc run ở
 trạng thái `aborted`. Mỗi
 adapter có timeout kết nối 30 giây và timeout đọc giữa các lần đọc (300 giây hoặc
-600 giây); không có hạn chót cho cả một lời gọi.
+600 giây); không có hạn chót cho cả một lời gọi. Hai giới hạn khác áp dụng cho
+một response dạng stream: một event giữ tối đa 16 MiB (tính từ cuối event trước,
+gồm cả một dòng không có điểm kết thúc), và một body không phải UTF-8 hợp lệ làm
+lời gọi thất bại tại byte sai đầu tiên, sau khi mọi event mà body đã hoàn tất trước
+lỗi đó được giao đi (nên kết quả không phụ thuộc vào chỗ mạng cắt chunk); cả hai kết thúc lời gọi bằng lỗi
+`stream`, loại lỗi không được thử lại (lần gọi sau sẽ gặp đúng body đó, và một run
+không retry cũng không chuyển sang model dự phòng). Văn bản lỗi mà provider gửi trong stream bị
+cắt còn 500 ký tự, giống một body lỗi HTTP, sau khi key của provider, các giá trị
+header và cache salt đã được loại khỏi nó.
 
 Hai trường của [`spec`](./agent.md#spec) quyết định việc này:
 

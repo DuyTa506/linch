@@ -30,6 +30,7 @@ use serde::de::DeserializeOwned;
 use serde_json::json;
 
 use super::peer::Peer;
+use crate::access::Tenant;
 use crate::error::{ErrorObject, invalid_params};
 use crate::protocol::{
     AfterProviderCallAnswer, BeforeProviderCallAnswer, CallbackSpec, ContextBuildAnswer,
@@ -47,16 +48,23 @@ pub(super) fn hooks(
     specs: Vec<CallbackSpec>,
     agent: &str,
     peer: &Peer,
+    tenant: Option<&Arc<Tenant>>,
 ) -> Result<Arc<Hooks>, ErrorObject> {
     let hooks = Hooks::default();
     for spec in specs {
-        register(&hooks, spec, agent, peer)
+        register(&hooks, spec, agent, peer, tenant)
             .map_err(|error| invalid_params(&format!("callbacks: {error}")))?;
     }
     Ok(Arc::new(hooks))
 }
 
-fn register(hooks: &Hooks, spec: CallbackSpec, agent: &str, peer: &Peer) -> Result<(), HookError> {
+fn register(
+    hooks: &Hooks,
+    spec: CallbackSpec,
+    agent: &str,
+    peer: &Peer,
+    tenant: Option<&Arc<Tenant>>,
+) -> Result<(), HookError> {
     let matcher = spec.matcher.map(ToolMatcher::new).transpose()?;
     let common = Common {
         agent: agent.to_owned(),
@@ -68,6 +76,7 @@ fn register(hooks: &Hooks, spec: CallbackSpec, agent: &str, peer: &Peer) -> Resu
         timeout: spec.timeout_ms.map(|ms| Duration::from_millis(ms.get())),
         fail_mode: spec.fail_mode,
         peer: peer.clone(),
+        tenant: tenant.cloned(),
     };
     match spec.point {
         HookPoint::UserPromptSubmit => add(&hooks.user_prompt_submit, common),
@@ -123,6 +132,9 @@ struct Common {
     timeout: Option<Duration>,
     fail_mode: Option<FailMode>,
     peer: Peer,
+    /// The tenant the agent belongs to, whose allowlists bound what an
+    /// answer may change; `None` on a local connection.
+    tenant: Option<Arc<Tenant>>,
 }
 
 /// A callback at point `P`, answered by the client.
@@ -168,7 +180,9 @@ impl<P: Wire> Hook<P> for RpcHook<P> {
         };
         let peer = &self.common.peer;
         let answer = peer.call(method::HOOK_CALL, params, None, None).await?;
-        P::decode(answer).map_err(|error| format!("malformed hook answer: {error}").into())
+        let answer =
+            P::decode(answer).map_err(|error| format!("malformed hook answer: {error}"))?;
+        P::confine(&self.common, request, answer).map_err(Into::into)
     }
 }
 
@@ -283,6 +297,17 @@ trait Wire: Point {
 
     /// The client's answer, as the point's response.
     fn decode(answer: JsonValue) -> Result<Self::Response, serde_json::Error>;
+
+    /// The answer as the tenant's allowlists let it stand: what it may not
+    /// change is put back, or the answer is refused. The default changes
+    /// nothing.
+    fn confine(
+        _common: &Common,
+        _request: &Self::Request,
+        answer: Self::Response,
+    ) -> Result<Self::Response, String> {
+        Ok(answer)
+    }
 }
 
 fn answer<T: DeserializeOwned>(answer: JsonValue) -> Result<T, serde_json::Error> {
@@ -420,6 +445,24 @@ impl Wire for BeforeProviderCall {
                 BeforeProviderCallResponse::Block { reason }
             }
         })
+    }
+
+    /// A tenant's rewrite keeps the operator's `system_sections` and the
+    /// system bound of `agent.open`.
+    fn confine(
+        common: &Common,
+        request: &BeforeProviderCallRequest,
+        answer: BeforeProviderCallResponse,
+    ) -> Result<BeforeProviderCallResponse, String> {
+        match (&common.tenant, answer) {
+            (Some(tenant), BeforeProviderCallResponse::Rewrite { request: rewritten }) => {
+                let confined = tenant.confine_rewrite(&request.request, *rewritten)?;
+                Ok(BeforeProviderCallResponse::Rewrite {
+                    request: Box::new(confined),
+                })
+            }
+            (_, answer) => Ok(answer),
+        }
     }
 }
 

@@ -78,11 +78,12 @@ to its handler. Params types refuse unknown fields; `OpenParams` takes
 | `provider.capabilities` | `ProviderModelParams` `{provider, model}`: a `provider` as in an agent config (`protocol.rs`) | `server/provider.rs`: `ProviderConfig::build_keyless`, `Provider::prepare`, `Provider::capabilities`; no key needed | `ProviderCapabilities` |
 | `provider.models` | `ProviderParams` `{provider}` | `server/provider.rs`: `ProviderConfig::build`, `Provider::list_models`; needs the key | `{models}`, `ModelInfo` per model |
 | `provider.model` | `ProviderModelParams` | `server/provider.rs`: `Provider::model_info` | `ModelInfo`; `-32036` when the list lacks it |
-| `eval.run` | `EvalRunParams` `{agent, cases, scorers?, include_events?}` (`protocol/monitor.rs`) | `server/monitor.rs`: `run_eval` on the agent; takes a tenant run place and marks the agent busy (`agent.close` is `-32002`) until it ends; stops with the connection | the eval result as JSON (`total`, `passed`, `pass_rate`, `total_cost_usd`, `usage`, `duration_ms`, `cases`) and `markdown`; bad cases or scorers are `-32602` |
+| `eval.run` | `EvalRunParams` `{agent, cases, scorers?, include_events?}` (`protocol/monitor.rs`) | `server/monitor.rs`: `run_eval_as` on the agent, owner the server id, at most 256 cases from a tenant; takes a tenant run place and marks the agent busy (`agent.close` is `-32002`) until it ends; stops with the connection | the eval result as JSON (`total`, `passed`, `pass_rate`, `total_cost_usd`, `usage`, `duration_ms`, `cases`) and `markdown`; bad cases or scorers are `-32602` |
 | `run.report` | `ReportParams` `{agent, run_id, timeline?}` | `server/monitor.rs`: `build_run_report` over `Agent::run_record` and `Agent::events` | `{report, markdown}`; an unknown run is `-32021` |
 | `workflow.start` | `WorkflowStartParams` `{agent, run_id, budget?, resume?, principal?}` (`protocol/workflow.rs`) | `Server::start_workflow` (`server/workflow.rs`): `admit_principal`, tenant caps, then `WorkflowSession::open_held`; `-32045` while another client drives it, `-32049` for `resume` answers when the journal holds nothing | `WorkflowStarted` `{records, resumed, previous?, limits?}` |
 | `workflow.agent` | `WorkflowAgentParams` `{run_id, prompt, name?, subagent?, label?, key?, output_schema?, fork?, timeout_ms?, retry?, branch?, call_id?}` | `workflow_agent`: `WorkflowContext::agent_with` on the branch; dropped with the connection like a run | `WorkflowAgentResult` `{text, structured?, session_id, tokens, cost_usd, replayed}` |
 | `workflow.step.begin`, `workflow.step.complete` | `{run_id, name, key?, branch?}`, `{run_id, ticket, value}` | `step_begin`, `step_complete`; the ticket is held by the server | `{replayed, value?, ticket?}`, `{}` |
+| `workflow.step.abandon` | `{run_id, ticket}` | gives back a ticket whose function failed in the client (capability `workflow_step_abandon`); idempotent; a tenant's workflow holds at most `MAX_CALL_KEYS` (10,000, or `max_records` if larger) tickets, past it `workflow.step.begin` is refused (`-32005`, `kind: pending_steps`) | `{abandoned}` |
 | `workflow.interrupt` | `{run_id, key, payload?, branch?}` | `WorkflowContext::interrupt` | `{suspended, value?}` |
 | `workflow.cancel` | `{run_id, call_id?}` | cancels one agent call in flight, or all | `{cancelled}` |
 | `workflow.finish` | `{run_id, ok}` | ends the calls in flight, writes the status (`awaiting_input` when an interrupt suspended it), frees the hold | `{status}` |
@@ -125,7 +126,7 @@ docs (`lib.rs:518-569`) and the codes in `crates/linch-rpc/src/error.rs:24-183`.
 | -32004 | `NOT_ALLOWED` | `NotAllowed` | A tenant check refused; `data.kind` names it (the table in [Server](../usage/server.md#what-admission-refuses-and-why)), among them `run_bound`, `workflow_principal` and `cache_isolation` |
 | -32005 | `LIMIT_REACHED` | `LimitReached` | A cap is reached and nothing started; `data: {kind, max}`, `kind` one of `runs`, `agents`, `connections`, `logins`, `schedules`, `jobs`, `workflows`, `agent_calls_in_flight`, `journal_records` or `steers` (a run with 16 steers waiting), or `provider_calls`, a rate: at most `max` `provider.models` and `provider.model` calls per `per_seconds` (60) for the tenant |
 | -32010 | `BUILD_MISSING` | `OpenError` | `agent.open`: a required binding was not set |
-| -32011 | `BUILD_INVALID` | `OpenError` | `agent.open`: an invalid config, or a workspace, policy or tool error. Among them: `budget.max_cost_usd` on a model with no price (the primary or a `fallback_models` entry; the message names the model), `spec.call_timeout_ms` under 100, and `workflow.start` with a `max_cost_usd` for an agent with an unpriced model |
+| -32011 | `BUILD_INVALID` | `OpenError` | `agent.open`: an invalid config, or a workspace, policy or tool error. Among them: `budget.max_cost_usd` on a model with no price (the primary or a `fallback_models` entry; the message names the model), `spec.call_timeout_ms` under 100, and `workflow.start` with a `max_cost_usd` for an agent with an unpriced model. A reliability-policy problem that can involve rules read together (`BuildError::Policy`: a tool the agent lacks, a cycle, a check that does not compile, a `tool_choice` that defeats the rules) carries `data: {"kind": "policy"}`; on a tenant with `required_policy` its message is replaced by one fixed sentence and the original is logged on the server. A defect in one rule's own text is a plain `BuildError::Invalid` that keeps its message |
 | -32012 | `BUILD_CONTRACT` | `OpenError` | `agent.open`: the run contract could not be digested |
 | -32013 | `PROVIDER_UNAVAILABLE` | `OpenError` | The provider key is unset (`data.env` names its variable), or the provider client could not be built |
 | -32014 | `STORE_UNAVAILABLE` | `OpenError` | Postgres could not be reached or migrated |
@@ -420,7 +421,13 @@ asked ([usage](../usage/scheduler.md)).
   open agent; its Postgres pool (`OpenedAgent::pool`) holds the rows, its
   namespace scopes them, and the queue tables are migrated on its database
   at the first scheduler call (once per agent), so a server that never
-  schedules never creates them.
+  schedules never creates them. A tenant with neither `max_schedules` nor
+  `max_queued_jobs` never migrates: `schedule.list`, `schedule.delete`,
+  `job.list` and `job.get` still read the tables when they are there, at
+  whatever migration (it may clean up what it made; a read that the older
+  schema cannot answer is a generic `-32014`, with no table or migration
+  name), and answer as an empty namespace when the tables do not exist
+  (`schedule.pause` and `schedule.resume` answer not found).
 - **Tenant checks.** Before any query: `max_schedules` and
   `max_queued_jobs` must be set (`-32004`, kinds `schedules` and
   `background_runs`), and a schedule's `Timing::shortest_gap` must be at
@@ -495,7 +502,7 @@ method whose shape changed.
 
 ```json
 {"server_version": "0.1.1", "protocol": 1, "contract_version": 1,
- "capabilities": ["cache_isolation", "exec_idempotency_key", "provider_info", "run_steer", "schedule", "workflow"],
+ "capabilities": ["cache_isolation", "exec_idempotency_key", "provider_info", "run_steer", "schedule", "workflow", "workflow_step_abandon"],
  "backends": ["local", "sandbox", "docker", "remote"],
  "limits": {"max_message_bytes": 16777216, "default_max_runs": 16}}
 ```

@@ -84,7 +84,10 @@ linch-server: listening on ws://127.0.0.1:8731/rpc
 - Cấu hình được đọc một lần khi khởi động, và đọc nghiêm ngặt: một trường không xác
   định ở bất kỳ cấp nào, một biến token chưa được đặt, một workspace root không tồn
   tại hoặc một giới hạn bằng 0 sẽ dừng server với mã thoát 2 và lý do trên stderr.
-  Mã thoát 1 nghĩa là lỗi I/O; 0 là dừng bình thường.
+  Mã thoát 1 nghĩa là lỗi I/O; 0 là dừng bình thường. Một lỗi parse nói đó là loại
+  lỗi nào, điều gì được mong đợi, cùng dòng và cột, và không bao giờ lặp lại một chuỗi
+  của tệp (một trường không xác định không được nêu tên: danh sách các trường được mong
+  đợi và vị trí chỉ ra nó), vì tệp chứa token và DSN.
 - Tệp socket do một server đã dừng để lại sẽ được thay thế, và tệp bị xóa khi tắt.
   Quyền của tệp theo umask.
 - HTTP là HTTP thuần: hãy đặt TLS phía trước, hoặc chỉ lắng nghe trên loopback.
@@ -131,7 +134,7 @@ sẽ bị từ chối. Một tenant chỉ do worker phục vụ thì không cầ
 | `workspace_roots` | không có | Các thư mục mà `workspace`, `project_root` hoặc `config_dir` có thể là hoặc nằm dưới |
 | `postgres_dsns` | không có | Các đích Postgres mà DSN của kho lưu trữ có thể dùng: host, cổng hoặc socket, cơ sở dữ liệu, người dùng, tùy chọn khởi động và tệp TLS đều phải khớp một mục, và `sslmode` của nó phải bằng hoặc chặt hơn `sslmode` của mục đó |
 | `mcp_commands` | không có | Các MCP stdio server, `{"command", "args", "env"}`: lệnh và danh sách đối số phải khớp chính xác, và transport chỉ được đặt các tên `env` được liệt kê |
-| `mcp_urls` | không có | Các endpoint mà một MCP HTTP transport có thể nêu, khớp như `provider_base_urls` |
+| `mcp_urls` | không có | Các endpoint mà một MCP HTTP transport có thể nêu, khớp theo scheme, host, cổng và path: một mục có path (`https://mcp.internal/mcp`) cho phép path đó và những gì nằm dưới nó (`/mcp/sse`, không phải `/mcpx`; dấu gạch chéo cuối bị bỏ qua); một mục không có path (`https://mcp.internal`) cho phép mọi path trên origin đó. Một URL có mã hóa phần trăm trong path bị từ chối dưới mục có path. Việc khớp path xét URL mà client nêu, nên nó dựa vào việc MCP transport không đi theo redirect. `provider_base_urls` vẫn khớp chính xác: mục có path của nó chỉ cho phép path đó |
 | `max_schedules` | không có: không có lịch | Số lịch mà tenant được giữ trong mỗi cơ sở dữ liệu ([Scheduler](./scheduler.md#tenant-được-lập-lịch-gì)); không có nó thì một agent có `schedule_tools` bị từ chối |
 | `min_schedule_interval_ms` | 60000 | Khoảng thời gian ngắn nhất giữa hai lần kích hoạt của các lịch của nó |
 | `tool_cache` | `false` | `spec.tool_cache`, giữ kết quả trong bộ nhớ hoặc cơ sở dữ liệu của server cho namespace của tenant; giới hạn 1024 mục, ttl một giờ, 1 MiB mỗi kết quả và 32 tool. Agent cũng cần `spec.redaction` bao phủ kết quả tool, và các mục chỉ phục vụ session đã lưu chúng |
@@ -139,7 +142,7 @@ sẽ bị từ chối. Một tenant chỉ do worker phục vụ thì không cầ
 | `max_tool_cache_bytes` | 67108864 (64 MiB) | Số byte kết quả cache mà mọi namespace của tenant được giữ cùng nhau; tối thiểu 1 |
 | `workflow` | không có: không có workflow | `workflow.*` ([Workflows](./workflows.md#admission)): `{}` cho phép chúng với các mức trần mặc định, hoặc đặt `max_workflows` (4), `max_records` (10000), `max_fan_out` (8), `max_record_bytes` (1 MiB), `max_tokens`, `max_cost_usd` |
 | `max_queued_jobs` | không có: không có run nền | Số job nền chưa xong mà nó được có khi đưa thêm một job vào hàng đợi |
-| `system_sections` | không có | Các system prompt section `{"name", "text", "order"?, "cacheable"?}` được thêm vào mọi agent của tenant; tenant không thể gỡ hay đổi tên chúng, và `replace_defaults` để chúng lại. Thay đổi chúng làm resume các run đang chạy của tenant bị từ chối ([Config của agent](./agent.md#system-sections)) |
+| `system_sections` | không có | Các system prompt section `{"name", "text", "order"?, "cacheable"?}` được thêm vào mọi agent của tenant; tenant không thể gỡ hay đổi tên chúng, và cả `replace_defaults` lẫn `rewrite` của callback `before_provider_call` đều không gỡ được chúng (chúng được đặt lại đúng chỗ request có chúng, với vị trí `order` và cờ `cacheable` của chúng). Thay đổi chúng làm resume các run đang chạy của tenant bị từ chối ([Config của agent](./agent.md#system-sections)) |
 | `memory` | `false`: không có bộ nhớ dài hạn | Config có được bật [`memory`](./memory.md#built-in-long-term-memory) hay không |
 | `max_memories` | không có, từ chối `memory` (server không nạp config có `memory` mà không có cap) | Số memory nó được giữ trong mọi namespace của một database; `max_memories` và `max_memories_per_scope` của agent bị giữ dưới mức này |
 | `required_policy` | không có | Một [`spec.policy`](./agent.md#policy) mà mọi agent của tenant đều mang; policy riêng của tenant được thêm vào nó, và các rule của operator vẫn nằm trong run. Nó sắp thứ tự các lời gọi của model, đếm từ kết quả tool của chính agent; nó không ràng buộc những gì host của tenant làm (một host tool, hook hay cache có thể trả lời lời gọi bắt buộc), nên hãy giữ permission và sandbox cho bảo mật ([bên dưới](#những-gì-admission-từ-chối-và-lý-do)) |
@@ -350,7 +353,8 @@ curl -i -H "Authorization: Bearer $LINCH_TOKEN_ACME" \
   (`agent.run(..., principal=...)` từ Python) phải nêu tenant của kết nối, nếu không
   lệnh gọi raise `NotAllowed` (`kind == "principal"`). Server không tự điền giá trị.
 - Token chỉ được lưu dưới dạng digest SHA-256 và được so sánh trong thời gian không
-  đổi. Không token nào được ghi ra bất kỳ đầu ra nào.
+  đổi. Không token nào được ghi ra bất kỳ đầu ra nào: một token, `cache_salt_secret` hay `worker.dsn` sai dạng (một chuỗi trần
+  ở chỗ cần `{"env": ...}` hoặc `{"value": ...}`) bị từ chối với `expected an object with `env` or `value``, không kèm giá trị.
 
 ### Điều gì giữ các tenant tách nhau
 
@@ -520,8 +524,12 @@ chối:
   của operator khi tenant không đặt gì, còn không thì là giá trị nhỏ hơn trong hai mức
   trần (tenant đặt `max_corrections` có thể hạ nó, không thể nâng). Một rule nêu một
   tool mà agent không có thì từ chối open (`OpenError`), không bao giờ bị bỏ đi; lỗi
-  gửi cho tenant không nêu tên tool hay lặp lại pattern, vì rule do operator viết (config
-  server từ chối một `required_policy` có check không biên dịch được). Các rule chỉ ràng buộc
+  gửi cho tenant với một vấn đề về policy có thể liên quan tới rule của operator khi đọc cùng rule của tenant
+  (`BuildError::Policy`, `data.kind` là `policy`: tool mà agent không có, một vòng, một check không biên dịch được,
+  một `tool_choice` làm các rule không thể thỏa) là một câu cố định không nêu tên tool hay lặp lại pattern, vì rule do operator viết;
+  văn bản gốc được ghi vào log của server (`warn`, kèm tên tenant) và không bao giờ gửi cho client. Một lỗi trong
+  chính văn bản rule hay gate của tenant (tên gate trống, `min_calls` bằng 0, gate không yêu cầu gì) giữ nguyên thông báo (server từ chối
+  ngay lúc khởi động một `required_policy` mà không agent nào chạy được: check không biên dịch được, tên gate trống, `min_calls` bằng 0, một vòng). Các rule chỉ ràng buộc
   thứ tự lời gọi của model: một host tool của client dưới tên bắt buộc, một hook
   `pre_tool_use`, một thay thế của `post_tool_use` hay một cache hit vẫn có thể thỏa
   một prerequisite, nên đây không phải cưỡng chế đối với host của chính tenant.

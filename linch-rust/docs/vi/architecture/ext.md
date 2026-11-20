@@ -24,6 +24,8 @@ của mọi run con mà các lời gọi `Subagent` của nó đã tạo. Một 
 duyệt được để nguyên trạng thái suspend. Vì các case chạy theo thứ tự, một
 `ScriptedProvider` tiêu thụ các lượt của nó theo thứ tự case; run con của một subagent
 lấy các lượt nằm giữa lời gọi `Subagent` của run cha và lượt kế tiếp của run cha.
+`run_eval_as(agent, cases, scorers, owner)` làm như vậy với `owner` là chủ lease của mọi run
+(`run_eval` dùng `linch`); `linch-rpc` truyền server id.
 
 Một case đạt khi run của nó không ghi nhận lỗi và không scorer nào trả về
 `Some(false)`; `None` là một kết luận không xác định và không làm nó thất bại
@@ -252,7 +254,16 @@ Một host có hàm workflow chạy ở nơi khác (client của server RPC) dri
 - `WorkflowBudget` được kiểm tra trước mỗi lời gọi thật so với những gì các lời
   gọi đã xong đã tiêu, tính cả replay (`agent.rs:286`), nên một lời gọi đang chạy
   có thể vượt. `max_records` được kiểm tra trước khi một lời gọi tiêu tiền
-  (`context.rs:160`) và `max_record_bytes` khi một record được ghi.
+  (`context.rs`, `check_room`) so với số record, và `max_record_bytes` khi một
+  record được ghi và với payload của interrupt, thứ mà status đã lưu giữ (`check_size`). Các bộ đếm (một cho mỗi call key và nhánh) bị chặn bởi
+  `WorkflowOptions::max_call_keys`: một lời gọi có key mới và không có record để
+  replay bị từ chối khi vượt mức đó (`LimitExceeded`, `what: "call keys"`), nhờ
+  vậy các lời gọi không ghi journal (thất bại, suspend) không làm chúng phình ra;
+  RPC server đặt nó cho tenant là `MAX_CALL_KEYS` (10.000) hoặc `max_records` nếu
+  lớn hơn, và `None` là không giới hạn. Một step đã begin bằng `step_begin` không
+  giữ gì trong context: host giữ ticket của nó, và RPC server giới hạn số ticket
+  nó giữ cho một tenant bằng đúng số của `max_call_keys`, và không giới hạn trên
+  kết nối cục bộ.
 - `LiveGate` (`context.rs:24`) được hỏi trước mỗi lời gọi sẽ chạy thật, không bao
   giờ cho một lần replay; server đếm các lời gọi đang chạy và lấy chỗ run của
   tenant ở đó.

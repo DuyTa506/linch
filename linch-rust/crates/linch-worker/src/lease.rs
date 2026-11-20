@@ -255,7 +255,9 @@ impl JobLease {
     }
 
     /// Hide the job for another `timeout`, on `line` so that no job work
-    /// delays it. `false` means another worker holds it now.
+    /// delays it. `false` means another worker holds it now, or this attempt
+    /// already gave it back (a release or a failure clears `owner`, and a
+    /// late heartbeat must not hide the job again).
     pub(crate) async fn heartbeat(
         &self,
         line: &LeaseLine,
@@ -266,7 +268,8 @@ impl JobLease {
                 sqlx::query(
                     "UPDATE linch_worker_jobs \
                      SET visible_at = now() + $3 * interval '1 millisecond' \
-                     WHERE id = $1 AND attempts = $2 AND failed_at IS NULL",
+                     WHERE id = $1 AND attempts = $2 AND owner IS NOT NULL \
+                       AND failed_at IS NULL",
                 )
                 .bind(self.job.id.0)
                 .bind(self.attempts)

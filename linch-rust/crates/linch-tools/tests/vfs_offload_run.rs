@@ -12,7 +12,9 @@ use linch_core::{
     PermissionEngine, PermissionMode, PermissionPolicy, RunOptions, ScriptedProvider, SessionId,
     SessionStore, Tool, ToolContext, ToolOutput, ToolRegistry, ToolResult, ToolScope,
 };
-use linch_tools::vfs::{MemorySessions, OffloadConfig, ResultOffload, SessionFiles, vfs_tools};
+use linch_tools::vfs::{
+    MemorySessions, OffloadConfig, ResultOffload, SessionFiles, offload_path, vfs_tools,
+};
 use serde_json::json;
 
 const MODEL: &str = "scripted-model";
@@ -49,7 +51,8 @@ impl Tool for Big {
 
 #[tokio::test]
 async fn the_logged_result_is_the_pointer_and_reads_back() {
-    let path = "/offload/big_call_1.txt";
+    let path = offload_path("/offload", "s1", "big", "call_1", &payload());
+    let path = path.as_str();
     let provider = Arc::new(ScriptedProvider::new([
         TurnBuilder::new(MODEL)
             .tool_call("call_1", "big", &json!({}))

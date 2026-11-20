@@ -135,7 +135,10 @@ Two fences protect a run, one per layer:
   the visibility timeout, sets `owner` and adds 1 to `attempts`. That
   `attempts` value is the fencing token: heartbeat, record-run, ack, release
   and fail all match on it, so a worker that lost the job changes nothing
-  (`lease.rs:1-6`). Each is one autocommit statement at the pool's default
+  (`lease.rs:1-6`). The heartbeat also needs `owner` set, which a release or
+  a failure clears, so a heartbeat that lands after the attempt gave the job
+  back (its keep-alive was dropped with one in flight) answers `false` and
+  does not hide the job again. Each is one autocommit statement at the pool's default
   isolation. Above `READ COMMITTED`, one that waited on another update of
   the job row (the attempt's own heartbeat still in flight when the run
   ends, or another worker's dequeue) fails with a serialization error
@@ -204,7 +207,7 @@ busy session never counts, so a start job is never given up on for that.
 
 A failed job is the dead letter: `failed_at` and `error` are set, it is never
 dequeued again, and it no longer counts against the one-job-per-run index or
-a queue limit (`lease.rs:288-302`). It stays in `linch_worker_jobs` until
+a queue limit (`lease.rs:291-305`). It stays in `linch_worker_jobs` until
 `prune_history` deletes it, `history_retention` after it failed. `error` holds the whole error chain
 (`crates/linch-worker/src/error.rs:40-49`). When a run is failed with its job,
 the run goes first: a crash in between leaves a terminal run, which the job's
@@ -331,11 +334,16 @@ cursor (`FOR UPDATE ... SKIP LOCKED`, `batch_size` rows), then one statement
 that deletes the run (or session), its events (or log, tasks and edges) and
 writes the tombstone, with the terminal status (or the idle clock and the
 absence of a live run) checked again in the delete. A pass holds a
-session-level try-lock keyed by database and schema on one pool connection
-from its first batch to its last, so one pruner runs at a time across the
+session-level try-lock keyed by database and schema on one connection from
+its first batch to its last, so one pruner runs at a time across the
 fleet, a second pass cannot start in the pauses between batches (each batch
 is followed by a pause as long as it took, which keeps the pass at most half
 as busy as the database), and a crashed pruner's connection releases the lock.
+The connection is taken from the pool and detached from it (one beyond the
+pool's cap for the pass) and closed at the end of the pass, so a pass that is
+dropped, as when the worker stops, closes it too and frees the lock; a pooled
+connection would have gone back to the pool with the lock still on it, and
+every later pass of the fleet would have reported `contended`.
 A pass that finds the lock taken deletes nothing and reports `contended`.
 
 What it never deletes follows from what other code reads of a run later: a

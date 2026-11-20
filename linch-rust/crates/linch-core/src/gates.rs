@@ -50,6 +50,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::agent::BuildError;
 use crate::events::kinds::{PolicyAction, PolicyEvent, PolicyRule, UserEventSubtype};
 use crate::events::{Envelope, Event};
 use crate::json::{JsonObject, JsonValue};
@@ -123,6 +124,28 @@ pub struct CompletionGate {
     pub feedback: Option<String>,
 }
 
+/// Why a [`ReliabilityPolicy`] cannot run on an agent, and whose text it
+/// can name.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PolicyProblem {
+    /// A defect in the text of one rule or gate, found without the agent
+    /// or the other rules: only the author of that text can have caused it.
+    Own(String),
+    /// A problem of the agent's tools or of rules read together, which a
+    /// policy merged from two authors can have without either being wrong
+    /// alone.
+    Joint(String),
+}
+
+impl From<PolicyProblem> for BuildError {
+    fn from(problem: PolicyProblem) -> Self {
+        match problem {
+            PolicyProblem::Own(text) => BuildError::Invalid(text),
+            PolicyProblem::Joint(text) => BuildError::Policy(text),
+        }
+    }
+}
+
 impl ReliabilityPolicy {
     /// The corrections a run may spend: the policy's, else the default.
     pub fn corrections(&self) -> u32 {
@@ -136,7 +159,22 @@ impl ReliabilityPolicy {
         Rules::new(self.clone()).err()
     }
 
+    /// Why this policy is wrong whichever agent runs it, if it is: a
+    /// `check` that cannot be used, a rule or gate that is wrong by its own
+    /// text, a blank tool name or a cycle. Which tools an agent has is not
+    /// asked.
+    pub fn standalone_problem(&self) -> Option<String> {
+        self.compile_problem().or_else(|| {
+            self.problem(|_| true, None)
+                .map(|(PolicyProblem::Own(text) | PolicyProblem::Joint(text))| text)
+        })
+    }
+
     /// Why this policy cannot run on an agent, if it cannot.
+    ///
+    /// A defect in the text of one rule or gate, whatever the agent and the
+    /// other rules, is [`PolicyProblem::Own`]; one that depends on the
+    /// agent's tools or on how rules combine is [`PolicyProblem::Joint`].
     ///
     /// Args:
     ///     offers: Whether the agent has the named tool.
@@ -145,19 +183,22 @@ impl ReliabilityPolicy {
         &self,
         offers: impl Fn(&str) -> bool,
         final_tool: Option<&str>,
-    ) -> Option<String> {
-        let known = |tool: &str, what: &str| -> Option<String> {
+    ) -> Option<PolicyProblem> {
+        let (own, joint) = (PolicyProblem::Own, PolicyProblem::Joint);
+        let known = |tool: &str, what: &str| -> Option<PolicyProblem> {
             if tool.trim().is_empty() {
-                return Some(format!("policy: {what} names a blank tool"));
+                return Some(joint(format!("policy: {what} names a blank tool")));
             }
             if final_tool == Some(tool) {
-                return Some(format!(
+                return Some(joint(format!(
                     "policy: {what} names the final tool {tool:?}, whose call ends the run \
                      instead of running"
-                ));
+                )));
             }
             (!offers(tool)).then(|| {
-                format!("policy: {what} names {tool:?}, which is not a tool the agent has")
+                joint(format!(
+                    "policy: {what} names {tool:?}, which is not a tool the agent has"
+                ))
             })
         };
         let mut seen = HashSet::new();
@@ -166,16 +207,16 @@ impl ReliabilityPolicy {
                 return Some(problem);
             }
             if !seen.insert(rule.tool.as_str()) {
-                return Some(format!(
+                return Some(own(format!(
                     "policy: two prerequisites name {:?}; list its requirements in one",
                     rule.tool
-                ));
+                )));
             }
             if rule.requires.is_empty() {
-                return Some(format!(
+                return Some(own(format!(
                     "policy: the prerequisite of {:?} requires no tool",
                     rule.tool
-                ));
+                )));
             }
             let mut required = HashSet::new();
             for tool in &rule.requires {
@@ -183,39 +224,39 @@ impl ReliabilityPolicy {
                     return Some(problem);
                 }
                 if tool == &rule.tool {
-                    return Some(format!("policy: {tool:?} cannot require itself"));
+                    return Some(own(format!("policy: {tool:?} cannot require itself")));
                 }
                 if !required.insert(tool.as_str()) {
-                    return Some(format!(
+                    return Some(own(format!(
                         "policy: the prerequisite of {:?} lists {tool:?} twice",
                         rule.tool
-                    ));
+                    )));
                 }
             }
         }
         if let Some(tool) = self.cycle() {
-            return Some(format!(
+            return Some(joint(format!(
                 "policy: the prerequisites of {tool:?} lead back to {tool:?}, so it could never run"
-            ));
+            )));
         }
         let mut names = HashSet::new();
         for gate in &self.gates {
             let name = gate.name.trim();
             if name.is_empty() {
-                return Some("policy: a gate's name must not be blank".into());
+                return Some(own("policy: a gate's name must not be blank".into()));
             }
             if !names.insert(name) {
-                return Some(format!("policy: two gates are named {name:?}"));
+                return Some(own(format!("policy: two gates are named {name:?}")));
             }
             if gate.succeeded.is_empty() && gate.check.is_none() {
-                return Some(format!(
+                return Some(own(format!(
                     "policy: gate {name:?} asks for nothing: set succeeded or check"
-                ));
+                )));
             }
             if gate.min_calls == 0 {
-                return Some(format!(
+                return Some(own(format!(
                     "policy: gate {name:?} needs min_calls of at least 1"
-                ));
+                )));
             }
             let mut required = HashSet::new();
             for tool in &gate.succeeded {
@@ -223,7 +264,7 @@ impl ReliabilityPolicy {
                     return Some(problem);
                 }
                 if !required.insert(tool.as_str()) {
-                    return Some(format!("policy: gate {name:?} lists {tool:?} twice"));
+                    return Some(own(format!("policy: gate {name:?} lists {tool:?} twice")));
                 }
             }
         }
@@ -895,9 +936,12 @@ mod tests {
     #[test]
     fn a_policy_that_cannot_run_says_why() {
         let offers = |name: &str| ["A", "B", "C"].contains(&name);
-        let problem = |policy: serde_json::Value| {
+        let found = |policy: serde_json::Value| {
             let policy: ReliabilityPolicy = serde_json::from_value(policy).unwrap();
             policy.problem(offers, Some("Final"))
+        };
+        let problem = |policy: serde_json::Value| {
+            found(policy).map(|(PolicyProblem::Own(text) | PolicyProblem::Joint(text))| text)
         };
         let need = |tool: &str, requires: &[&str]| json!({"tool": tool, "requires": requires});
         assert!(problem(json!({})).is_none());
@@ -913,6 +957,33 @@ mod tests {
         );
         let named = json!({"gates": [{"name": "g", "succeeded": ["Final"]}]});
         assert!(problem(named).unwrap().contains("final tool"));
+    }
+
+    #[test]
+    fn a_problem_says_whether_the_policy_alone_can_have_it() {
+        let offers = |name: &str| ["A", "B"].contains(&name);
+        let kind = |policy: serde_json::Value| {
+            let policy: ReliabilityPolicy = serde_json::from_value(policy).unwrap();
+            policy
+                .problem(offers, None)
+                .map(|problem| matches!(problem, PolicyProblem::Own(_)))
+        };
+        let need = |tool: &str, requires: &[&str]| json!({"tool": tool, "requires": requires});
+        // The text of one rule: whoever wrote it got it wrong.
+        assert_eq!(kind(json!({"gates": [{"name": "mine"}]})), Some(true));
+        assert_eq!(
+            kind(json!({"gates": [{"name": " ", "succeeded": ["A"]}]})),
+            Some(true)
+        );
+        assert_eq!(
+            kind(json!({"prerequisites": [need("A", &["A"])]})),
+            Some(true)
+        );
+        // What depends on the agent's tools or on rules read together.
+        let unknown = json!({"gates": [{"name": "g", "succeeded": ["Nope"]}]});
+        assert_eq!(kind(unknown), Some(false));
+        let ring = json!({"prerequisites": [need("A", &["B"]), need("B", &["A"])]});
+        assert_eq!(kind(ring), Some(false));
     }
 
     #[test]

@@ -294,7 +294,15 @@ A remote tenant may hold at most 16 sections of at most 16 KiB (names up to
 64 bytes) and 64 KiB in all with `append`, since they ride every request
 ([Server](./server.md#what-admission-refuses-and-why)). The operator can add its own
 sections to every agent of a tenant; they are sent with the tenant's, cannot be
-removed or renamed, and `replace_defaults` leaves them in. Changing them
+removed or renamed, and `replace_defaults` leaves them in. A `before_provider_call`
+callback of the tenant that answers `rewrite` cannot remove them either: the
+server puts each one back where the request it was sent had it (the system
+is laid out with every section, the operator's and the tenant's, sorted by `order`,
+each with its `cacheable` flag), and does not repeat a block with their text, so a
+rewrite that changes nothing sends the same system bytes, and a subagent's or a
+fallback model's request is treated the same way. The rest of the rewritten system
+is the callback's, up to 64 KiB (or what the request held beyond the operator's
+sections, if more), else the answer is refused as a failed callback. Changing them
 changes the contract of the tenant's agents, so their in-flight runs are
 refused on resume until they finish.
 
@@ -533,7 +541,7 @@ spec = {"model": "claude-sonnet-4-6", "budget": {"max_tokens": 200_000, "max_cos
 | Field | Default | What it controls |
 |---|---|---|
 | `mode` | `default` | The decision when no rule matches: `default` (write and exec calls ask), `accept_edits` (writes inside the project root run; exec asks), `skip_dangerous` (every call runs) |
-| `project_root` | required when `permissions` is given | An absolute path (a relative one is refused at open, unlike `workspace`) that relative paths and path patterns resolve against |
+| `project_root` | required when `permissions` is given | An absolute path (a relative one is refused at open, unlike `workspace`) that path patterns resolve against; a relative path in a call resolves against the workspace, as the file tools do |
 | `layers` | `[]` | Named lists of rules, from least to most specific |
 | `auto_allow` | `[]` | Tool names allowed in every mode (rules still apply first) |
 | `path_fields` | built in | Which input field holds the path, per tool, added to the built-in table |

@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use linch_postgres::PgPool;
+use sqlx::Connection;
 use tokio::time::Instant;
 
 use crate::error::WorkerError;
@@ -123,12 +124,9 @@ pub struct Pruned {
 
 /// One pruner at a time per database and schema: a session-level try-lock
 /// held on one connection for the whole pass, so a second pass cannot start
-/// in the pauses between batches, and a crashed pruner's connection drops it.
+/// in the pauses between batches. The connection leaves the pool, so closing
+/// it, which a dropped pass does too, is what frees the lock.
 const LOCK: &str = "SELECT pg_try_advisory_lock(hashtextextended(\
-    'linch_retention:' || current_database() || ':' || coalesce(current_schema(), ''), 0))";
-
-/// Release the lock taken by [`LOCK`] on the same connection.
-const UNLOCK: &str = "SELECT pg_advisory_unlock(hashtextextended(\
     'linch_retention:' || current_database() || ':' || coalesce(current_schema(), ''), 0))";
 
 /// Give the runs that were terminal before migration 10 an end time of now,
@@ -341,9 +339,12 @@ async fn rest(started: Instant) {
 /// leaves the database at least half free for the runs that are committing.
 /// A pass walks each table once in key order, so a row it could not delete
 /// (a child of a live run, say) is not read again until the next pass. One
-/// connection of the pool holds the database's pruner lock for the whole
-/// pass; a pass that finds another one (another server's worker) running
-/// deletes nothing and returns with `contended` set.
+/// connection, taken from the pool and then detached from it (so it is one
+/// beyond the pool's cap for the pass), holds the database's pruner lock for
+/// the whole pass and is closed at its end; a pass that is dropped (a worker
+/// that stops) frees the lock too. A pass that finds another one (another
+/// server's worker) running deletes nothing and returns with `contended`
+/// set.
 ///
 /// Args:
 ///     pool: Pool for the database and schema of the stores.
@@ -358,21 +359,22 @@ async fn rest(started: Instant) {
 ///         deleted stays deleted.
 pub async fn prune_retained(pool: &PgPool, retention: &Retention) -> Result<Pruned, WorkerError> {
     retention.check()?;
-    let mut held = pool.acquire().await?;
-    if !sqlx::query_scalar::<_, bool>(LOCK)
-        .fetch_one(&mut *held)
-        .await?
-    {
-        return Ok(Pruned {
+    // Off the pool, so that dropping this future closes the connection and
+    // with it the session-level lock; a pooled connection would go back to
+    // the pool with the lock still on it.
+    let mut held = pool.acquire().await?.detach();
+    let locked = sqlx::query_scalar::<_, bool>(LOCK)
+        .fetch_one(&mut held)
+        .await;
+    let done = match locked {
+        Ok(true) => pass(pool, retention).await,
+        Ok(false) => Ok(Pruned {
             contended: true,
             ..Pruned::default()
-        });
-    }
-    let done = pass(pool, retention).await;
-    if sqlx::query(UNLOCK).execute(&mut *held).await.is_err() {
-        // The lock goes with the connection: close it rather than pool it.
-        drop(held.detach());
-    }
+        }),
+        Err(error) => Err(error.into()),
+    };
+    let _ = held.close().await;
     done
 }
 

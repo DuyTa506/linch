@@ -103,7 +103,9 @@ các tool và các skill được liệt kê tại thời điểm đó
 đều bắt đầu bằng đúng những byte này, nên prompt cache giữ chúng bất kể
 registry, skill hay subagent làm gì. Một thay đổi thì đi vào phần đuôi:
 một `CatalogChangeBlock` (văn bản `<system-reminder>` của Linch bản Python) trong
-message user kế tiếp mà run vẫn ghi log, nên nó không tốn thêm lần ghi nào.
+message user kế tiếp mà run vẫn ghi log, nên nó không tốn thêm lần ghi nào. Văn bản
+thông báo thoát `<`, `>` và `&` trong mọi tên và mô tả tool và skill mà nó liệt kê
+(các trường có cấu trúc giữ nguyên văn bản gốc), nên một mô tả không thể đóng wrapper.
 
 - Một tool bị gỡ giữ lại hàng của nó; một lời gọi tới nó bị từ chối với lý do chưa đăng ký.
 - Một tool được thêm sẽ được nối vào các tool của request, việc này làm mất cache
@@ -250,7 +252,25 @@ nó cho `Bash`; xem [Execution backend](#execution-backend)), dùng chung một
 
 Grep và Glob bỏ qua các tệp bị ignore và không đi theo symlink; Grep cũng bỏ qua
 các tệp ẩn và nhị phân, và Glob chỉ liệt kê tệp ẩn khi mẫu
-nêu tên một đoạn bắt đầu bằng dấu chấm (`crates/linch-tools/src/fs.rs:232-248`).
+nêu tên một đoạn bắt đầu bằng dấu chấm (`crates/linch-tools/src/fs.rs:232-248`). Một mẫu Grep biên dịch ra tối đa
+10 MiB (`REGEX_SIZE_LIMIT`; mẫu lớn hơn là `invalid_query`) và bộ nhớ đệm DFA lười của một
+matcher chứa tối đa 32 MiB (`REGEX_DFA_CACHE_LIMIT`; mẫu cần nhiều hơn chạy trên engine
+chậm hơn), nên bộ nhớ của một lần gọi bị chặn, ngoài 10 MiB mà searcher giữ của một tệp.
+Cái giá đã đo: một dòng 64 KiB gồm `a` và `b` ngẫu nhiên với `[ab]{1,20000}c` mất 6,3 s và
+386 MiB với giới hạn của thư viện và nay mất 16,2 s và 36 MiB (17,3 s và 68 MiB ở 64 MiB,
+5,3 s và 131 MiB ở 128 MiB, nên không giá trị nào vừa giữ dưới khoảng 100 MiB vừa trong
+hai lần thời gian), và một lớp Unicode lặp nhiều lần (`\w{300}`, `\w{500}`, `\p{L}{500}`,
+`\w{1000}`) nay là `invalid_query` (nó biên dịch được trong 20 đến 50 MiB). Lỗi nêu cách
+thoát: đếm nhỏ hơn hoặc một lớp ASCII.
+
+Một lần gọi cũng có giới hạn thời gian thực, `SEARCH_TIME_LIMIT` (30 s,
+`crates/linch-tools/src/fs/local.rs`). Nó được kiểm tra giữa các tệp và mỗi lần việc tìm
+đọc thêm một tệp (một lần cho mỗi buffer), và quá mức đó lời gọi thất bại với `timed_out`,
+nói đã tìm xong bao nhiêu tệp và đang ở tệp nào; một lời gọi bị hủy dừng ở cùng các điểm đó.
+Phần còn lại: một lần tìm regex trên một dòng rất dài không thể bị ngắt, nên một dòng tới
+10 MiB (mức tối đa searcher giữ) có thể chạy quá giới hạn. Trường hợp 64 KiB ở trên mất 6
+đến 17 s; chi phí tăng theo dòng, và một dòng 10 MiB sẽ mất khoảng 160 lần (khoảng 15 đến
+45 phút, một ước tính theo tỉ lệ, không phải số đo).
 
 ### Đọc trước khi ghi
 
@@ -519,7 +539,8 @@ bên trong domain của thread bị giới hạn, không phải code trong serve
   bật là đích của `/etc/resolv.conf`. Mọi quyền: root và home của session. Quyền tệp:
   năm thiết bị (`sandbox/shell.rs:35`), không có `/dev/tty`, terminal của server.
 - Bộ lọc seccomp (`crates/linch-tools/src/exec/sandbox/seccomp.rs`) kill một syscall của kiến
-  trúc khác, từ chối các syscall x32, `io_uring_setup` và `socket(AF_UNIX)`, và khi
+  trúc khác, từ chối các syscall x32, `io_uring_setup`, `socket(AF_UNIX)`, các lời gọi System V IPC và hàng đợi tin POSIX
+  (đối tượng được kiểm tra theo user id, Landlock không phủ), và khi
   mạng tắt là mọi `socket`. Landlock chỉ giới hạn pathname Unix socket từ ABI 9, và
   một socket của user của server (session bus, socket Docker) sẽ khởi động thứ gì đó
   ngoài sandbox. Bộ lọc là một denylist: một syscall mà nó không nêu tên thì được
@@ -579,7 +600,10 @@ workspace. `apply_edit` từ chối một lần sửa mà kết quả sẽ vư�
 sửa qua nó (kể cả Postgres) đều bị giới hạn và `replace_all` không thể nhân một tệp lên
 vô hạn. `write_file` từ chối nội dung vượt giới hạn; `write` riêng của một backend thì
 không kiểm tra, để hook chuyển kết quả ra ngoài có thể lưu một kết quả lớn. Các tool báo
-cả hai là `too_large`, nêu tên đường dẫn, và để tệp như cũ.
+cả hai là `too_large`, nêu tên đường dẫn, và để tệp như cũ. `Edit` của workspace tính
+cùng phép cộng (`text.len() - n*old.len() + n*new.len()`, có kiểm tra tràn số) trước khi
+dựng kết quả và từ chối khi vượt `MAX_READ_BYTES`; `old_string` rỗng với `replace_all`
+bị từ chối với mã `empty_old_string`.
 
 | Backend | Tệp nằm ở đâu |
 |---|---|
@@ -599,12 +623,13 @@ mỗi session một backend bộ nhớ mới (gọi `forget` khi nó kết thúc
 `vfs::PROMPT` (`tools.rs:24`) dạy model về hệ thống tệp ảo; host
 thêm nó vào system prompt khi cung cấp các tool này.
 
-`ResultOffload` (`crates/linch-tools/src/vfs/offload.rs:87`) là một hook
+`ResultOffload` (`crates/linch-tools/src/vfs/offload.rs:88`) là một hook
 `post_tool_use`. Một kết quả ước lượng vượt `threshold_tokens` (bốn byte cho mỗi token)
-được ghi nguyên vẹn vào `/offload/{tool}_{tool_use_id}.txt` và được thay bằng 10 dòng đầu
+được ghi nguyên vẹn vào `/offload/{session}/{tool}_{tool_use_id}_{digest}.txt`
+(`linch_core::vfs::offload_path`) và được thay bằng 10 dòng đầu
 (tối đa 2000 byte; con trỏ ghi "cut at 2000 bytes" khi số byte kết thúc phần xem trước) cùng
-một con trỏ mà model có thể theo bằng `read_file`. Ba loại được phủ (`offload.rs:152`,
-`offload.rs:190`):
+một con trỏ mà model có thể theo bằng `read_file`. Ba loại được phủ (`offload.rs:165`,
+`offload.rs:203`):
 
 - Một chuỗi được lưu nguyên.
 - Một giá trị có cấu trúc được ước lượng theo JSON chính tắc gọn của nó, lưu dưới dạng JSON định
@@ -616,8 +641,22 @@ một con trỏ mà model có thể theo bằng `read_file`. Ba loại được 
   trước hook, nên lỗi nào được thử lại không đổi), và `details` có thêm các kích thước và đường
   dẫn khi nó là một đối tượng hoặc vắng mặt.
 
+Tên được tạo mà không hỏi backend: `digest` là 16 chữ số hex của SHA-256 của văn bản được
+lưu, và mỗi thứ trong session, tool và call id là một đoạn đường dẫn, giữ nguyên khi dài tối
+đa 48 byte gồm `[A-Za-z0-9_.-]` (không chỉ toàn dấu chấm), còn lại được cắt thành tối đa 32
+byte đọc được, `~` và 16 chữ số hex SHA-256 của chính nó (session id rỗng là digest của chuỗi
+rỗng, nên thư mục không bao giờ thiếu). `~` nằm ngoài tập ký tự thường nên hai dạng không bao
+giờ trùng nhau, và không tên tệp nào dài quá 120 byte. Vì văn bản nằm trong tên, hai kết quả
+chỉ là một tệp khi chúng là cùng một văn bản: một nhà cung cấp lặp lại call id qua các lượt,
+hai agent trên một backend dùng chung, và một lần thử lại sau sự cố có thể ghi cùng một tên
+đồng thời và mỗi lần ghi là cùng một văn bản, nên một con trỏ đã ghi log không bao giờ trỏ tới
+kết quả khác. Không có lời thăm dò `exists`, nên một id lặp lại không tốn thêm lời gọi backend.
+Loop guard bóc đường dẫn khỏi con trỏ bằng `linch_core::vfs::without_offload_path`, cùng module
+với việc đặt tên, nên một model bị kẹt lặp lại một lời gọi có kết quả bị chuyển ra ngoài vẫn
+dừng sau ba lần gọi dù tên là gì.
+
 Bốn tool hệ thống tệp ảo không bao giờ được chuyển ra ngoài, nên đọc lại một tệp đã chuyển ra
-ngoài không bao giờ bị chuyển ra ngoài lần nữa (`offload.rs:254`). `read_file` trả về tối đa
+ngoài không bao giờ bị chuyển ra ngoài lần nữa (`offload.rs:267`). `read_file` trả về tối đa
 16384 byte của một dòng mỗi lần gọi (`tools.rs:277`), và kết thúc một dòng bị cắt bằng lời gọi để
 đọc tiếp (`byte_offset`), nên một dòng rất dài được phân trang như nhiều dòng ngắn; một tệp không
 có dòng nào dài hơn được đọc đúng từng byte như khi lưu.
@@ -626,9 +665,9 @@ có dòng nào dài hơn được đọc đúng từng byte như khi lưu.
   session log và các request sau đều giữ con trỏ, không giữ payload.
 - Việc ghi vào backend hoàn tất trước khi hook trả lời, nên một con trỏ đã được ghi log
   nêu tên một tệp đã được ghi khi backend là bền vững. Một sự cố giữa lúc ghi
-  và phần kết thúc của tool để lại một tệp không được tham chiếu; một lần thử lại lời gọi
-  ghi cùng đường dẫn đó (`offload.rs:12-20`).
-- Hook fail open (`offload.rs:245`): một lỗi lưu trữ hiện trong hook
+  và phần kết thúc của tool để lại một tệp không được tham chiếu; một lần thử lại cho
+  cùng văn bản ghi cùng đường dẫn đó, còn văn bản khác thì ghi một tệp mới (`offload.rs:12-21`).
+- Hook fail open (`offload.rs:259`): một lỗi lưu trữ hiện trong hook
   record và kết quả gốc đi tới model.
 - Policy id `linch.vfs.offload`, phiên bản 2, của nó là một phần của run contract. Phiên bản
   đổi khi phạm vi hook phủ đổi, và schema của `read_file` cũng nằm trong contract, nên một run đã

@@ -120,7 +120,7 @@ pub struct Allowlists {
     pub(super) workspace_roots: Vec<PathBuf>,
     pub(super) postgres: Vec<PgTarget>,
     pub(super) mcp_commands: Vec<McpCommand>,
-    pub(super) mcp_origins: Vec<Origin>,
+    pub(super) mcp_endpoints: Vec<Endpoint>,
     pub(super) execution: Vec<ExecutionConfig>,
     pub(super) system_sections: Vec<SystemSection>,
     pub(super) required_policy: Option<ReliabilityPolicy>,
@@ -306,7 +306,7 @@ impl Allowlists {
             workspace_roots: Vec::new(),
             postgres: Vec::new(),
             mcp_commands: Vec::new(),
-            mcp_origins: Vec::new(),
+            mcp_endpoints: Vec::new(),
             execution: vec![ExecutionConfig::Local {}],
             system_sections: Vec::new(),
             required_policy: None,
@@ -673,21 +673,26 @@ impl Allowlists {
         Ok(self)
     }
 
-    /// Endpoints an MCP `http` transport may name, matched like
-    /// [`Self::provider_base_urls`].
+    /// Endpoints an MCP `http` transport may name, matched on origin and
+    /// path: an entry with a path allows that path and what lies below it
+    /// (unlike [`Self::provider_base_urls`], which allows that path alone), one
+    /// with none allows every path of its origin.
     ///
     /// Raises:
     ///     AccessError: If an entry is not an `http` or `https` URL.
     pub fn mcp_urls(mut self, urls: &[String]) -> Result<Self, AccessError> {
-        self.mcp_origins = origins("mcp_urls", urls)?;
+        self.mcp_endpoints = mcp_endpoints("mcp_urls", urls)?;
         Ok(self)
     }
 }
 
-fn origins(list: &'static str, urls: &[String]) -> Result<Vec<Origin>, AccessError> {
+fn mcp_endpoints(list: &'static str, urls: &[String]) -> Result<Vec<Endpoint>, AccessError> {
     (urls.iter().enumerate())
         .map(|(index, url)| match Url::parse(url) {
-            Ok(url) if matches!(url.scheme(), "http" | "https") => Ok(url.origin()),
+            Ok(url) if matches!(url.scheme(), "http" | "https") => Ok(Endpoint {
+                origin: url.origin(),
+                path: plain_path(&url),
+            }),
             _ => Err(AccessError::Url { list, index }),
         })
         .collect()
@@ -711,6 +716,22 @@ impl Endpoint {
         })
     }
 
+    /// Whether this entry, one of `mcp_urls`, allows `url`: the same origin,
+    /// and with a path on the entry, that path or one below it. A path with
+    /// an escape is only allowed as the entry's own, since a server may decode
+    /// `%2e%2e%2f` into a way out of the path.
+    fn allows_below(&self, url: &Url) -> bool {
+        if url.origin() != self.origin {
+            return false;
+        }
+        let path = plain_path(url);
+        match path.strip_prefix(self.path.as_str()) {
+            _ if self.path.is_empty() || path == self.path => true,
+            Some(rest) => rest.starts_with('/') && !path.contains('%'),
+            None => false,
+        }
+    }
+
     /// Whether this entry allows `url`, which already passed
     /// [`linch::providers::check_base_url`]: the same origin, and the path
     /// the entry names, or with none, one of the provider's `defaults`.
@@ -729,7 +750,7 @@ fn plain_path(url: &Url) -> String {
     url.path().trim_end_matches('/').to_owned()
 }
 
-/// Whether `url` shares an origin with one of `allowed`.
-pub(super) fn allows(allowed: &[Origin], url: &str) -> bool {
-    Url::parse(url).is_ok_and(|url| allowed.contains(&url.origin()))
+/// Whether `url` is under one of the MCP endpoints in `allowed`.
+pub(super) fn allows(allowed: &[Endpoint], url: &str) -> bool {
+    Url::parse(url).is_ok_and(|url| allowed.iter().any(|entry| entry.allows_below(&url)))
 }
