@@ -467,6 +467,64 @@ fn a_lone_echo_allow_rule_never_covers_a_second_command() {
     assert!(wrong.is_empty(), "{wrong:?}");
 }
 
+const PATTERN_OPERATORS: &[&str] = &["#", "##", "%", "%%", ":-", "/"];
+
+#[test]
+fn an_allow_rule_does_not_cover_a_command_behind_a_quote_in_a_parameter_pattern() {
+    for op in PATTERN_OPERATORS {
+        let command = format!("echo \"${{x{op}'\"'}}\" ; touch /tmp/pwned ; echo \\'");
+        assert_eq!(bash(&allow_echo(), &command), "ask", "{command:?}");
+    }
+}
+
+#[test]
+fn a_deny_rule_covers_a_command_behind_a_quote_in_a_parameter_pattern() {
+    let engine = flat(PermissionMode::SkipDangerous, vec![bash_rule("rm *", Deny)]);
+    for op in PATTERN_OPERATORS {
+        let command = format!("echo \"${{x{op}'\"'}}\" ; rm -rf build ; echo \\'");
+        assert_ne!(bash(&engine, &command), "allow", "{command:?}");
+    }
+}
+
+#[test]
+fn a_parameter_expansion_in_double_quotes_with_a_quote_a_backslash_or_a_nested_expansion_is_unparsed()
+ {
+    for command in [
+        "echo \"${x#'a'}\"",
+        "echo \"${x:-\"a\"}\"",
+        "echo \"${x#\\\"}\"",
+        "echo \"${x:-${y}}\"",
+        "echo \"${x/'/}\"",
+        "echo \"${x#'\"'}",
+    ] {
+        assert_eq!(bash(&allow_echo(), command), "ask", "{command:?}");
+    }
+}
+
+#[test]
+fn a_plain_parameter_expansion_is_modelled_in_and_out_of_double_quotes() {
+    for command in [
+        "echo \"${x#a}\"",
+        "echo \"${x:-b}\"",
+        "echo \"${x%%.*}\" 'it''s'",
+        "echo ${x#'\"'}",
+        "echo ${x#\"'\"}",
+        "echo ${x:-'a b'}",
+    ] {
+        assert_eq!(bash(&allow_echo(), command), "allow", "{command:?}");
+    }
+}
+
+#[test]
+fn a_quote_in_a_parameter_pattern_outside_double_quotes_does_not_hide_a_command() {
+    for op in PATTERN_OPERATORS {
+        let command = format!("echo ${{x{op}'\"'}} ; touch /tmp/pwned ; echo \\'");
+        assert_eq!(bash(&allow_echo(), &command), "ask", "{command:?}");
+        let command = format!("echo $(echo \"${{x{op}'\"'}}\" ; touch /tmp/pwned)");
+        assert_eq!(bash(&allow_echo(), &command), "ask", "{command:?}");
+    }
+}
+
 #[test]
 fn unparsed_floor_beats_a_generic_allow_in_any_layer_order() {
     let rules = vec![tool("Bash", Allow), bash_rule("rm -rf *", Deny)];

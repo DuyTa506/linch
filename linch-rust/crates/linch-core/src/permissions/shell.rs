@@ -115,7 +115,8 @@ pub fn split_composite(input: &str) -> Vec<&str> {
 /// the clobber redirect `>|`, command substitution (`` ` ``, `$(`), process
 /// substitution or subshell parentheses, ANSI-C quoting (`$'...'`, whose `\'`
 /// the quote tracking would misread), or an unbalanced quote or trailing
-/// backslash. `&` is a redirection only right after an unescaped, unquoted
+/// backslash, or a `${...}` inside double quotes whose body holds a quote, a
+/// backslash or a nested `${`. `&` is a redirection only right after an unescaped, unquoted
 /// `<` or `>` and names a descriptor (`2>&1`, `>&2`, `<&3`, `>&-`): what
 /// `>&file` means differs between shells. The shell differs per backend (dash,
 /// bash, busybox), so what one of them reads differently is reported. A `$`
@@ -146,6 +147,8 @@ pub fn has_unparsed_construct(command: &str) -> bool {
             if c == b'"' {
                 quote = None;
             } else if c == b'`' || (c == b'$' && next == Some(b'(')) {
+                return true;
+            } else if c == b'$' && next == Some(b'{') && quotes_in_expansion(&b[i + 2..]) {
                 return true;
             }
         } else {
@@ -184,6 +187,16 @@ pub fn has_unparsed_construct(command: &str) -> bool {
         || split_composite(command)
             .into_iter()
             .any(expands_in_command_position)
+}
+
+/// Whether the body of a `${` inside double quotes, up to its first `}`,
+/// holds a quote, a backslash or a nested `${`. The shell reads those on
+/// their own (`"${x#'"'}"` quotes a `"` inside the pattern), which the quote
+/// tracking cannot follow, so the operators are not modelled.
+fn quotes_in_expansion(after: &[u8]) -> bool {
+    let end = after.iter().position(|&c| c == b'}').unwrap_or(after.len());
+    let body = &after[..end];
+    body.iter().any(|c| matches!(c, b'\'' | b'"' | b'\\')) || body.windows(2).any(|w| w == b"${")
 }
 
 /// End of the first word of `text`: the first blank outside quotes and
@@ -356,6 +369,10 @@ mod tests {
             "echo \"open",
             "echo trailing\\",
             "a |& b",
+            "echo \"${x#'a'}\"",
+            "echo \"${x#'\"'}\" ; b ; echo \\'",
+            "echo \"${x:-${y}}\"",
+            "echo \"${x#\\\"}\"",
             "a &> log",
             "echo hi &>/tmp/f touch x",
             "echo \\>& x",
@@ -400,6 +417,7 @@ mod tests {
             "echo \"a\\\"b\"",
             "{ a; }",
             "printf '&'",
+            "echo \"${x#a}\" \"${y:-b}\" ${z#'\"'}",
             "printf '$(x)'",
             "echo \"\\$(x)\"",
             "echo \"a\nb\"",
