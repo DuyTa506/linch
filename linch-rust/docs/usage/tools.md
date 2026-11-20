@@ -493,6 +493,12 @@ How rules combine:
 - A shell command the splitter cannot model (for example with `$(...)`, a
   background `&` or `&>`, a `#` comment, a here-document or `>|`) can be
   denied or asked by rules but never allowed by one.
+- Name-based bash rules are best effort and the sandbox is the boundary: a
+  deny or ask rule also sees the command behind leading `NAME=value` words,
+  redirections, reserved words (`if`, `then`, `do`, `!`, `{`) and `time`,
+  `exec`, `command`, `builtin`, `env`, and a `$` expansion in command position
+  counts as unparsed, but `/bin/rm`, `sudo rm`, `xargs rm` and `sh -c 'rm x'`
+  are other commands to a rule.
 - A path outside the project root never matches an allow rule.
 
 `auto_allow` (a list of tool names) allows those tools in every mode unless a

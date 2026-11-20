@@ -217,6 +217,120 @@ fn a_brace_group_is_not_allowed_by_a_narrow_allow_rule() {
     }
 }
 
+const BEHIND_A_PREFIX: &[&str] = &[
+    "X=1 rm -rf build",
+    "X=1 Y=\"a b\" rm -rf build",
+    "if true; then rm -rf build; fi",
+    "if false; then :; else rm -rf build; fi",
+    "if false; then :; elif true; then rm -rf build; fi",
+    "while true; do rm -rf build; done",
+    "until false; do rm -rf build; done",
+    "{ rm -rf build; }",
+    "! rm -rf build",
+    "time rm -rf build",
+    "time -p rm -rf build",
+    "exec rm -rf build",
+    "command rm -rf build",
+    "command -p rm -rf build",
+    "builtin rm -rf build",
+    "env rm -rf build",
+    "env X=1 rm -rf build",
+    "X=1 command rm -rf build",
+    ">log rm -rf build",
+    "> log rm -rf build",
+    "2>/dev/null rm -rf build",
+    "2>&1 rm -rf build",
+    "<in rm -rf build",
+    "echo hi && X=1 rm -rf build",
+    "echo hi | ! rm -rf build",
+];
+
+#[test]
+fn a_deny_rule_covers_a_command_that_is_not_the_first_word_of_its_segment() {
+    let engine = flat(PermissionMode::SkipDangerous, vec![bash_rule("rm *", Deny)]);
+    assert_eq!(bash(&engine, "rm -rf build"), "deny");
+    for command in BEHIND_A_PREFIX {
+        assert_eq!(bash(&engine, command), "deny", "{command:?}");
+    }
+}
+
+#[test]
+fn an_ask_rule_covers_a_command_that_is_not_the_first_word_of_its_segment() {
+    let engine = flat(
+        PermissionMode::SkipDangerous,
+        vec![bash_rule("git push *", Ask)],
+    );
+    for command in [
+        "X=1 git push origin main",
+        "if true; then git push origin main; fi",
+        "{ git push origin main; }",
+        "! git push origin main",
+        "command git push origin main",
+    ] {
+        assert_eq!(bash(&engine, command), "ask", "{command:?}");
+    }
+}
+
+#[test]
+fn a_prefix_does_not_make_a_segment_match_an_allow_rule() {
+    // `LD_PRELOAD=x echo` or `time echo` is not the command `echo`.
+    let engine = allow_echo();
+    for command in [
+        "X=1 echo hi",
+        "LD_PRELOAD=/tmp/x.so echo hi",
+        "time echo hi",
+        "command echo hi",
+        "env X=1 echo hi",
+        ">log echo hi",
+    ] {
+        assert_eq!(bash(&engine, command), "ask", "{command:?}");
+    }
+}
+
+#[test]
+fn a_deny_rule_does_not_match_words_that_only_follow_the_command() {
+    let engine = flat(PermissionMode::SkipDangerous, vec![bash_rule("rm *", Deny)]);
+    for command in [
+        "echo rm -rf build",
+        "git commit -m 'rm -rf build'",
+        "X=rm echo hi",
+        "cmd 2>&1 rm",
+    ] {
+        assert_eq!(bash(&engine, command), "allow", "{command:?}");
+    }
+}
+
+#[test]
+fn an_expansion_in_command_position_is_unparsed() {
+    let engine = flat(PermissionMode::SkipDangerous, vec![bash_rule("rm *", Deny)]);
+    let allow_all = flat(PermissionMode::Default, vec![bash_rule("*", Allow)]);
+    for command in [
+        "a=rm; $a -rf build",
+        "$a -rf build",
+        "${a} -rf build",
+        "\"$a\" -rf build",
+        "X=1 $a -rf build",
+        "command $a -rf build",
+        "! $a -rf build",
+        ">log $a -rf build",
+        "echo hi | $SHELL",
+        "echo hi && x=$y $z",
+    ] {
+        assert_eq!(bash(&engine, command), "ask", "{command:?}");
+        assert_eq!(bash(&allow_all, command), "ask", "{command:?}");
+    }
+    for command in [
+        "echo $a",
+        "echo \"$a\" | cat",
+        "X=$a echo hi",
+        "'$a' -rf build",
+        "\\$a -rf build",
+        "cmd $a",
+    ] {
+        assert_eq!(bash(&allow_all, command), "allow", "{command:?}");
+    }
+}
+
 #[test]
 fn unparsed_floor_beats_a_generic_allow_in_any_layer_order() {
     let rules = vec![tool("Bash", Allow), bash_rule("rm -rf *", Deny)];

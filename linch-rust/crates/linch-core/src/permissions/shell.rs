@@ -117,7 +117,9 @@ pub fn split_composite(input: &str) -> Vec<&str> {
 /// the quote tracking would misread), or an unbalanced quote or trailing
 /// backslash. `&` is a redirection only right after an unescaped, unquoted
 /// `<` or `>` (`2>&1`, `>&2`, `<&3`). The shell differs per backend (dash,
-/// bash, busybox), so what one of them reads differently is reported.
+/// bash, busybox), so what one of them reads differently is reported. A `$`
+/// expansion in command position (`$a -rf x`) is reported too: the command it
+/// names is not in the text.
 pub fn has_unparsed_construct(command: &str) -> bool {
     let b = command.as_bytes();
     let mut quote: Option<u8> = None;
@@ -176,7 +178,110 @@ pub fn has_unparsed_construct(command: &str) -> bool {
         }
         i += 1;
     }
-    escaped || quote.is_some()
+    escaped
+        || quote.is_some()
+        || split_composite(command)
+            .into_iter()
+            .any(expands_in_command_position)
+}
+
+/// End of the first word of `text`: the first blank outside quotes and
+/// escapes, or its length.
+fn word_end(text: &str) -> usize {
+    let b = text.as_bytes();
+    let mut quote: Option<u8> = None;
+    let mut i = 0;
+    while i < b.len() {
+        match (quote, b[i]) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(b'\''), _) => {}
+            (_, b'\\') => i += 1,
+            (Some(_), _) => {}
+            (None, c @ (b'\'' | b'"')) => quote = Some(c),
+            (None, b' ' | b'\t') => return i,
+            _ => {}
+        }
+        i += 1;
+    }
+    b.len()
+}
+
+/// Whether `word` is `NAME=value` or `NAME+=value`.
+fn is_assignment(word: &str) -> bool {
+    let name = word.split('=').next().unwrap_or("");
+    let name = name.strip_suffix('+').unwrap_or(name);
+    word.contains('=')
+        && name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Words that precede a command without being it.
+const RESERVED: &[&str] = &[
+    "if", "then", "else", "elif", "do", "while", "until", "!", "{",
+];
+/// Commands that run their arguments as a command, and may take options.
+const WRAPPERS: &[&str] = &["time", "exec", "command", "builtin", "env"];
+
+/// `segment` without the words in front of its command: `NAME=value`
+/// assignments, redirections (`>f`, `2>&1`, `< in`), reserved words
+/// (`if`, `then`, `else`, `elif`, `do`, `while`, `until`, `!`, `{`) and the
+/// wrappers `time`, `exec`, `command`, `builtin` and `env` with their
+/// options. Deny and ask rules are matched against this form as well, so a
+/// prefix cannot hide the command. Allow rules never use it: `X=1 echo` is
+/// not `echo`. Name-based and best effort: `/bin/rm`, `sudo rm` and
+/// `sh -c 'rm x'` are other commands.
+pub fn strip_command_prefix(segment: &str) -> &str {
+    let mut rest = trim_blanks(segment);
+    let mut options = false;
+    loop {
+        let end = word_end(rest);
+        let word = &rest[..end];
+        let operator = word.trim_start_matches(|c: char| c.is_ascii_digit());
+        let mut skip = 1;
+        if is_assignment(word) {
+        } else if RESERVED.contains(&word) || WRAPPERS.contains(&word) {
+            options = WRAPPERS.contains(&word);
+        } else if options && word.starts_with('-') {
+        } else if operator.starts_with(['<', '>']) {
+            // A bare operator (`>`, `2>&`) takes the next word as its target.
+            if operator.trim_start_matches(['<', '>', '&', '|']).is_empty() {
+                skip = 2;
+            }
+        } else {
+            return rest;
+        }
+        for _ in 0..skip {
+            let end = word_end(rest);
+            rest = trim_blanks(&rest[end..]);
+        }
+    }
+}
+
+/// Whether the command word of `segment` (after [`strip_command_prefix`])
+/// holds a `$` expansion outside single quotes.
+fn expands_in_command_position(segment: &str) -> bool {
+    let rest = strip_command_prefix(segment);
+    let b = &rest.as_bytes()[..word_end(rest)];
+    let mut quote: Option<u8> = None;
+    let mut escaped = false;
+    for &c in b {
+        if escaped {
+            escaped = false;
+        } else if c == b'\\' && quote != Some(b'\'') {
+            escaped = true;
+        } else if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            } else if c == b'$' && q == b'"' {
+                return true;
+            }
+        } else if c == b'\'' || c == b'"' {
+            quote = Some(c);
+        } else if c == b'$' {
+            return true;
+        }
+    }
+    false
 }
 
 /// Whether bash rule `pattern` matches one command segment: as a glob over
@@ -261,6 +366,10 @@ mod tests {
             "echo hi|#x",
             "#x",
             "a >| f",
+            "$a -rf x",
+            "x=1 $a",
+            "a | ${b}",
+            "a; \"$b\"",
             "a <<EOF",
             "a <<-EOF",
             "a <<'EOF'",
@@ -275,6 +384,9 @@ mod tests {
             "a <&3",
             "a <<< word",
             "a <<<\"x;y\"",
+            "a $b",
+            "x=$a b",
+            "'$a' b",
             "a#b",
             "echo $#",
             "echo ${#x} ${x#p}",
@@ -300,6 +412,32 @@ mod tests {
         let command = "echo $'\\'' ; rm -rf / ; '\\'";
         assert_eq!(split_composite(command).len(), 1);
         assert!(has_unparsed_construct(command));
+    }
+
+    #[test]
+    fn prefix_words_are_stripped_before_the_command() {
+        let cases = [
+            ("rm -rf x", "rm -rf x"),
+            ("  X=1 rm x", "rm x"),
+            ("X=1 Y='a b' Z+=\"c d\" rm x", "rm x"),
+            ("if rm x", "rm x"),
+            ("then ! { rm x", "rm x"),
+            ("time -p command -- rm x", "rm x"),
+            ("env -i X=1 rm x", "rm x"),
+            (">log 2>&1 rm x", "rm x"),
+            ("> log < in rm x", "rm x"),
+            ("2>&1 rm x", "rm x"),
+            ("X=1", ""),
+            ("then", ""),
+            ("echo if rm x", "echo if rm x"),
+            ("X='a b rm x", ""),
+            ("\"X\"=1 rm x", "\"X\"=1 rm x"),
+            ("1x=1 rm x", "1x=1 rm x"),
+            ("rm -rf x", "rm -rf x"),
+        ];
+        for (segment, expected) in cases {
+            assert_eq!(strip_command_prefix(segment), expected, "{segment:?}");
+        }
     }
 
     #[test]

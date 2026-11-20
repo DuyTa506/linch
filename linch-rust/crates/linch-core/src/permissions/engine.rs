@@ -238,16 +238,28 @@ impl<'a> Eval<'a> {
             .map(shell::trim_blanks);
         for segment in segments.filter(|s| !s.is_empty()) {
             any = true;
-            let first = pool.iter().find(|r| {
-                r.patterns
-                    .iter()
-                    .any(|p| shell::pattern_matches(p, segment))
-            });
-            match first.map(|r| r.decision) {
-                Some(RuleDecision::Deny) => return Some(RuleDecision::Deny),
-                Some(RuleDecision::Ask) => ask = true,
-                Some(RuleDecision::Allow) => {}
-                None => all_allowed = false,
+            let first = |text: &str| {
+                pool.iter()
+                    .find(|r| r.patterns.iter().any(|p| shell::pattern_matches(p, text)))
+                    .map(|r| r.decision)
+            };
+            // A prefix (`X=1 rm`, `if x; then rm`) hides the command from the
+            // segment's own words, so deny and ask rules also see it without
+            // the prefix. An allow never comes from the stripped form.
+            let own = first(segment);
+            let behind = shell::strip_command_prefix(segment);
+            let inner = if behind.len() < segment.len() && !behind.is_empty() {
+                first(behind)
+            } else {
+                None
+            };
+            match (own, inner) {
+                (Some(RuleDecision::Deny), _) | (_, Some(RuleDecision::Deny)) => {
+                    return Some(RuleDecision::Deny);
+                }
+                (Some(RuleDecision::Ask), _) | (_, Some(RuleDecision::Ask)) => ask = true,
+                (Some(RuleDecision::Allow), _) => {}
+                (None, _) => all_allowed = false,
             }
         }
         if ask {
