@@ -63,8 +63,12 @@ On connect, and on every relist, each listed tool becomes one registration
   defaults to an empty object schema.
 - **Result** (`crates/linch-mcp/src/result.rs:38`). Text blocks join with
   newlines into the output value. Images go to `metadata.images` (at most 8, and
-  4 MiB of base64 data in all; a later one is left out and the text says
-  `[image omitted: over the size limit]`) and leave `[image]` in the text;
+  4 MiB of base64 data and MIME types in all, a MIME type of at most 255
+  bytes; an image over a limit is left out and the text says which:
+  `[image omitted: more than 8 images]`,
+  `[image omitted: over 4 MiB of image data]` or
+  `[image omitted: MIME type over 255 bytes]`; a later image that fits is
+  still kept) and leave `[image]` in the text;
   audio, binary resources and other blocks leave a
   placeholder. With no blocks, `structuredContent` is used, else
   `(no content)`. An `isError` result becomes a `ToolOutputError` with code
@@ -202,7 +206,7 @@ What one server can make the client hold or wait for
 | One tool call | `call_timeout` (300 s) | `tool.rs:264` |
 | Cancels waiting on one connection | 64; later ones are dropped | `tool.rs:29` |
 | Result text, and the text of a tool error (a JSON-RPC error's message included) | 30 000 bytes, cut on a character boundary | `result.rs:10`, `tool.rs` (`coded`) |
-| Images kept from one result | 8, and 4 MiB of base64 data in all; the rest are left out | `result.rs` (`MAX_IMAGES`, `MAX_IMAGE_BYTES`) |
+| Images kept from one result | 8, and 4 MiB of base64 data and MIME types in all; a MIME type of at most 255 bytes; an image over a limit is left out, with a note naming the limit | `result.rs` (`MAX_IMAGES`, `MAX_IMAGE_BYTES`) |
 | Tool argument summary | 80 characters | `tool.rs:23` |
 | Stdio close | 10 s, then `SIGKILL` | `connector.rs:34` |
 

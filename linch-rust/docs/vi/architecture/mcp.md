@@ -63,8 +63,12 @@ Khi kết nối, và ở mỗi lần relist, mỗi tool được liệt kê tr�
   mặc định là một schema đối tượng rỗng.
 - **Kết quả** (`crates/linch-mcp/src/result.rs:38`). Các block văn bản được nối bằng
   ký tự xuống dòng thành giá trị đầu ra. Ảnh đi vào `metadata.images` (tối đa 8 ảnh và
-  tổng cộng 4 MiB dữ liệu base64; ảnh sau đó bị bỏ và văn bản ghi
-  `[image omitted: over the size limit]`) và để lại `[image]` trong văn bản; âm thanh, resource nhị phân và các block khác để lại
+  tổng cộng 4 MiB dữ liệu base64 cùng MIME type, mỗi MIME type tối đa 255 byte;
+  ảnh vượt một giới hạn bị bỏ và văn bản ghi giới hạn nào:
+  `[image omitted: more than 8 images]`,
+  `[image omitted: over 4 MiB of image data]` hoặc
+  `[image omitted: MIME type over 255 bytes]`; một ảnh sau đó vẫn vừa thì vẫn được giữ)
+  và để lại `[image]` trong văn bản; âm thanh, resource nhị phân và các block khác để lại
   một placeholder. Khi không có block nào, dùng `structuredContent`, nếu không thì
   `(no content)`. Một kết quả `isError` trở thành `ToolOutputError` với mã
   `mcp_tool_error` và cùng văn bản.
@@ -195,7 +199,7 @@ Những gì một server có thể khiến client giữ hoặc chờ
 | Một lời gọi tool | `call_timeout` (300 s) | `tool.rs:264` |
 | Số lệnh hủy đang chờ trên một kết nối | 64; các lệnh sau đó bị bỏ | `tool.rs:29` |
 | Văn bản kết quả, và văn bản lỗi của tool (kể cả thông điệp của một lỗi JSON-RPC) | 30 000 byte, cắt ở ranh giới ký tự | `result.rs:10`, `tool.rs` (`coded`) |
-| Số ảnh giữ lại từ một kết quả | 8 ảnh và tổng cộng 4 MiB dữ liệu base64; phần còn lại bị bỏ | `result.rs` (`MAX_IMAGES`, `MAX_IMAGE_BYTES`) |
+| Số ảnh giữ lại từ một kết quả | 8 ảnh và tổng cộng 4 MiB dữ liệu base64 cùng MIME type; MIME type tối đa 255 byte; ảnh vượt một giới hạn bị bỏ, kèm ghi chú nêu giới hạn đó | `result.rs` (`MAX_IMAGES`, `MAX_IMAGE_BYTES`) |
 | Tóm tắt đối số của tool | 80 ký tự | `tool.rs:23` |
 | Đóng stdio | 10 s, rồi `SIGKILL` | `connector.rs:34` |
 

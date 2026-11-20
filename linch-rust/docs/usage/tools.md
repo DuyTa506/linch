@@ -772,7 +772,7 @@ their own output:
 | `Bash`, `BashOutput` | the first 4000 and the last 26000 bytes of each stream |
 | `Grep` | 250 entries by default, 30000 bytes of output |
 | `Glob` | 1000 paths |
-| An MCP tool | 30000 bytes of result text or error text; at most 8 images and 4 MiB of image data |
+| An MCP tool | 30000 bytes of result text or error text; at most 8 images and 4 MiB of image data and MIME types, a MIME type of at most 255 bytes |
 | `memory_recall` | 8 KiB of recalled context per request |
 | `Read` | 2000 lines by default and a 10 MiB file; a line has no width limit, so one minified line can return megabytes (a known gap: the offload below reaches the result of `Read` and `read_file` pages a long line, but `Read` itself does not cut one) |
 
