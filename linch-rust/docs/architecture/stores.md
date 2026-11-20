@@ -34,7 +34,7 @@ that finds the root run of a call's tree.
 | `claim(namespace, run_id, owner)` | Take ownership: epoch + 1, status `running`, a `Lease`. The only way to `running`, including out of `awaiting_*`. Refused on a terminal run, and, on a store with a lease TTL, with `RunLeased` while another holder keeps the run's lease alive (`store.rs:193-205`) |
 | `seize(namespace, run_id, owner)` | `claim`, but also over a live lease of another holder. For `Agent::fail` and a parent taking its child runs back (`store.rs:207-217`) |
 | `lease_ttl()` | How long a claim holds without a renewal; `None` (the default) when claims never expire (`store.rs:219-228`) |
-| `renew(&Lease)` / `release(&Lease)` | Extend the lease by a whole TTL; end it early. Both match the lease's epoch; a renewal after a later claim is `LeaseLost`. Default no-ops (`store.rs:230-244`) |
+| `renew(&Lease)` / `release(&Lease)` | Extend the lease by a whole TTL; end it early. Both match the lease's epoch; a renewal after a later claim is `LeaseLost`, and so is one after the release (a release leaves no live lease, and a renewal that lands late must not lease the run again). Default no-ops (`store.rs:230-244`) |
 | `load` | The current `RunRecord` |
 | `commit(&Lease, Commit)` | One atomic write of events (seqs continue `last_seq` with no gap), an optional checkpoint and an optional status. Accepted only on a `running` run under the current epoch. A terminal status is final |
 | `events(namespace, run_id, after_seq)` | Committed events after `after_seq`, in order |

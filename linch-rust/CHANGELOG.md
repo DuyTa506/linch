@@ -13,6 +13,7 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 - The llama.cpp context-window probe stays under the configured `base_url` (`{base}/props`, and `{base}/v1/props` for a base without `/v1`) and no longer asks the parent of a `/v1` base; behind a `/v1` base a stock llama.cpp needs `context_window`.
 - A retention pass that is dropped (a worker that stops) closes its pruner-lock connection, which is detached from the pool, so the next pass is no longer reported `contended`.
 - A Postgres run claim of a run that has no row ends its transaction before it reads the pruning tombstones, so it no longer needs a second pool connection (a pool of one answered `NotFound` only after the 30 s acquire timeout).
+- A lease renewal that arrives after the release is `LeaseLost` and no longer leases the run again; the epoch fence is unchanged.
 
 ## 0.2.0 - 2026-11-19
 

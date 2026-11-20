@@ -125,10 +125,14 @@ const CLAIM: &str = "UPDATE linch_runs SET status = $3, epoch = $4, owner = $5, 
                      lease_until = clock_timestamp() + $7::float8 * interval '1 millisecond' \
                      WHERE namespace = $1 AND run_id = $2";
 
-/// A renewal: a whole TTL from now, only under the lease's epoch.
+/// A renewal: a whole TTL from now, only under the lease's epoch, and only
+/// while the lease has not been released (a release sets `lease_until` to
+/// NULL), so a renewal that lands after the release does not lease the run
+/// again.
 const RENEW: &str = "UPDATE linch_runs \
                      SET lease_until = clock_timestamp() + $4::float8 * interval '1 millisecond' \
-                     WHERE namespace = $1 AND run_id = $2 AND epoch = $3";
+                     WHERE namespace = $1 AND run_id = $2 AND epoch = $3 \
+                       AND lease_until IS NOT NULL";
 
 /// A release: no live lease, only under the lease's epoch.
 const RELEASE: &str = "UPDATE linch_runs SET lease_until = NULL \

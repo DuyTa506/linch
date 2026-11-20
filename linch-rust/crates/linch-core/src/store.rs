@@ -245,7 +245,10 @@ pub trait RunStore: Send + Sync {
     /// Extend `lease` by a whole [`RunStore::lease_ttl`] from now.
     ///
     /// Raises:
-    ///     StoreError: `LeaseLost` once a later claim moved the epoch.
+    ///     StoreError: `LeaseLost` once a later claim moved the epoch, or,
+    ///         in a store whose claims expire, once the lease was released
+    ///         (a renewal that lands after the release must not lease the
+    ///         run again).
     async fn renew(&self, lease: &Lease) -> Result<(), StoreError> {
         let _ = lease;
         Ok(())
