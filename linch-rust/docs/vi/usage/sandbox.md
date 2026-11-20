@@ -146,6 +146,12 @@ giữ chúng.
   `/proc/cpuinfo` và `/proc/meminfo`, và mọi thứ đọc `/proc/self` đều thất bại; Landlock
   không thể cấp cho một lệnh `/proc/self` của chính nó mà không cấp phần còn lại. Đừng
   đặt bí mật trên command line của server.
+- System V IPC bị từ chối (xem trên), nên một chương trình cần nó thất bại với
+  `Operation not permitted`: `fakeroot` (`shmget: Operation not permitted`; trước khi
+  chặn thì nó chạy được), người dùng `IPC::SysV` của Perl và mọi công cụ chia sẻ bộ nhớ,
+  hàng đợi hay semaphore theo cách đó. Một cơ sở dữ liệu lấy một segment bộ nhớ chia sẻ
+  System V lúc khởi động (PostgreSQL làm vậy cho interlock của nó) không thể khởi động trong
+  sandbox; PostgreSQL chưa được thử ở đây. Dùng `local` hoặc `docker` cho việc như vậy.
 - Các khóa `multiprocessing` của Python cần `/dev/shm`, vốn bị đóng, nên một `Pool` thất
   bại.
 - Giới hạn tính theo từng process, không theo từng lệnh: không có cgroup, nên không có

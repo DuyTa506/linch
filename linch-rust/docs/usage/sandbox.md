@@ -160,6 +160,13 @@ ambient set, since a command would keep them.
   fail; Landlock cannot grant a command its
   own `/proc/self` and not the rest. Do not put secrets on the server's
   command line.
+- System V IPC is refused (see above), so a program that needs it fails with
+  `Operation not permitted`: `fakeroot` (`shmget: Operation not permitted`; it
+  worked before this was refused), Perl's `IPC::SysV` users and any tool that
+  shares memory, queues or semaphores that way. A database that takes a System
+  V shared memory segment at start (PostgreSQL does for its interlock) cannot
+  start in the sandbox; PostgreSQL was not tested here. Use `local` or `docker`
+  for such work.
 - Python's `multiprocessing` locks need `/dev/shm`, which is closed, so a
   `Pool` fails.
 - Limits are per process, not per command: there is no cgroup, so no total
