@@ -969,6 +969,43 @@ fn a_deny_rule_covers_a_command_behind_a_redirect_before_an_option_argument() {
 }
 
 #[test]
+fn a_deny_rule_covers_a_command_behind_an_env_assignment_that_is_not_an_identifier() {
+    let touch = flat(
+        PermissionMode::SkipDangerous,
+        vec![bash_rule("touch *", Deny)],
+    );
+    let bare = flat(
+        PermissionMode::SkipDangerous,
+        vec![bash_rule("touch", Deny)],
+    );
+    for command in [
+        "env X=1 touch M",
+        "env a.b=1 touch M",
+        "env 1X=1 touch M",
+        "env a-b=1 -i touch M",
+    ] {
+        assert_eq!(bash(&touch, command), "deny", "{command:?}");
+    }
+    assert_eq!(bash(&bare, "env a.b=1 touch"), "deny");
+}
+
+#[test]
+fn a_command_substitution_in_a_parameter_expansion_is_unparsed() {
+    for command in [
+        "echo \"${ touch M; }\"",
+        "echo \"${\ttouch M; }\"",
+        "echo \"${| touch M; }\"",
+        "echo ${ touch M; }",
+        "echo ${|touch M; }",
+    ] {
+        assert_eq!(bash(&allow_echo(), command), "ask", "{command:?}");
+    }
+    for command in ["echo \"${x}\"", "echo ${x:-a b}", "echo \"${#x}\" ${!y}"] {
+        assert_eq!(bash(&allow_echo(), command), "allow", "{command:?}");
+    }
+}
+
+#[test]
 fn unparsed_floor_beats_a_generic_allow_in_any_layer_order() {
     let rules = vec![tool("Bash", Allow), bash_rule("rm -rf *", Deny)];
     let engine = flat(PermissionMode::SkipDangerous, rules);

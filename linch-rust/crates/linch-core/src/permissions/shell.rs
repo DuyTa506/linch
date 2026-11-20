@@ -162,6 +162,7 @@ pub fn has_unparsed_construct(command: &str) -> bool {
                 b'\'' | b'"' => quote = Some(c),
                 b'\r' | b'\n' | b'`' | b'(' | b')' => return true,
                 b'$' if matches!(next, Some(b'(' | b'\'')) => return true,
+                b'$' if next == Some(b'{') && blank_or_bar(&b[i + 2..]) => return true,
                 b'#' if i == 0 || break_end == i => return true,
                 b'<' if b[i..].starts_with(b"<<<") => {
                     // A here-string: its word is an ordinary word.
@@ -193,12 +194,21 @@ pub fn has_unparsed_construct(command: &str) -> bool {
             .any(command_is_not_in_the_text)
 }
 
+/// Whether `after`, the text after a `${`, starts with a blank or `|`: bash
+/// 5.3 reads `${ cmd; }` and `${| cmd; }` as command substitutions.
+fn blank_or_bar(after: &[u8]) -> bool {
+    matches!(after.first(), Some(b' ' | b'\t' | b'|'))
+}
+
 /// Whether the body of a `${` inside double quotes, up to its first `}`,
 /// holds a quote, a backslash, a nested `${` or an old-style arithmetic `$[`
 /// (bash nests it, so a `}` inside it does not end the expansion). The shell
 /// reads those on its own (`"${x#'"'}"` quotes a `"` inside the pattern),
 /// which the quote tracking cannot follow, so the operators are not modelled.
 fn quotes_in_expansion(after: &[u8]) -> bool {
+    if blank_or_bar(after) {
+        return true;
+    }
     let end = after.iter().position(|&c| c == b'}').unwrap_or(after.len());
     let body = &after[..end];
     body.iter().any(|c| matches!(c, b'\'' | b'"' | b'\\'))
@@ -398,7 +408,15 @@ fn strip_prefix(segment: &str) -> Command<'_> {
             unquote(word)
         };
         // `env "X=1" cmd`: the wrapper reads the word unquoted.
-        let assignment = plain_assignment || (wrapper.is_some() && is_assignment(&name));
+        let assignment = plain_assignment
+            || wrapper.as_ref().is_some_and(|(wrapper, _)| {
+                if wrapper == "env" {
+                    // `env` takes any word with a `=` as an assignment.
+                    name.contains('=') && !name.starts_with('-')
+                } else {
+                    is_assignment(&name)
+                }
+            });
         let mut skip = 1;
         if assignment {
         } else if RESERVED.contains(&name.as_str()) {
