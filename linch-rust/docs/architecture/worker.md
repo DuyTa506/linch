@@ -331,11 +331,16 @@ cursor (`FOR UPDATE ... SKIP LOCKED`, `batch_size` rows), then one statement
 that deletes the run (or session), its events (or log, tasks and edges) and
 writes the tombstone, with the terminal status (or the idle clock and the
 absence of a live run) checked again in the delete. A pass holds a
-session-level try-lock keyed by database and schema on one pool connection
-from its first batch to its last, so one pruner runs at a time across the
+session-level try-lock keyed by database and schema on one connection from
+its first batch to its last, so one pruner runs at a time across the
 fleet, a second pass cannot start in the pauses between batches (each batch
 is followed by a pause as long as it took, which keeps the pass at most half
 as busy as the database), and a crashed pruner's connection releases the lock.
+The connection is taken from the pool and detached from it (one beyond the
+pool's cap for the pass) and closed at the end of the pass, so a pass that is
+dropped, as when the worker stops, closes it too and frees the lock; a pooled
+connection would have gone back to the pool with the lock still on it, and
+every later pass of the fleet would have reported `contended`.
 A pass that finds the lock taken deletes nothing and reports `contended`.
 
 What it never deletes follows from what other code reads of a run later: a

@@ -14,6 +14,7 @@ use linch_worker::{
     Retention, Worker, enqueue_approve, enqueue_run, fire_due_schedules, get_schedule, job, jobs,
     prune_retained,
 };
+use sqlx::postgres::PgPoolOptions;
 use tokio_util::sync::CancellationToken;
 
 use crate::common::*;
@@ -706,4 +707,63 @@ async fn pruning_the_runs_of_a_schedule_leaves_its_fires_and_jobs_alone() {
     assert_eq!(jobs(&db.pool, NS, Some("h"), 10).await.unwrap().len(), 2);
     worker.stop().await;
     db.finish().await;
+}
+
+/// A retention pass that is aborted between its batches (a worker that
+/// stops drops its pass) frees the pruner lock: a later pass from another
+/// pool (another server's worker) is not `contended` and deletes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_aborted_retention_pass_frees_the_pruner_lock() {
+    let Some(db) = TestDb::new("retention_lock").await else {
+        return;
+    };
+    sqlx::query(
+        "INSERT INTO linch_runs (namespace, run_id, session_id, contract, status, epoch, \
+         checkpoint, last_seq, ended_at) \
+         SELECT 'p9', 'r' || n, 's' || n, 'c', 'completed', 1, '{}', 0, now() - interval '3 days' \
+         FROM generate_series(1, 20000) AS n",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let retention = Retention {
+        terminal_runs: Some(DAY),
+        batch_size: 1,
+        ..Retention::default()
+    };
+    let (pool, config) = (db.pool.clone(), retention.clone());
+    let pass = tokio::spawn(async move { prune_retained(&pool, &config).await });
+    wait_until("the pass to delete its first runs", || async {
+        let pruned: i64 = sqlx::query_scalar("SELECT count(*) FROM linch_pruned_runs")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        pruned >= 3
+    })
+    .await;
+    assert!(!pass.is_finished(), "the pass ended before it was aborted");
+    pass.abort();
+    let _ = pass.await;
+    // Another server's worker: its own pool on the same schema.
+    let other = PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(db.options.clone())
+        .await
+        .unwrap();
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM linch_runs")
+        .fetch_one(&other)
+        .await
+        .unwrap();
+    let one_batch = Retention {
+        batch_size: 10_000,
+        ..retention
+    };
+    let done = prune_retained(&other, &one_batch).await.unwrap();
+    other.close().await;
+    db.finish().await;
+    assert!(
+        !done.contended,
+        "no pruner runs, yet the pass found the lock held and deleted {} of {before} runs",
+        done.runs
+    );
 }

@@ -318,11 +318,15 @@ của đợt (`FOR UPDATE ... SKIP LOCKED`, `batch_size` hàng), rồi một câ
 xóa run (hoặc session), event của nó (hoặc log, task và cạnh) và ghi tombstone,
 trong đó trạng thái terminal (hoặc đồng hồ nhàn rỗi và việc không có run còn
 sống) được kiểm tra lại ngay trong lệnh xóa. Một đợt giữ một try-lock
-mức session, khóa theo database và schema, trên một connection của pool từ lô
+mức session, khóa theo database và schema, trên một connection từ lô
 đầu đến lô cuối, nên cả fleet chỉ có một pruner chạy tại một thời điểm, đợt thứ
 hai không thể xen vào các quãng nghỉ giữa các lô (sau mỗi lô là một quãng nghỉ
 bằng thời gian lô đó chạy, giữ cho đợt bận tối đa một nửa so với database), và
-connection của pruner bị crash nhả khóa. Đợt thấy khóa đã bị giữ không xóa gì
+connection của pruner bị crash nhả khóa. Connection được lấy từ pool rồi tách khỏi
+pool (thêm một connection ngoài giới hạn của pool trong suốt đợt) và đóng khi đợt
+kết thúc, nên một đợt bị drop, như khi worker dừng, cũng đóng nó và nhả khóa; một
+connection nằm trong pool sẽ quay về pool khi khóa vẫn còn, và mọi đợt sau của fleet
+đều báo `contended`. Đợt thấy khóa đã bị giữ không xóa gì
 và báo `contended`.
 
 Những gì không bao giờ bị xóa suy ra từ việc code khác đọc gì của một run về
