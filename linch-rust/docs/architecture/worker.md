@@ -207,7 +207,7 @@ busy session never counts, so a start job is never given up on for that.
 
 A failed job is the dead letter: `failed_at` and `error` are set, it is never
 dequeued again, and it no longer counts against the one-job-per-run index or
-a queue limit (`lease.rs:288-302`). It stays in `linch_worker_jobs` until
+a queue limit (`lease.rs:291-305`). It stays in `linch_worker_jobs` until
 `prune_history` deletes it, `history_retention` after it failed. `error` holds the whole error chain
 (`crates/linch-worker/src/error.rs:40-49`). When a run is failed with its job,
 the run goes first: a crash in between leaves a terminal run, which the job's

@@ -217,11 +217,11 @@ applied migration differs from the embedded one.
 
 | Write | Shape |
 |---|---|
-| Run `commit` | One autocommit statement (`crates/linch-postgres/src/run.rs:140-150`): an `UPDATE` that moves the run row only under the lease's epoch, while `running`, and when `last_seq` is the one the events continue; the events are inserted from the moved row, so they land with it or not at all |
+| Run `commit` | One autocommit statement (`crates/linch-postgres/src/run.rs:144-154`): an `UPDATE` that moves the run row only under the lease's epoch, while `running`, and when `last_seq` is the one the events continue; the events are inserted from the moved row, so they land with it or not at all |
 | Session `append` | One autocommit statement (`crates/linch-postgres/src/session.rs:17-24`): the length moves only from `expected_len`, and the entries are inserted from the moved row at positions `expected_len + n - 1` |
-| Run `create` | A transaction: insert the row with `ON CONFLICT (namespace, run_id) DO NOTHING`, then the first events (`run.rs:334`) |
-| Run `claim` / `seize` | A transaction that locks the row `FOR UPDATE` and reads its lease on the database clock (`clock_timestamp()`), refuses another holder's live lease (`claim` only), then sets status, epoch, owner, holder and `lease_until` (`run.rs:90-104`, `run.rs:250-300`) |
-| Lease `renew` / `release` | One autocommit statement each, matched on the epoch: `lease_until` a TTL from now, or NULL. A renewal that matches no row is `LeaseLost` (`run.rs:106-113`, `run.rs:305-331`) |
+| Run `create` | A transaction: insert the row with `ON CONFLICT (namespace, run_id) DO NOTHING`, then the first events (`run.rs:341`) |
+| Run `claim` / `seize` | A transaction that locks the row `FOR UPDATE` and reads its lease on the database clock (`clock_timestamp()`), refuses another holder's live lease (`claim` only), then sets status, epoch, owner, holder and `lease_until` (`run.rs:90-104`, `run.rs:254-304`) |
+| Lease `renew` / `release` | One autocommit statement each, matched on the epoch: `lease_until` a TTL from now, or NULL. A renewal that matches no row is `LeaseLost` (`run.rs:106-113`, `run.rs:309-338`) |
 | Task writes | A transaction that locks the session row first, so a session's task writes serialize: ids come out in order with no gaps and a claim has one winner (`crates/linch-postgres/src/tasks.rs:1-8`) |
 | File `edit` | A transaction that locks the file row `FOR UPDATE` (`crates/linch-postgres/src/files.rs:1-6`) |
 
@@ -234,12 +234,12 @@ wrote nothing and is retried, up to three tries in all (`lib.rs:153-166`).
 Admission is enforced by the partial unique index, not by a read. A violation
 of `linch_runs_one_live_per_session` reads the live run's id and returns
 `SessionBusy`; if that run ended in between, the insert is tried again, up to
-three times (`run.rs:196-220`, `run.rs:374-396`).
+three times (`run.rs:200-224`, `run.rs:381-408`).
 
 ### Refusal classification
 
 When a commit's statement moves no row, the store reads the row once more and
-names the refusal in the same order as the memory store (`run.rs:154-170`,
+names the refusal in the same order as the memory store (`run.rs:158-174`,
 `codec.rs:120`):
 
 1. no row: `NotFound`;
@@ -250,7 +250,7 @@ names the refusal in the same order as the memory store (`run.rs:154-170`,
 
 If the read finds nothing wrong, the row moved after the refused write and the
 commit is tried again. After three tries it is `Conflict` ("kept changing
-during a commit") (`run.rs:472-506`). A commit that no row could take (a
+during a commit") (`run.rs:498-532`). A commit that no row could take (a
 status of `pending`, an event of another run, or seqs that do not continue
 each other) skips the statement and goes straight to the read. A session append reads the length
 the same way: `NotFound`, or `Conflict` naming both lengths

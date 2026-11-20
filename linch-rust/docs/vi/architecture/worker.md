@@ -204,7 +204,7 @@ session đang bận không bao giờ được tính, nên một job start không
 
 Một job thất bại là dead letter: `failed_at` và `error` được đặt, nó không bao giờ được
 dequeue lại, và nó không còn được tính vào chỉ mục một-job-cho-mỗi-run hay
-giới hạn của hàng đợi (`lease.rs:288-302`). Nó nằm lại trong `linch_worker_jobs` đến khi
+giới hạn của hàng đợi (`lease.rs:291-305`). Nó nằm lại trong `linch_worker_jobs` đến khi
 `prune_history` xóa nó, `history_retention` sau khi nó thất bại. `error` giữ cả chuỗi lỗi
 (`crates/linch-worker/src/error.rs:40-49`). Khi một run bị đánh dấu thất bại cùng job của
 nó, run đi trước: một sự cố ở giữa để lại một run terminal, mà lần thử kế tiếp của job

@@ -213,11 +213,11 @@ một migration đã áp dụng khác với bản nhúng.
 
 | Ghi | Hình dạng |
 |---|---|
-| `commit` của run | Một câu lệnh autocommit (`crates/linch-postgres/src/run.rs:140-150`): một `UPDATE` chỉ di chuyển hàng run dưới epoch của lease, khi đang `running`, và khi `last_seq` đúng là giá trị mà các event nối tiếp; các event được chèn từ hàng đã di chuyển, nên chúng được ghi cùng với nó hoặc không được ghi |
+| `commit` của run | Một câu lệnh autocommit (`crates/linch-postgres/src/run.rs:144-154`): một `UPDATE` chỉ di chuyển hàng run dưới epoch của lease, khi đang `running`, và khi `last_seq` đúng là giá trị mà các event nối tiếp; các event được chèn từ hàng đã di chuyển, nên chúng được ghi cùng với nó hoặc không được ghi |
 | `append` của session | Một câu lệnh autocommit (`crates/linch-postgres/src/session.rs:17-24`): độ dài chỉ di chuyển từ `expected_len`, và các entry được chèn từ hàng đã di chuyển tại các vị trí `expected_len + n - 1` |
-| `create` của run | Một transaction: chèn hàng với `ON CONFLICT (namespace, run_id) DO NOTHING`, rồi đến các event đầu tiên (`run.rs:334`) |
-| `claim` / `seize` của run | Một transaction khóa hàng bằng `FOR UPDATE` và đọc lease của nó theo đồng hồ cơ sở dữ liệu (`clock_timestamp()`), từ chối lease còn sống của holder khác (chỉ `claim`), rồi đặt trạng thái, epoch, owner, holder và `lease_until` (`run.rs:90-104`, `run.rs:250-300`) |
-| `renew` / `release` lease | Mỗi cái một câu lệnh autocommit, khớp theo epoch: `lease_until` bằng một TTL kể từ bây giờ, hoặc NULL. Một lần gia hạn không khớp hàng nào là `LeaseLost` (`run.rs:106-113`, `run.rs:305-331`) |
+| `create` của run | Một transaction: chèn hàng với `ON CONFLICT (namespace, run_id) DO NOTHING`, rồi đến các event đầu tiên (`run.rs:341`) |
+| `claim` / `seize` của run | Một transaction khóa hàng bằng `FOR UPDATE` và đọc lease của nó theo đồng hồ cơ sở dữ liệu (`clock_timestamp()`), từ chối lease còn sống của holder khác (chỉ `claim`), rồi đặt trạng thái, epoch, owner, holder và `lease_until` (`run.rs:90-104`, `run.rs:254-304`) |
+| `renew` / `release` lease | Mỗi cái một câu lệnh autocommit, khớp theo epoch: `lease_until` bằng một TTL kể từ bây giờ, hoặc NULL. Một lần gia hạn không khớp hàng nào là `LeaseLost` (`run.rs:106-113`, `run.rs:309-338`) |
 | Ghi task | Một transaction khóa hàng session trước, nên các lần ghi task của một session được tuần tự hóa: id ra theo thứ tự không có khoảng trống và một lần claim có một bên thắng (`crates/linch-postgres/src/tasks.rs:1-8`) |
 | `edit` của file | Một transaction khóa hàng file bằng `FOR UPDATE` (`crates/linch-postgres/src/files.rs:1-6`) |
 
@@ -230,12 +230,12 @@ lần thử (`lib.rs:153-166`).
 Việc nhận run (admission) được thực thi bởi chỉ mục unique một phần, không phải bởi một
 lần đọc. Một vi phạm `linch_runs_one_live_per_session` đọc id của run đang chạy và trả về
 `SessionBusy`; nếu run đó đã kết thúc trong khoảng giữa, việc chèn được thử lại, tối đa ba
-lần (`run.rs:196-220`, `run.rs:374-396`).
+lần (`run.rs:200-224`, `run.rs:381-408`).
 
 ### Phân loại từ chối
 
 Khi câu lệnh của một commit không di chuyển hàng nào, store đọc hàng thêm một lần và đặt
-tên cho lần từ chối theo cùng thứ tự với store trong bộ nhớ (`run.rs:154-170`,
+tên cho lần từ chối theo cùng thứ tự với store trong bộ nhớ (`run.rs:158-174`,
 `codec.rs:120`):
 
 1. không có hàng: `NotFound`;
@@ -246,7 +246,7 @@ tên cho lần từ chối theo cùng thứ tự với store trong bộ nhớ (`
 
 Nếu lần đọc không thấy gì sai, hàng đã di chuyển sau lần ghi bị từ chối và commit được
 thử lại. Sau ba lần thử thì là `Conflict` ("kept changing during a commit")
-(`run.rs:472-506`). Một commit mà không hàng nào có thể nhận (trạng thái `pending`, một
+(`run.rs:498-532`). Một commit mà không hàng nào có thể nhận (trạng thái `pending`, một
 event của run khác, hoặc các seq không nối tiếp nhau) bỏ qua câu lệnh và đi thẳng tới lần
 đọc. Một lần append của session đọc độ dài theo cách tương tự: `NotFound`, hoặc `Conflict`
 nêu cả hai độ dài (`session.rs:146-168`).

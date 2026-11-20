@@ -19,19 +19,19 @@ dẫn đầu process group của riêng nó.
 
 ## Cấu hình
 
-`McpServerConfig` (`crates/linch-mcp/src/config.rs:145`):
+`McpServerConfig` (`crates/linch-mcp/src/config.rs:169`):
 
 | Trường | Mặc định (`new`) | Ý nghĩa |
 |---|---|---|
-| `name` | bắt buộc | `<server>` trong `mcp__<server>__<tool>`. Chữ cái ASCII, chữ số, `-` và một dấu `_` đơn giữa chúng, để tên tool tách ra gọn gàng (`config.rs:191`) |
+| `name` | bắt buộc | `<server>` trong `mcp__<server>__<tool>`. Chữ cái ASCII, chữ số, `-` và một dấu `_` đơn giữa chúng, để tên tool tách ra gọn gàng (`config.rs:215`) |
 | `transport` | bắt buộc | `Stdio { command, args, env }`, `Http { url, headers }` hoặc `Custom(Arc<dyn Connector>)` |
 | `trust_annotations` | `false` | Có cấp scope `read` cho tool có `readOnlyHint` hay không |
 | `call_timeout` | 300 s | Thời gian chờ tối đa cho một lời gọi tool trước khi nó bị hủy |
-| `reconnect` | `ReconnectPolicy::default()` | 5 lần thử, 0.5 s tăng gấp đôi đến 30 s, 30 s cho mỗi lần thử (`config.rs:131-141`) |
+| `reconnect` | `ReconnectPolicy::default()` | 5 lần thử, 0.5 s tăng gấp đôi đến 30 s, 30 s cho mỗi lần thử (`config.rs:155-165`) |
 
-`validate()` (`config.rs:174`) từ chối một tên sai và timeout bằng 0 cho lời gọi hoặc
+`validate()` (`config.rs:198`) từ chối một tên sai và timeout bằng 0 cho lời gọi hoặc
 lần thử; header được kiểm tra khi transport được dựng. `Custom` nhận một
-`Connector` (`crates/linch-mcp/src/connector.rs:110`) cho các server trong process
+`Connector` (`crates/linch-mcp/src/connector.rs:119`) cho các server trong process
 và test: nó mở một transport và chạy `Handler::serve` trên đó.
 
 Transport HTTP dùng một client `reqwest` riêng của crate
@@ -61,7 +61,7 @@ Khi kết nối, và ở mỗi lần relist, mỗi tool được liệt kê tr�
   mặc định và không bao giờ chạy song song.
 - **Schema.** `inputSchema` của server; thiếu `type` hoặc `properties` thì
   mặc định là một schema đối tượng rỗng.
-- **Kết quả** (`crates/linch-mcp/src/result.rs:15`). Các block văn bản được nối bằng
+- **Kết quả** (`crates/linch-mcp/src/result.rs:38`). Các block văn bản được nối bằng
   ký tự xuống dòng thành giá trị đầu ra. Ảnh đi vào `metadata.images` (tối đa 8 ảnh và
   tổng cộng 4 MiB dữ liệu base64; ảnh sau đó bị bỏ và văn bản ghi
   `[image omitted: over the size limit]`) và để lại `[image]` trong văn bản; âm thanh, resource nhị phân và các block khác để lại
@@ -88,14 +88,14 @@ Mọi lỗi là một `ToolOutputError` mà model đọc được; mã dành cho
 
 ## Vòng đời
 
-`McpServer::connect(config, registry)` (`crates/linch-mcp/src/server.rs:82`)
+`McpServer::connect(config, registry)` (`crates/linch-mcp/src/server.rs:97`)
 xác thực cấu hình, thực hiện một lần thử (kết nối, subscribe, liệt kê) trong
 `attempt_timeout`, chuyển hướng các lời gọi tới kết nối mới, rồi đăng ký
-các tool, nên một tool không bao giờ hiển thị trước khi nó có thể được gọi (`server.rs:317`).
+các tool, nên một tool không bao giờ hiển thị trước khi nó có thể được gọi (`server.rs:355`).
 Lần thử đầu tiên thất bại là `McpError::Connect` và không đăng ký gì; nó không
 được thử lại.
 
-`ServerStatus` (`server.rs:27`): `Connected`, `Reconnecting`, `Unavailable`
+`ServerStatus` (`server.rs:42`): `Connected`, `Reconnecting`, `Unavailable`
 (mọi lần thử kết nối lại đều thất bại; các tool vẫn được đăng ký và thất bại với
 `mcp_unavailable`) và `Closed`. `status()` đọc nó; `watch_status()`
 trả về một `watch::Receiver`.
@@ -103,10 +103,10 @@ trả về một `watch::Receiver`.
 ### Relist
 
 Supervisor liệt kê lại các tool khi có `notifications/tools/list_changed`
-và sau mỗi lần kết nối lại (`server.rs:219-252`). Từ giao thức 2026-07-28, thông báo đó
+và sau mỗi lần kết nối lại (`server.rs:234-271`). Từ giao thức 2026-07-28, thông báo đó
 chỉ đến trên một stream `subscriptions/listen`, mà client mở trước khi liệt kê, nên không
 bỏ lỡ thay đổi nào ở giữa
-(`crates/linch-mcp/src/listener.rs:65`, `server.rs:344`); các server cũ hơn gửi nó
+(`crates/linch-mcp/src/listener.rs:65`, `server.rs:382`); các server cũ hơn gửi nó
 không cần yêu cầu tới `Handler`. Một subscription mà server kết thúc bình thường
 được gia hạn sau 1 s.
 
@@ -134,7 +134,7 @@ Một kết nối được coi là mất khi transport đóng, hoặc với mộ
 khi một lần ghi thất bại, vì stdin của nó đã mất (`tool.rs:94-100`). Trạng thái
 chuyển thành `Reconnecting`, các lời gọi thất bại với `mcp_unavailable`, và supervisor
 thử lại theo `ReconnectPolicy`: lần thử `n` chờ
-`min(max_delay, initial_delay * 2^n)` (`config.rs:123`). Mỗi lần thử
+`min(max_delay, initial_delay * 2^n)` (`config.rs:147`). Mỗi lần thử
 kết nối lại, subscribe lại và relist. Sau lần thất bại cuối cùng, trạng thái là
 `Unavailable` cho đến khi server bị ngắt kết nối. `attempts: 0` không bao giờ kết nối lại.
 
@@ -151,20 +151,20 @@ rmcp, vì timeout của rmcp chờ việc gửi lệnh hủy (`tool.rs:228-229`)
 
 ### Đóng
 
-`disconnect()` (`server.rs:154`) dispose mọi đăng ký cùng lúc, rồi
+`disconnect()` (`server.rs:169`) dispose mọi đăng ký cùng lúc, rồi
 chờ transport đóng. Drop handle mà không gọi nó sẽ dispose các đăng ký
 ngay lập tức và đóng server trong nền
-(`server.rs:169-173`). Một lần sync chạy đua với việc đóng sẽ không đăng ký gì: nó kiểm
-tra close token dưới khóa catalog (`server.rs:332-337`).
+(`server.rs:184-188`). Một lần sync chạy đua với việc đóng sẽ không đăng ký gì: nó kiểm
+tra close token dưới khóa catalog (`server.rs:370-375`).
 
 Với một server stdio:
 
 - **Process group.** Server dẫn đầu group của riêng nó, nên những gì nó khởi động
-  (`npx`, `uvx`, `sh -c`) đi theo nó (`connector.rs:154-157`).
+  (`npx`, `uvx`, `sh -c`) đi theo nó (`connector.rs:163-166`).
 - **Kill group.** rmcp chỉ gửi tín hiệu cho group khi server sống lâu hơn thời gian ân hạn
   của nó. `KillGroup` gửi `SIGKILL` cho cả group ngay khi server đã thoát,
   nên một server thoát khi stdin gặp EOF không để lại tiến trình con nào
-  (`connector.rs:190-232`).
+  (`connector.rs:199-241`).
 - **Lifeline.** Mỗi server có một watchdog `/bin/sh` nhỏ đọc stdin của chính nó,
   một pipe mà chỉ client giữ đầu ghi, và kill group của server khi nó gặp EOF.
   Kernel đóng pipe đó khi client chết, kể cả bằng `SIGKILL`, nên một server bỏ
@@ -174,7 +174,7 @@ Với một server stdio:
 - **Đóng có giới hạn.** Việc đóng của chính rmcp mất tối đa khoảng 6 s (3 s sau khi
   stdin đóng, 3 s nữa sau `SIGTERM`). Khi server đã ngừng đọc và một lần ghi đã làm
   đầy stdin của nó, việc đóng đó sẽ chờ mãi; `BoundedClose` bỏ cuộc sau 10 s và drop
-  transport sẽ gửi `SIGKILL` cho group (`connector.rs:31-34`, `connector.rs:163-188`).
+  transport sẽ gửi `SIGKILL` cho group (`connector.rs:31-34`, `connector.rs:172-197`).
 
 ## Các giới hạn
 
@@ -183,11 +183,11 @@ Những gì một server có thể khiến client giữ hoặc chờ
 
 | Giới hạn | Giá trị | Ở đâu |
 |---|---|---|
-| Số trang `tools/list` cho mỗi lần liệt kê | 100 | `server.rs:20` |
-| Số tool giữ lại từ một lần liệt kê | 1000 | `server.rs:23` |
+| Số trang `tools/list` cho mỗi lần liệt kê | 100 | `server.rs:22` |
+| Số tool giữ lại từ một lần liệt kê | 1000 | `server.rs:25` |
 | Số byte của một lần liệt kê (tên, mô tả và input schema dạng JSON) | 4 MiB, kiểm tra sau mỗi trang; vượt thì lần liệt kê đầu làm kết nối thất bại với `ConnectError::ListTooLarge` và một relist giữ nguyên các tool hiện có | `server.rs` (`MAX_LIST_BYTES`) |
 | Thời gian giữa hai relist do `list_changed` | 1 s, các thông báo ở giữa dùng chung một relist | `server.rs` (`MIN_RELIST_INTERVAL`) |
-| Một lần thử kết nối, subscribe lại hoặc relist | `attempt_timeout` (30 s) | `server.rs:241`, `server.rs:285` |
+| Một lần thử kết nối, subscribe lại hoặc relist | `attempt_timeout` (30 s) | `server.rs:257`, `server.rs:323` |
 | Một lời gọi tool | `call_timeout` (300 s) | `tool.rs:264` |
 | Số lệnh hủy đang chờ trên một kết nối | 64; các lệnh sau đó bị bỏ | `tool.rs:29` |
 | Văn bản kết quả, và văn bản lỗi của tool (kể cả thông điệp của một lỗi JSON-RPC) | 30 000 byte, cắt ở ranh giới ký tự | `result.rs:10`, `tool.rs` (`coded`) |
@@ -200,9 +200,9 @@ Những gì một server có thể khiến client giữ hoặc chờ
 - **Môi trường.** Một server stdio chỉ kế thừa `HOME`, `LOGNAME`, `PATH`,
   `SHELL`, `TERM` và `USER` từ host, cùng danh sách mà MCP Python SDK
   dùng; mọi thứ khác đến từ `env` của cấu hình
-  (`connector.rs:27-29`, `connector.rs:146-153`).
+  (`connector.rs:27-29`, `connector.rs:155-162`).
 - **Đầu ra debug.** `Debug` của `McpTransport` in tên của biến môi trường và header,
-  không bao giờ in giá trị của chúng (`config.rs:83-101`), và hiện URL HTTP với
+  không bao giờ in giá trị của chúng (`config.rs:87-125`), và hiện URL HTTP với
   user name, mật khẩu và query được thay bằng `redacted` (một chuỗi không phải
   URL hiện là `[redacted]`), nên ghi log một cấu hình không làm lộ token.
 
