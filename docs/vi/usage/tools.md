@@ -709,8 +709,10 @@ Cách Bash rule đọc một lệnh:
   cách sau `>&` là cú pháp chưa phân tích được. Đúng
   `/dev/null`, `/dev/stdout`, `/dev/stderr` không phải là tệp. Rule allow-all
   (đúng pattern `*`) được miễn: nó vốn đã cho phép mọi lệnh nên
-  `BashRule("*", "allow")` bao phủ `cmd > file`. Rule deny và ask không đổi, và
-  cú pháp chưa phân tích được không bao giờ được cho phép, kể cả bởi allow-all.
+  `BashRule("*", "allow")` bao phủ `cmd > file`. Rule khớp đầu tiên của một đoạn
+  lệnh quyết định đoạn đó có phải allow-all hay không; một rule allow-all đứng sau
+  vẫn bao phủ chuyển hướng mà rule allow hẹp đứng trước không bao phủ. Rule deny
+  và ask không đổi, và cú pháp chưa phân tích được không bao giờ được cho phép, kể cả bởi allow-all.
 - Rule deny hoặc ask khớp từng đoạn lệnh như được viết, và khớp lại sau khi
   từng từ được bỏ dấu nháy (`\rm`, `r""m`, `git 'push'`; đối số có dấu nháy vẫn
   là một từ, nên `* --force` không khớp bên trong một commit message) và các từ

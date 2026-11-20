@@ -182,3 +182,35 @@ def test_a_redirect_to_a_file_spelled_like_a_descriptor_is_a_file_redirect(comma
     assert _allow_echo(command) == "ask"
     # The allow-all rule treats them like any other file redirect.
     assert _bash([BashRule("*", "allow")], command) == "allow"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pytest -q > test.log",
+        "echo x >> f",
+        "build 2>err.log | tee out.log > all.log",
+        "pytest -q >/dev/null 2>&1",
+    ],
+)
+def test_an_allow_all_rule_covers_each_segment_that_redirects_to_a_file(command: str) -> None:
+    # Source: `an_allow_all_rule_covers_a_file_redirect_but_a_narrow_rule_does_not`.
+    assert _bash([BashRule("*", "allow")], command) == "allow"
+
+
+@pytest.mark.parametrize("pattern", ["echo", "echo *", "git *", "* x", "**x"])
+@pytest.mark.parametrize("command", ["echo x > f", "git log >> f"])
+def test_a_narrow_pattern_does_not_cover_a_file_redirect(pattern: str, command: str) -> None:
+    assert _bash([BashRule(pattern, "allow")], command) != "allow"
+
+
+def test_a_regex_pattern_is_not_the_allow_all_rule() -> None:
+    assert _bash([BashRule({"regex": ".*"}, "allow")], "echo x > f") == "ask"
+
+
+def test_the_first_rule_that_matches_a_segment_decides_whether_it_is_allow_all() -> None:
+    narrow_first: list[PermissionRule] = [BashRule("echo", "allow"), BashRule("*", "allow")]
+    assert _bash(narrow_first, "ls > f") == "allow"
+    # Rust asks for `echo x > f` here (one pool per layer); Python re-evaluates the
+    # pool from the later `*` rule and allows it. See the pooled-rules test above.
+    assert _bash(narrow_first, "echo x > f") == "allow"

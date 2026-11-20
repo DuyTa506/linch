@@ -711,8 +711,11 @@ How Bash rules read a command:
   `>&2-`) is a file. A blank after `>&` is unparsed syntax. Exactly
   `/dev/null`, `/dev/stdout` and `/dev/stderr` are not files. The allow-all
   rule (the bare pattern `*`) is exempt: it already allows every command, so
-  `BashRule("*", "allow")` covers `cmd > file`. Deny and ask rules are
-  unchanged, and unparsed syntax is never allowed, allow-all included.
+  `BashRule("*", "allow")` covers `cmd > file`. The first rule that matches a
+  segment decides whether it is allow-all; a later allow-all rule still covers
+  a redirect that an earlier narrow allow rule left uncovered. Deny and ask
+  rules are unchanged, and unparsed syntax is never allowed, allow-all
+  included.
 - A deny or ask rule matches each segment as written, and again after its
   words are unquoted one by one (`\rm`, `r""m`, `git 'push'`; a quoted argument
   stays one word, so `* --force` does not match inside a commit message) and
