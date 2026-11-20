@@ -84,7 +84,10 @@ linch-server: listening on ws://127.0.0.1:8731/rpc
 - Cấu hình được đọc một lần khi khởi động, và đọc nghiêm ngặt: một trường không xác
   định ở bất kỳ cấp nào, một biến token chưa được đặt, một workspace root không tồn
   tại hoặc một giới hạn bằng 0 sẽ dừng server với mã thoát 2 và lý do trên stderr.
-  Mã thoát 1 nghĩa là lỗi I/O; 0 là dừng bình thường.
+  Mã thoát 1 nghĩa là lỗi I/O; 0 là dừng bình thường. Một lỗi parse nói đó là loại
+  lỗi nào, điều gì được mong đợi, cùng dòng và cột, và không bao giờ lặp lại một chuỗi
+  của tệp (một trường không xác định không được nêu tên: danh sách các trường được mong
+  đợi và vị trí chỉ ra nó), vì tệp chứa token và DSN.
 - Tệp socket do một server đã dừng để lại sẽ được thay thế, và tệp bị xóa khi tắt.
   Quyền của tệp theo umask.
 - HTTP là HTTP thuần: hãy đặt TLS phía trước, hoặc chỉ lắng nghe trên loopback.

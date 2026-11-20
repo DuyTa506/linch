@@ -426,7 +426,7 @@ pub enum ConfigError {
     Read(#[source] std::io::Error),
     /// The JSON is malformed or has an unknown or mistyped field. The text
     /// says where and what was expected, and never repeats a string of the
-    /// input (see [`redact`]).
+    /// input.
     #[error("invalid config: {0}")]
     Json(String),
     /// Neither `socket` nor `http` is set, and there is no `worker`.

@@ -84,7 +84,11 @@ linch-server: listening on ws://127.0.0.1:8731/rpc
 - The config is read once at startup, and strictly: an unknown field at any
   level, an unset token variable, a workspace root that does not exist or a
   cap of 0 stops the server with exit status 2 and the reason on stderr.
-  Exit status 1 means an I/O failure; 0 a clean stop.
+  Exit status 1 means an I/O failure; 0 a clean stop. A parse error says
+  what kind of mistake it is, what was expected and the line and column, and
+  never repeats a string of the file (an unknown field is not named: the
+  list of the fields that were expected and the position point at it), for
+  the file holds tokens and DSNs.
 - A socket file left by a stopped server is replaced, and the file is
   removed at shutdown. Its permissions follow the umask.
 - HTTP is plain: put TLS in front of it, or listen on loopback only.
