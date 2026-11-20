@@ -12,7 +12,7 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 - **`Grep` memory.** A `Grep` pattern may compile to at most 10 MiB (a larger one is an `invalid_query`) and one matcher's lazy DFA cache is capped at 32 MiB, down from the library's 100 MiB and 1000 MiB.
 
-- **`Edit` size.** `Edit` with `replace_all` computes the size of its result before building it and refuses one past 10 MiB (`too_large`); an empty `old_string` with `replace_all` is refused (`empty_old_string`).
+- **`Edit` size and memory.** `Edit` counts the matches and works out the size of its result before it builds anything from them, and refuses a result past 10 MiB (`too_large`, whether it replaces one match or all); an empty `old_string` with `replace_all` is refused (`empty_old_string`); one `Edit` of a 10 MiB file with a one-byte `old_string` no longer holds a list of every match and every line range (peak memory 255 MiB before, under 64 MiB now).
 
 ## 0.2.0 - 2026-11-19
 
