@@ -258,7 +258,7 @@ lời gọi khác.
 | `Glob` | read | Quy tắc glob của ripgrep, mới nhất trước, tối đa 1000 đường dẫn |
 | `Bash` | exec | `/bin/sh -c` tại gốc của workspace; với `run_in_background` nó trả về ngay ([bên dưới](#lệnh-chạy-nền)) |
 | `BashOutput` | read | Những gì một lệnh chạy nền đã in kể từ lần đọc trước, và nó đã kết thúc chưa |
-| `BashKill` | exec | Kill process group của một lệnh chạy nền |
+| `BashKill` | exec | Kill process group của một lệnh chạy nền, và khi chương trình phụ trợ `linch-reaper` bật, cả những gì nó đã khởi động |
 
 ```python
 import asyncio
@@ -374,14 +374,22 @@ kể từ lần đọc trước. Với `wait_ms` (tối đa 600000), nó chờ c
 lệnh kết thúc trước. Một lệnh còn đang chạy được đọc như một kết quả thành công
 kết thúc bằng `[bash_... still running; ...]`; một lệnh đã kết thúc được đọc như
 kết quả của `Bash` chạy ở foreground (`[exit code 0]`, hoặc một lỗi nếu thoát với
-mã khác 0 hoặc hết timeout). `BashKill` kill process group của nó và trả về phần
-đầu ra còn lại.
+mã khác 0 hoặc hết timeout). `BashKill` kill process group của lệnh (và, khi chương trình
+phụ trợ bật, cả những gì nó đã khởi động; xem bên dưới) và trả về phần đầu ra còn lại.
 
 - **Vòng đời.** Một lệnh chạy nền thuộc về session của nó trong agent handle này
   và sống lâu hơn run đã khởi động nó. Nó bị kill sau `timeout_ms` (mặc định 30
   phút, tối đa 30 phút), bởi `BashKill`, bởi `agent.close_session(session_id)`,
   bởi `agent.close()`, và khi server dừng, kể cả bằng SIGKILL: một watchdog
   trong process group của nó kill cả group khi đầu pipe phía server đóng lại.
+- **Những gì kết thúc cùng nó.** Theo mặc định, process group của lệnh: một process rời
+  khỏi nó (`setsid`, `setpgid`) hoặc được giao cho `init` (một daemon) sống lâu hơn lệnh, và
+  một `Bash` foreground kết thúc theo cùng cách, cùng lời gọi của nó. Trên Linux,
+  `LINCH_REAPER=1` (với `linch-server`) bật một chương trình phụ trợ giữ mọi process lệnh đã
+  khởi động, kể cả những process đó, dù có bỏ qua `SIGTERM` hay không, và kết thúc chúng cùng
+  lệnh và khi server chết; nó tốn thêm một process cho mỗi lệnh (xem
+  [Sandbox](sandbox.md#những-gì-kết-thúc-cùng-một-lệnh)). Một process được khởi động qua một
+  dịch vụ khác (`systemd-run --user`, `at`, `cron`) không phải của lệnh.
 - **Không sống sót qua restart.** Sau khi server khởi động lại, hoặc từ một agent
   handle khác, id của nó không chỉ tới gì: `BashOutput` và `BashKill` thất bại
   với `no_such_process` và nói điều đó cho model. Một run được resume mà đã khởi

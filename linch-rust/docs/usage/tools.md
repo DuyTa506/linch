@@ -258,7 +258,7 @@ it (`bash: False` leaves out `Bash`, `BashOutput` and `BashKill`):
 | `Glob` | read | ripgrep glob rules, newest first, at most 1000 paths |
 | `Bash` | exec | `/bin/sh -c` in the workspace root; with `run_in_background` it returns at once ([below](#background-commands)) |
 | `BashOutput` | read | What a background command printed since the last read, and whether it ended |
-| `BashKill` | exec | Kills a background command's process group |
+| `BashKill` | exec | Kills a background command's process group, and with the `linch-reaper` helper on, what it started |
 
 ```python
 import asyncio
@@ -375,8 +375,8 @@ the command printed since the last read. With `wait_ms` (up to 600000) it
 waits that long for the command to end first. A command still running reads
 as a success ending in `[bash_... still running; ...]`; an ended one reads as
 a foreground `Bash` result would (`[exit code 0]`, or an error for a nonzero
-exit or a timeout). `BashKill` kills its process group and returns the rest of
-its output.
+exit or a timeout). `BashKill` kills the command's process group (and, with
+the helper on, what it started; see below) and returns the rest of its output.
 
 - **Lifetime.** A background command belongs to its session in this agent
   handle and outlives the run that started it. It is killed after
@@ -384,6 +384,15 @@ its output.
   `agent.close_session(session_id)`, by `agent.close()`, and when the server
   stops, even by SIGKILL: a watchdog in its process group kills the group when
   the server's end of a pipe closes.
+- **What ends with it.** By default, the command's process group: a process
+  that leaves it (`setsid`, `setpgid`) or is handed to `init` (a daemon)
+  outlives the command, and a foreground `Bash` ends the same way with its
+  call. On Linux, `LINCH_REAPER=1` (for `linch-server`) turns on a helper that
+  holds every process the command started, including those, whether or not
+  they ignore `SIGTERM`, and ends them with the command and when the server
+  dies; it costs a process per command (see
+  [Sandbox](sandbox.md#what-ends-with-a-command)). A process started through
+  another service (`systemd-run --user`, `at`, `cron`) is not the command's.
 - **No restart survives it.** After a server restart, or from another agent
   handle, its id names nothing: `BashOutput` and `BashKill` fail with
   `no_such_process` and tell the model so. A resumed run that started one has

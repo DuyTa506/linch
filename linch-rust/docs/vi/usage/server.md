@@ -682,6 +682,17 @@ server = Server(env={"DEEPSEEK_API_KEY": "<read from your secret store>"})
 
 `env` là toàn bộ môi trường của server; không có gì khác được truyền theo.
 
+## Kết thúc những gì một lệnh đã khởi động
+
+Theo mặc định một lệnh `Bash` cục bộ được giữ bởi process group của nó, nên một process nó
+khởi động bằng `setsid` hoặc double-fork sống lâu hơn lời gọi. Đặt `LINCH_REAPER=1` trong môi
+trường của server (trên Linux) và server chạy mỗi lệnh dưới một chương trình phụ trợ, chính nó
+được khởi động dưới dạng `linch-server --linch-reaper`, kết thúc mọi thứ lệnh đã khởi động, khi
+lệnh thoát, hết timeout, bị hủy hay bị kill, và khi server chết. Nó tốn một process cho mỗi
+lệnh (khoảng 3,5 đến 4 ms so với 0,6 đến 0,8 ms cho một `true` `local`), nên nó tắt theo mặc
+định. Xem [Sandbox](./sandbox.md#những-gì-kết-thúc-cùng-một-lệnh) để biết cái gì được giữ và
+cái gì không.
+
 ---
 
 ## Các trang liên quan

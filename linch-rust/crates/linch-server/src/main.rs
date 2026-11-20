@@ -14,6 +14,11 @@
 //!   database schema and exit (`--dsn-env NAME` or `--config FILE`; see
 //!   the `linch_server` crate docs for the output and exit status).
 //!
+//! - `linch-server --linch-reaper -- PROGRAM ARG...` is how the server runs
+//!   itself as the helper that ends what a local command started; it is not
+//!   for callers. `LINCH_REAPER=1` in the server's environment turns it on
+//!   for every local command (see `linch_tools::reaper`).
+//!
 //! Provider keys come from its environment and are not passed to the
 //! processes it starts (MCP servers, Bash), but they stay in its own
 //! environment; on Linux the process is marked not dumpable, so a child
@@ -90,6 +95,13 @@ fn parse(args: &[String]) -> Option<Command> {
 }
 
 fn main() -> ExitCode {
+    // First, before anything else starts: this executable is also the helper
+    // that ends what a local command started (`linch-reaper`), so the wheel
+    // needs no second program. Started as one it does only that; otherwise
+    // it registers itself as the helper for the commands it starts.
+    if let Some(code) = linch_tools::reaper::enter() {
+        return code;
+    }
     #[cfg(target_os = "linux")]
     if let Err(error) =
         rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)

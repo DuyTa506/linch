@@ -5,7 +5,9 @@
 //! thread that first restricts itself; the server's other threads stay
 //! unrestricted, and no code runs between fork and exec. Rlimits are
 //! per process, so `prlimit` sets them and then execs the shell, keeping
-//! its pid, its process group and the lifeline's stdin.
+//! its pid, its process group and the helper's stdin. The helper that
+//! ends what a command started (see `crate::reaper`) is a separate program
+//! run inside the same restrictions.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::DirBuilder;
@@ -21,15 +23,16 @@ use landlock::{
     RulesetCreatedAttr, RulesetStatus, Scope, path_beneath_rules,
 };
 use linch_core::SessionId;
-use rustix::process::{Pid, Signal, kill_process_group};
 use tempfile::TempDir;
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 
 use super::{ETC_READ_PATHS, SYSTEM_READ_PATHS, SandboxPolicy, seccomp};
 use crate::bash::process::{self, Spawned, Started};
+use crate::bash::supervisor;
 use crate::exec::{ExecutionError, Launch, Shell};
+use crate::reaper::ReaperCommand;
 
 /// Devices a command may read and write.
 const DEVICES: [&str; 5] = [
@@ -53,6 +56,9 @@ struct Rules {
     network: bool,
     root: PathBuf,
     read: Vec<PathBuf>,
+    /// The `linch-reaper` helper every command runs under, if found: it
+    /// must be executable inside the sandbox.
+    reaper: Option<PathBuf>,
 }
 
 impl Rules {
@@ -82,6 +88,11 @@ impl Rules {
             .add_rules(path_beneath_rules(DEVICES, AccessFs::from_file(LANDLOCK)))
             .map_err(error)?
             .add_rules(path_beneath_rules(
+                &self.reaper,
+                AccessFs::Execute | AccessFs::ReadFile,
+            ))
+            .map_err(error)?
+            .add_rules(path_beneath_rules(
                 [self.root.as_path(), home],
                 AccessFs::from_all(LANDLOCK),
             ))
@@ -103,6 +114,8 @@ pub(in crate::exec) struct SandboxShell {
     policy: SandboxPolicy,
     prlimit: PathBuf,
     rules: Arc<Rules>,
+    /// The helper commands run under, if there is one the sandbox trusts.
+    helper: Option<ReaperCommand>,
     scratch: TempDir,
     homes: Mutex<HashMap<SessionId, PathBuf>>,
     next: AtomicU64,
@@ -140,15 +153,17 @@ impl SandboxShell {
         let mut read: Vec<PathBuf> = SYSTEM_READ_PATHS.iter().map(PathBuf::from).collect();
         read.extend(etc_read_paths(etc));
         read.extend(policy.read_paths.iter().cloned());
-        let rules = Arc::new(Rules {
-            network: policy.network,
-            root: root.to_path_buf(),
-            read,
-        });
         let scratch = tempfile::Builder::new()
             .prefix("linch-sandbox-")
             .tempdir()
             .map_err(io)?;
+        let helper = trusted(supervisor::program(), &[root, scratch.path()]);
+        let rules = Arc::new(Rules {
+            network: policy.network,
+            root: root.to_path_buf(),
+            read,
+            reaper: helper.as_ref().map(|helper| helper.program.clone()),
+        });
         let probe = Arc::clone(&rules);
         let home = scratch.path().to_path_buf();
         let checked = std::thread::Builder::new()
@@ -162,6 +177,7 @@ impl SandboxShell {
             policy,
             prlimit,
             rules,
+            helper,
             scratch,
             homes: Mutex::default(),
             next: AtomicU64::new(0),
@@ -240,6 +256,7 @@ impl Shell for SandboxShell {
             prlimit: self.prlimit.clone(),
             policy: self.policy.clone(),
             shell,
+            helper: self.helper.clone(),
             cwd: launch.cwd.to_path_buf(),
             env,
             home,
@@ -250,18 +267,15 @@ impl Shell for SandboxShell {
         std::thread::Builder::new()
             .name("linch-sandbox".into())
             .spawn(move || {
-                if let Err(Ok(child)) = sent.send(job.run(&handle)) {
+                if let Err(Ok(spawned)) = sent.send(job.run(&handle)) {
                     // The call went away while the command started.
-                    kill(&child);
+                    process::abandon(spawned);
                 }
             })?;
-        let child = received
+        let spawned = received
             .await
             .map_err(|_| io::Error::other("the sandbox spawner thread ended early"))??;
-        Ok(Started::Process(Spawned {
-            child,
-            cleanup: None,
-        }))
+        Ok(Started::Process(spawned))
     }
 
     fn close_session(&self, session: &SessionId) {
@@ -289,6 +303,7 @@ struct Job {
     prlimit: PathBuf,
     policy: SandboxPolicy,
     shell: Vec<String>,
+    helper: Option<ReaperCommand>,
     cwd: PathBuf,
     env: BTreeMap<String, String>,
     home: PathBuf,
@@ -298,18 +313,53 @@ struct Job {
 impl Job {
     /// On a fresh thread: make the home, count the user's tasks, restrict
     /// this thread, and start `prlimit` (which execs the shell).
-    fn run(self, handle: &Handle) -> io::Result<Child> {
+    fn run(self, handle: &Handle) -> io::Result<Spawned> {
         DirBuilder::new()
             .recursive(true)
             .mode(0o700)
             .create(&self.home)?;
-        let limits = limits(&self.policy, user_tasks());
+        // The helper the command runs under is a process too, but not the
+        // command's.
+        let helper = u64::from(self.helper.is_some());
+        let limits = limits(&self.policy, user_tasks().saturating_add(helper));
         self.rules.confine(&self.home).map_err(io::Error::other)?;
         let _runtime = handle.enter();
         let mut command = Command::new(&self.prlimit);
         command.args(&limits).args(&self.shell);
-        process::start(command, &self.cwd, &self.env, self.lifeline)
+        process::start_shell(
+            self.helper.as_ref(),
+            command,
+            &self.cwd,
+            &self.env,
+            self.lifeline,
+        )
     }
+}
+
+/// `helper`, unless a command can write its executable: the server trusts
+/// the pid line a helper writes, so a command that replaces the helper could
+/// make it signal another process group. A helper that lies under one of the
+/// `writable` roots (or cannot be resolved) is refused, once with a warning,
+/// and commands run without one.
+fn trusted(helper: Option<&'static ReaperCommand>, writable: &[&Path]) -> Option<ReaperCommand> {
+    let helper = helper?;
+    let resolved = std::fs::canonicalize(&helper.program).ok();
+    let inside = |root: &&Path| {
+        let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        resolved.as_ref().is_none_or(|path| path.starts_with(&root))
+    };
+    if writable.iter().any(inside) {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                helper = %helper.program.display(),
+                "the sandbox can write the helper's executable (it lies under the workspace or the sandbox home); \
+                 commands run without the helper. Put it outside every directory the sandbox can write"
+            );
+        });
+        return None;
+    }
+    Some(helper.clone())
 }
 
 /// Tasks (threads) the server's user runs now, which `RLIMIT_NPROC` counts:
@@ -381,17 +431,6 @@ fn unprivileged(status: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Kill the group a started command leads.
-fn kill(child: &Child) {
-    let pid = (child.id())
-        .and_then(|id| i32::try_from(id).ok())
-        .filter(|&id| id > 1)
-        .and_then(Pid::from_raw);
-    if let Some(pid) = pid {
-        let _ = kill_process_group(pid, Signal::KILL);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::os::unix::process::ExitStatusExt;
@@ -420,14 +459,16 @@ mod tests {
             idempotency_key: None,
             lifeline: true,
         };
-        let Spawned { mut child, .. } = shell.spawn(launch).await.unwrap().into_process();
-        let mut held = child.stdin.take();
+        let Spawned {
+            mut child, helper, ..
+        } = shell.spawn(launch).await.unwrap().into_process();
+        let held = (child.stdin.take(), helper);
         let alive = tokio::time::timeout(Duration::from_millis(300), child.wait()).await;
         assert!(
             alive.is_err(),
             "the command runs while the lifeline is held"
         );
-        held.take();
+        drop(held);
         let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
             .await
             .expect("the watchdog killed the group")
@@ -448,7 +489,12 @@ mod tests {
             idempotency_key: None,
             lifeline: false,
         };
-        let child = shell.spawn(launch).await.unwrap().into_process().child;
+        let Spawned {
+            mut child, helper, ..
+        } = shell.spawn(launch).await.unwrap().into_process();
+        // Closing the helper's socket (or `wait_with_output` closing stdin)
+        // stops a supervised command.
+        let _held = (child.stdin.take(), helper);
         let out = child.wait_with_output().await.unwrap();
         let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
         text.push_str(&String::from_utf8_lossy(&out.stderr));
@@ -552,6 +598,36 @@ mod tests {
         for text in ["", missing_caps, &missing_uid, &garbled, &short_uid] {
             assert!(unprivileged(text).is_err(), "{text:?}");
         }
+    }
+
+    /// A helper the sandbox can write (under the workspace or the home,
+    /// through a symlink too) is refused; one outside both is kept.
+    #[test]
+    fn a_helper_the_sandbox_can_write_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (root, home, elsewhere) = (dir.path().join("w"), dir.path().join("h"), dir.path());
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let helper = |path: PathBuf| -> &'static ReaperCommand {
+            Box::leak(Box::new(ReaperCommand {
+                program: path,
+                args: Vec::new(),
+            }))
+        };
+        let writable = [root.as_path(), home.as_path()];
+        for (name, inside) in [("w/x", true), ("h/x", true), ("outside", false)] {
+            let path = elsewhere.join(name);
+            std::fs::write(&path, "").unwrap();
+            let kept = trusted(Some(helper(path)), &writable);
+            assert_eq!(kept.is_none(), inside, "{name}");
+        }
+        // A symlink outside that points into the workspace is inside.
+        let link = elsewhere.join("link");
+        std::os::unix::fs::symlink(root.join("x"), &link).unwrap();
+        assert!(trusted(Some(helper(link)), &writable).is_none());
+        // One that cannot be resolved is not trusted.
+        assert!(trusted(Some(helper("/nonexistent/helper".into())), &writable).is_none());
+        assert!(trusted(None, &writable).is_none());
     }
 
     /// The count covers at least this process's own threads.

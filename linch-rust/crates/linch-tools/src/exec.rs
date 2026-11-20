@@ -46,7 +46,7 @@ pub use sandbox::SandboxPolicy;
 
 use crate::LocalFs;
 use crate::bash::DEADLINE_MARGIN;
-use crate::bash::process::{self, Spawned, Started};
+use crate::bash::process::{self, Started};
 
 /// Which execution backend an agent's tools use, as config data.
 ///
@@ -335,11 +335,21 @@ pub(crate) struct LocalShell;
 #[async_trait]
 impl Shell for LocalShell {
     async fn spawn(&self, launch: Launch<'_>) -> io::Result<Started> {
-        let child = process::spawn(launch.command, launch.cwd, launch.env, launch.lifeline)?;
-        Ok(Started::Process(Spawned {
-            child,
-            cleanup: None,
-        }))
+        if !process::blocks() {
+            let spawned = process::spawn(launch.command, launch.cwd, launch.env, launch.lifeline)?;
+            return Ok(Started::Process(spawned));
+        }
+        // A helper has to say which shell it started: wait off the
+        // runtime's threads. If the call goes away meanwhile, the spawned
+        // command is dropped, which stops it.
+        let command = launch.command.to_owned();
+        let (cwd, env) = (launch.cwd.to_path_buf(), launch.env.clone());
+        let spawned = tokio::task::spawn_blocking(move || {
+            process::spawn(&command, &cwd, &env, launch.lifeline)
+        })
+        .await
+        .map_err(io::Error::other)??;
+        Ok(Started::Process(spawned))
     }
 }
 

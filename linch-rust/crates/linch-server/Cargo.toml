@@ -21,6 +21,8 @@ futures = "0.3.34"
 hyper-util = { version = "0.1.21", default-features = false, features = ["http1", "server", "service", "tokio"] }
 linch = { path = "../linch" }
 linch-rpc = { path = "../linch-rpc" }
+# Runs a command's helper (this executable started as one, see `main`).
+linch-tools = { path = "../linch-tools" }
 # The `worker` section: the queue, its schedules and the worker loop.
 linch-worker = { path = "../linch-worker" }
 serde = { version = "1.0.229", features = ["derive"] }

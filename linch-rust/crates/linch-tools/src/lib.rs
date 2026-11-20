@@ -43,6 +43,7 @@ mod ledger;
 mod memory;
 mod memory_recall;
 mod read;
+pub mod reaper;
 mod schedules;
 mod tasks;
 mod tracker;
