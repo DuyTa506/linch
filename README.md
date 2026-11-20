@@ -175,7 +175,7 @@ Give Claude Code, Codex, or another coding agent the `build-agent-with-linch` sk
 agent where the installed docs are and how to build and test on Linch.
 
 ```sh
-npx skills add DuyTa506/linch   # from GitHub
+npx skills add Intramind-Labs/linch   # from GitHub
 linch skill install             # offline, matches the installed Linch version
 ```
 

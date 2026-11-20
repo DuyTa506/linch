@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/DuyTa506/linch/master/docs/assets/logo.svg" alt="linch" height="64">
+<img src="https://raw.githubusercontent.com/Intramind-Labs/linch/master/docs/assets/logo.svg" alt="linch" height="64">
 
 </div>
 
@@ -15,7 +15,7 @@ binary (the Rust sidecar the client starts and drives over JSON-RPC). Wheels are
 Linux and macOS. It needs Python 3.11 or newer; the only other runtime dependency is
 `orjson`.
 
-![Architecture of linch-rust: a Python app drives linch-server over JSON-RPC; the server uses Postgres, provider APIs and exec backends](https://raw.githubusercontent.com/DuyTa506/linch/master/docs/assets/architecture.svg)
+![Architecture of linch-rust: a Python app drives linch-server over JSON-RPC; the server uses Postgres, provider APIs and exec backends](https://raw.githubusercontent.com/Intramind-Labs/linch/master/docs/assets/architecture.svg)
 
 ## Install
 
@@ -73,12 +73,12 @@ linch-rust docs path                # where the installed docs are
 
 ## Documentation
 
-- [Quickstart](https://github.com/DuyTa506/linch/blob/master/linch-rust/docs/usage/quickstart.md)
-- [Usage guide](https://github.com/DuyTa506/linch/blob/master/linch-rust/docs/usage/README.md)
-- [Architecture](https://github.com/DuyTa506/linch/blob/master/linch-rust/docs/architecture/README.md)
-- [Benchmarks against Python Linch](https://github.com/DuyTa506/linch/blob/master/linch-rust/docs/benchmarks.md)
-- [Changelog](https://github.com/DuyTa506/linch/blob/master/linch-rust/CHANGELOG.md)
-- [Source repository](https://github.com/DuyTa506/linch)
+- [Quickstart](https://github.com/Intramind-Labs/linch/blob/master/linch-rust/docs/usage/quickstart.md)
+- [Usage guide](https://github.com/Intramind-Labs/linch/blob/master/linch-rust/docs/usage/README.md)
+- [Architecture](https://github.com/Intramind-Labs/linch/blob/master/linch-rust/docs/architecture/README.md)
+- [Benchmarks against Python Linch](https://github.com/Intramind-Labs/linch/blob/master/linch-rust/docs/benchmarks.md)
+- [Changelog](https://github.com/Intramind-Labs/linch/blob/master/linch-rust/CHANGELOG.md)
+- [Source repository](https://github.com/Intramind-Labs/linch)
 
 ## Status
 
