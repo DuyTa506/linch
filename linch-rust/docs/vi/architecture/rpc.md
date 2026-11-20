@@ -85,6 +85,7 @@ tới handler của nó. Các kiểu params từ chối trường không biết;
 | `workflow.start` | `WorkflowStartParams` `{agent, run_id, budget?, resume?, principal?}` (`protocol/workflow.rs`) | `Server::start_workflow` (`server/workflow.rs`): `admit_principal`, các mức trần của tenant, rồi `WorkflowSession::open_held`; `-32045` khi một client khác đang drive nó | `WorkflowStarted` `{records, resumed, previous?, limits?}` |
 | `workflow.agent` | `WorkflowAgentParams` `{run_id, prompt, name?, subagent?, label?, key?, output_schema?, fork?, timeout_ms?, retry?, branch?, call_id?}` | `workflow_agent`: `WorkflowContext::agent_with` trên nhánh; bị bỏ cùng kết nối như một run | `WorkflowAgentResult` `{text, structured?, session_id, tokens, cost_usd, replayed}` |
 | `workflow.step.begin`, `workflow.step.complete` | `{run_id, name, key?, branch?}`, `{run_id, ticket, value}` | `step_begin`, `step_complete`; ticket do server giữ | `{replayed, value?, ticket?}`, `{}` |
+| `workflow.step.abandon` | `{run_id, ticket}` | trả lại một ticket mà function của nó thất bại trong client (capability `workflow_step_abandon`); idempotent; một workflow giữ tối đa `MAX_PENDING_STEPS` (1024) ticket, vượt thì `workflow.step.begin` bị từ chối (`-32005`, `kind: pending_steps`) | `{abandoned}` |
 | `workflow.interrupt` | `{run_id, key, payload?, branch?}` | `WorkflowContext::interrupt` | `{suspended, value?}` |
 | `workflow.cancel` | `{run_id, call_id?}` | hủy một lời gọi agent đang chạy, hoặc tất cả | `{cancelled}` |
 | `workflow.finish` | `{run_id, ok}` | kết thúc các lời gọi đang chạy, ghi trạng thái (`awaiting_input` khi một interrupt đã suspend nó), giải phóng hold | `{status}` |
@@ -483,7 +484,7 @@ từ chối ngay khi không khớp, thay vì lỗi ở method đầu tiên có h
 
 ```json
 {"server_version": "0.1.1", "protocol": 1, "contract_version": 1,
- "capabilities": ["cache_isolation", "exec_idempotency_key", "provider_info", "run_steer", "schedule", "workflow"],
+ "capabilities": ["cache_isolation", "exec_idempotency_key", "provider_info", "run_steer", "schedule", "workflow", "workflow_step_abandon"],
  "backends": ["local", "sandbox", "docker", "remote"],
  "limits": {"max_message_bytes": 16777216, "default_max_runs": 16}}
 ```

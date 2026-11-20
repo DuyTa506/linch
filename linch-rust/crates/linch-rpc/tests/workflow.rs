@@ -940,6 +940,15 @@ async fn a_workflow_is_resumed_only_by_the_principal_it_started_with() {
     finish(&rpc, "plain", true).await;
 }
 
+/// A test of the workflow calls ends in a few seconds or fails: a call that
+/// is never answered is a defect, not a slow test.
+async fn within<F: std::future::Future>(future: F) -> F::Output {
+    let limit = Duration::from_secs(20);
+    tokio::time::timeout(limit, future)
+        .await
+        .expect("the test did not finish in 20 s")
+}
+
 /// A tenant on a memory-journal agent with `max_records` records, its
 /// workflow `w` started.
 async fn capped_tenant(max_records: u64) -> (Rpc, String) {
@@ -1022,32 +1031,117 @@ async fn a_workflow_call_refuses_a_name_key_or_branch_over_the_id_bound() {
     assert_eq!(begun["replayed"], json!(false));
 }
 
+/// A step whose function raised in the client (and that the workflow
+/// caught) holds a ticket; the Python client gives it back with
+/// `workflow.step.abandon`, and a client that never does is held to a
+/// separate cap of pending tickets, not to `max_records`.
 #[tokio::test]
-async fn pending_steps_and_distinct_calls_count_against_max_records() {
-    let (rpc, _) = capped_tenant(4).await;
-    for number in 0..4 {
-        let params = json!({"run_id": "w", "name": format!("s{number}")});
+async fn caught_step_failures_do_not_use_up_the_journal() {
+    within(async {
+        let (rpc, _) = capped_tenant(4).await;
+        for _ in 0..4 {
+            let params = json!({"run_id": "w", "name": "flaky"});
+            let begun = rpc.call(method::WORKFLOW_STEP_BEGIN, params).await.unwrap();
+            assert_eq!(begun["replayed"], json!(false));
+            let ticket = json!({"run_id": "w", "ticket": begun["ticket"]});
+            let gave = rpc
+                .call(method::WORKFLOW_STEP_ABANDON, ticket)
+                .await
+                .unwrap();
+            assert_eq!(gave, json!({"abandoned": true}));
+        }
+        // An old client never gives a ticket back: its failures still leave the
+        // journal room (the pending cap, not `max_records`, bounds them).
+        for _ in 0..4 {
+            let params = json!({"run_id": "w", "name": "flaky"});
+            rpc.call(method::WORKFLOW_STEP_BEGIN, params).await.unwrap();
+        }
+        let params = json!({"run_id": "w", "name": "fallback"});
+        let begun = rpc.call(method::WORKFLOW_STEP_BEGIN, params).await.unwrap();
+        assert_eq!(begun["replayed"], json!(false));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_given_back_ticket_cannot_be_completed_and_giving_it_back_twice_is_harmless() {
+    within(async {
+        let (rpc, _) = capped_tenant(4).await;
+        let params = json!({"run_id": "w", "name": "s"});
+        let begun = rpc.call(method::WORKFLOW_STEP_BEGIN, params).await.unwrap();
+        let ticket = begun["ticket"].clone();
+        let abandon = json!({"run_id": "w", "ticket": ticket});
+        let first = rpc
+            .call(method::WORKFLOW_STEP_ABANDON, abandon.clone())
+            .await;
+        assert_eq!(first.unwrap(), json!({"abandoned": true}));
+        let again = rpc.call(method::WORKFLOW_STEP_ABANDON, abandon).await;
+        assert_eq!(again.unwrap(), json!({"abandoned": false}));
+        let complete = json!({"run_id": "w", "ticket": ticket, "value": 1});
+        let refused = rpc.call(method::WORKFLOW_STEP_COMPLETE, complete).await;
+        assert_eq!(code_of_call(refused).0, code::INVALID_PARAMS);
+        // The step runs again under the same name and journals as the first.
+        let params = json!({"run_id": "w", "name": "s"});
+        let begun = rpc.call(method::WORKFLOW_STEP_BEGIN, params).await.unwrap();
+        let complete = json!({"run_id": "w", "ticket": begun["ticket"], "value": 2});
+        rpc.call(method::WORKFLOW_STEP_COMPLETE, complete)
+            .await
+            .unwrap();
+    })
+    .await;
+}
+
+/// A client that never gives tickets back cannot pin memory with them
+/// however large `max_records` is: a workflow holds at most
+/// `MAX_PENDING_STEPS` begun and unfinished steps.
+#[tokio::test]
+async fn a_workflow_holds_a_bounded_number_of_pending_steps() {
+    within(async {
+        let (mut rpc, _) = capped_tenant(1_000_000).await;
+        let mut tickets = Vec::new();
+        for number in 0..linch_rpc::protocol::MAX_PENDING_STEPS {
+            if number % 256 == 0 {
+                rpc.drain_notifications().await;
+            }
+            let params = json!({"run_id": "w", "name": format!("s{number}")});
+            let begun = rpc.call(method::WORKFLOW_STEP_BEGIN, params).await.unwrap();
+            tickets.push(begun["ticket"].clone());
+        }
+        let params = json!({"run_id": "w", "name": "one-more"});
+        let (kind, data) = code_of_call(rpc.call(method::WORKFLOW_STEP_BEGIN, params).await);
+        assert_eq!(
+            (kind, data["kind"].clone()),
+            (code::LIMIT_REACHED, json!("pending_steps"))
+        );
+        let abandon = json!({"run_id": "w", "ticket": tickets[0]});
+        rpc.call(method::WORKFLOW_STEP_ABANDON, abandon)
+            .await
+            .unwrap();
+        let params = json!({"run_id": "w", "name": "one-more"});
         rpc.call(method::WORKFLOW_STEP_BEGIN, params).await.unwrap();
-    }
-    let params = json!({"run_id": "w", "name": "s4"});
-    let (kind, data) = code_of_call(rpc.call(method::WORKFLOW_STEP_BEGIN, params).await);
-    assert_eq!(
-        (kind, data["kind"].clone()),
-        (code::LIMIT_REACHED, json!("journal_records"))
-    );
-    // Interrupts that suspend journal nothing but still count their calls.
-    let (rpc, _) = capped_tenant(4).await;
-    for number in 0..4 {
-        let params = json!({"run_id": "w", "key": format!("k{number}")});
-        let asked = rpc.call(method::WORKFLOW_INTERRUPT, params).await.unwrap();
-        assert_eq!(asked["suspended"], json!(true));
-    }
-    let params = json!({"run_id": "w", "key": "k4"});
-    let (kind, data) = code_of_call(rpc.call(method::WORKFLOW_INTERRUPT, params).await);
-    assert_eq!(
-        (kind, data["kind"].clone()),
-        (code::LIMIT_REACHED, json!("journal_records"))
-    );
+    })
+    .await;
+}
+
+/// Interrupts that suspend journal nothing but still count their keys
+/// (replaced by the key cap in its own test below).
+#[tokio::test]
+async fn interrupts_that_suspend_count_their_keys_against_max_records() {
+    within(async {
+        let (rpc, _) = capped_tenant(4).await;
+        for number in 0..4 {
+            let params = json!({"run_id": "w", "key": format!("k{number}")});
+            let asked = rpc.call(method::WORKFLOW_INTERRUPT, params).await.unwrap();
+            assert_eq!(asked["suspended"], json!(true));
+        }
+        let params = json!({"run_id": "w", "key": "k4"});
+        let (kind, data) = code_of_call(rpc.call(method::WORKFLOW_INTERRUPT, params).await);
+        assert_eq!(
+            (kind, data["kind"].clone()),
+            (code::LIMIT_REACHED, json!("journal_records"))
+        );
+    })
+    .await;
 }
 
 /// Steps begun and completed one after the other, in nested branches, then

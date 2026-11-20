@@ -4,7 +4,6 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -43,9 +42,6 @@ pub(super) struct Inner {
     store: Arc<dyn JournalStore>,
     pub(super) lease: JournalLease,
     journal: Mutex<Journal>,
-    /// Steps begun with [`step_begin`](WorkflowContext::step_begin) and not
-    /// completed or dropped yet; each holds a place under `max_records`.
-    pub(super) pending_steps: Arc<AtomicU64>,
     on_event: Option<EventSink>,
     pub(super) step_timeout: Option<Duration>,
     pub(super) cancel: CancellationToken,
@@ -98,7 +94,6 @@ impl WorkflowContext {
             store: options.journal.clone(),
             lease,
             journal: Mutex::new(journal),
-            pending_steps: Arc::default(),
             on_event: options.on_event.clone(),
             step_timeout: options.step_timeout,
             cancel: options.cancel.clone(),
@@ -189,24 +184,13 @@ impl WorkflowContext {
         Ok((key, occurrence, cached))
     }
 
-    /// `LimitExceeded` when the journal holds as many records as it may,
-    /// counting the steps begun and not completed, which will each journal
-    /// one. Checked before live work starts, so a call that could not be
+    /// `LimitExceeded` when the journal holds as many records as it may.
+    /// Checked before live work starts, so a call that could not be
     /// journaled never spends.
     pub(super) fn check_room(&self) -> Result<(), WorkflowError> {
-        self.check_room_with(self.pending())
-    }
-
-    /// Steps begun and not completed or dropped.
-    pub(super) fn pending(&self) -> u64 {
-        self.inner.pending_steps.load(Ordering::SeqCst)
-    }
-
-    /// [`check_room`](Self::check_room) given the pending steps to count.
-    pub(super) fn check_room_with(&self, pending: u64) -> Result<(), WorkflowError> {
         if let Some(max) = self.inner.max_records {
             let held = lock(&self.inner.journal).records.len() as u64;
-            if held + pending >= max {
+            if held >= max {
                 return Err(WorkflowError::LimitExceeded {
                     what: "journal records",
                     max,
@@ -223,20 +207,7 @@ impl WorkflowContext {
         occurrence: u64,
         value: &JsonValue,
     ) -> Result<(), WorkflowError> {
-        self.record_with(call_key, occurrence, value, self.pending())
-            .await
-    }
-
-    /// [`record`](Self::record) given the pending steps to count: a step
-    /// completing leaves its own place out.
-    pub(super) async fn record_with(
-        &self,
-        call_key: &str,
-        occurrence: u64,
-        value: &JsonValue,
-        pending: u64,
-    ) -> Result<(), WorkflowError> {
-        self.check_room_with(pending)?;
+        self.check_room()?;
         let too_big = (self.inner.max_record_bytes).filter(|max| value.to_string().len() > *max);
         if let Some(max) = too_big {
             return Err(WorkflowError::LimitExceeded {

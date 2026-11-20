@@ -36,11 +36,12 @@ pub use schedule::{
 };
 
 pub use workflow::{
-    MAX_WORKFLOW_ID_BYTES, WireRetry, WorkflowAgentParams, WorkflowAgentResult, WorkflowBudget,
-    WorkflowCancelParams, WorkflowCancelled, WorkflowEventParams, WorkflowFinishParams,
-    WorkflowFinished, WorkflowInterruptParams, WorkflowInterrupted, WorkflowLimits,
-    WorkflowStartParams, WorkflowStarted, WorkflowStatus, WorkflowStatusParams,
-    WorkflowStepBeginParams, WorkflowStepBegun, WorkflowStepCompleteParams,
+    MAX_PENDING_STEPS, MAX_WORKFLOW_ID_BYTES, WireRetry, WorkflowAgentParams, WorkflowAgentResult,
+    WorkflowBudget, WorkflowCancelParams, WorkflowCancelled, WorkflowEventParams,
+    WorkflowFinishParams, WorkflowFinished, WorkflowInterruptParams, WorkflowInterrupted,
+    WorkflowLimits, WorkflowStartParams, WorkflowStarted, WorkflowStatus, WorkflowStatusParams,
+    WorkflowStepAbandonParams, WorkflowStepAbandoned, WorkflowStepBeginParams, WorkflowStepBegun,
+    WorkflowStepCompleteParams,
 };
 
 /// Method and notification names.
@@ -94,6 +95,8 @@ pub mod method {
     pub const WORKFLOW_STEP_BEGIN: &str = "workflow.step.begin";
     /// Journal the value of a step begun with `workflow.step.begin`.
     pub const WORKFLOW_STEP_COMPLETE: &str = "workflow.step.complete";
+    /// Give back a ticket of `workflow.step.begin` whose function failed.
+    pub const WORKFLOW_STEP_ABANDON: &str = "workflow.step.abandon";
     /// Park the workflow at a question, or read its journaled answer.
     pub const WORKFLOW_INTERRUPT: &str = "workflow.interrupt";
     /// Abort one agent call of a workflow, or all of them.

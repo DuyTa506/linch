@@ -33,11 +33,12 @@ use crate::access::{Tenant, WorkflowCaps};
 use crate::error::{ErrorObject, chain, code, invalid_params};
 use crate::message::Notification;
 use crate::protocol::{
-    MAX_WORKFLOW_ID_BYTES, WorkflowAgentParams, WorkflowAgentResult, WorkflowBudget,
-    WorkflowCancelParams, WorkflowCancelled, WorkflowEventParams, WorkflowFinishParams,
-    WorkflowFinished, WorkflowInterruptParams, WorkflowInterrupted, WorkflowLimits,
-    WorkflowStartParams, WorkflowStarted, WorkflowStatus, WorkflowStatusParams,
-    WorkflowStepBeginParams, WorkflowStepBegun, WorkflowStepCompleteParams, method,
+    MAX_PENDING_STEPS, MAX_WORKFLOW_ID_BYTES, WorkflowAgentParams, WorkflowAgentResult,
+    WorkflowBudget, WorkflowCancelParams, WorkflowCancelled, WorkflowEventParams,
+    WorkflowFinishParams, WorkflowFinished, WorkflowInterruptParams, WorkflowInterrupted,
+    WorkflowLimits, WorkflowStartParams, WorkflowStarted, WorkflowStatus, WorkflowStatusParams,
+    WorkflowStepAbandonParams, WorkflowStepAbandoned, WorkflowStepBeginParams, WorkflowStepBegun,
+    WorkflowStepCompleteParams, method,
 };
 
 /// The journal an agent's workflows use: its Postgres database (migrated
@@ -274,9 +275,17 @@ impl Server {
                 ticket: None,
             },
             StepSlot::Run(ticket) => {
+                let mut tickets = lock(&driven.tickets);
+                if tickets.len() >= MAX_PENDING_STEPS {
+                    return Err(self.workflow_error(&WorkflowError::LimitExceeded {
+                        what: "pending steps",
+                        max: MAX_PENDING_STEPS as u64,
+                    }));
+                }
                 let id = driven.next_ticket.fetch_add(1, Ordering::Relaxed) + 1;
                 let id = format!("step-{id}");
-                lock(&driven.tickets).insert(id.clone(), ticket);
+                tickets.insert(id.clone(), ticket);
+                drop(tickets);
                 WorkflowStepBegun {
                     replayed: false,
                     value: None,
@@ -302,6 +311,18 @@ impl Server {
             .await
             .map_err(|error| self.workflow_error(&error))?;
         Ok(json!({}))
+    }
+
+    /// Give back a ticket whose function failed in the client: the step is
+    /// not pending any more and journals nothing. A ticket already
+    /// completed, abandoned or never given answers `abandoned: false`.
+    pub(super) fn workflow_step_abandon(
+        &self,
+        params: WorkflowStepAbandonParams,
+    ) -> Result<serde_json::Value, ErrorObject> {
+        let driven = self.driven(&params.run_id)?;
+        let abandoned = lock(&driven.tickets).remove(&params.ticket).is_some();
+        to_value(&WorkflowStepAbandoned { abandoned })
     }
 
     pub(super) async fn workflow_interrupt(

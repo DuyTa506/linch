@@ -102,6 +102,13 @@ theo thứ tự khác khi resume vẫn tìm thấy record của chính chúng. `
 của một lời gọi (`key` của step được băm nên không bị chặn) và `branch` dài tối
 đa 256 byte, như id của workflow (`-32602` nếu vượt).
 
+Một step mà function của nó raise sẽ trả ticket lại: `wf.step` gửi
+`workflow.step.abandon` trước khi raise lại, nên một workflow bắt các step thất bại
+(để fallback, hoặc trong một fan-out `settled`) không bao giờ hết chỗ. Một client
+không bao giờ trả ticket (client có từ trước lời gọi này) bị giới hạn 1024 step
+đang chờ cho mỗi workflow (`-32005`, `kind: pending_steps`), không phải bởi
+`max_records`; server bỏ mọi ticket khi kết nối kết thúc.
+
 ## Replay hoạt động thế nào
 
 Một lời gọi được định danh bằng một **content key** cộng với **occurrence** của
@@ -226,7 +233,7 @@ lên và đặt các mức trần:
 | Mức trần | Mặc định | Nó giới hạn gì |
 |---|---|---|
 | `max_workflows` | 4 | Số workflow tenant drive cùng lúc, qua mọi kết nối của nó (`-32005`, `kind: workflows`) |
-| `max_records` | 10000 | Số record journal của một workflow, tính cả replay, cộng các step đã begin mà chưa complete và các lời gọi khác key mà kết nối đã dùng (`-32005`, `kind: journal_records`); được kiểm tra trước khi một lời gọi tiêu tiền, nên lượng server giữ cho một workflow bị chặn bởi nó |
+| `max_records` | 10000 | Số record journal của một workflow, tính cả replay, và các lời gọi khác key mà kết nối đã dùng (`-32005`, `kind: journal_records`); được kiểm tra trước khi một lời gọi tiêu tiền, nên lượng server giữ cho một workflow bị chặn bởi nó |
 | `max_fan_out` | 8 | Số lời gọi agent của một workflow đang chạy cùng lúc (`-32005`, `kind: agent_calls_in_flight`); client hạ `max_concurrency` của nó xuống mức này |
 | `max_record_bytes` | 1 MiB | Giá trị JSON của một record |
 | `max_tokens`, `max_cost_usd` | không có | Một mức trần cho `budget` của workflow; workflow không có budget sẽ nhận nó, và workflow xin nhiều hơn bị từ chối (`-32004`, `kind: workflow_budget`) |

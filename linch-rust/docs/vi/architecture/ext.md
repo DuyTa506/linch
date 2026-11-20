@@ -252,11 +252,12 @@ Một host có hàm workflow chạy ở nơi khác (client của server RPC) dri
 - `WorkflowBudget` được kiểm tra trước mỗi lời gọi thật so với những gì các lời
   gọi đã xong đã tiêu, tính cả replay (`agent.rs:286`), nên một lời gọi đang chạy
   có thể vượt. `max_records` được kiểm tra trước khi một lời gọi tiêu tiền
-  (`context.rs`, `check_room`) so với số record, số step đã begin bằng
-  `step_begin` mà chưa complete (ticket bị drop trả lại chỗ của nó) và, khi một
-  lời gọi có key mà run chưa dùng, số key đã đếm, nên bộ nhớ của context bị chặn
-  bởi nó; `max_record_bytes` được kiểm tra khi một record được ghi. Không có
-  `max_records` thì không đếm gì.
+  (`context.rs`, `check_room`) so với số record và, khi một lời gọi có key mà
+  run chưa dùng, số key đã đếm, nên bộ nhớ của context bị chặn bởi nó;
+  `max_record_bytes` được kiểm tra khi một record được ghi. Không có
+  `max_records` thì không đếm gì. Một step đã begin bằng `step_begin` không giữ
+  gì trong context: host giữ ticket của nó, và RPC server giới hạn số ticket nó
+  giữ (`MAX_PENDING_STEPS`).
 - `LiveGate` (`context.rs:24`) được hỏi trước mỗi lời gọi sẽ chạy thật, không bao
   giờ cho một lần replay; server đếm các lời gọi đang chạy và lấy chỗ run của
   tenant ở đó.

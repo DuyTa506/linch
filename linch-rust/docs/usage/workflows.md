@@ -100,6 +100,13 @@ another order on a resume still find their own records. A call's `name`,
 `key` (a step's `key` is hashed, so it is not bounded) and `branch` are at
 most 256 bytes, like the workflow id (`-32602` past it).
 
+A step whose function raised gives its ticket back: `wf.step` sends
+`workflow.step.abandon` before it re-raises, so a workflow that catches
+failed steps (to fall back, or in a `settled` fan-out) never runs out of
+places. A client that never gives tickets back (one that predates the call)
+is held to 1024 pending steps per workflow (`-32005`, `kind: pending_steps`),
+not to `max_records`; the server drops every ticket when the connection ends.
+
 ## How replay works
 
 A call is identified by a **content key** plus its **occurrence**: how many
@@ -229,7 +236,7 @@ turns them on and sets the caps:
 | Cap | Default | What it bounds |
 |---|---|---|
 | `max_workflows` | 4 | Workflows the tenant drives at once, across its connections (`-32005`, `kind: workflows`) |
-| `max_records` | 10000 | Journal records of one workflow, replays included, counting the steps begun and not completed and the distinct calls the connection has keyed (`-32005`, `kind: journal_records`); checked before a call spends, so what the server keeps for a workflow is bounded by it |
+| `max_records` | 10000 | Journal records of one workflow, replays included, and the distinct calls the connection has keyed (`-32005`, `kind: journal_records`); checked before a call spends, so what the server keeps for a workflow is bounded by it |
 | `max_fan_out` | 8 | Agent calls of one workflow in flight at once (`-32005`, `kind: agent_calls_in_flight`); the client lowers its `max_concurrency` to it |
 | `max_record_bytes` | 1 MiB | One record's JSON value |
 | `max_tokens`, `max_cost_usd` | none | A ceiling on a workflow's `budget`; a workflow with none gets it, and one that asks for more is refused (`-32004`, `kind: workflow_budget`) |

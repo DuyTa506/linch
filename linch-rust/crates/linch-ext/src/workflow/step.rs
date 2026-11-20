@@ -2,8 +2,6 @@
 //! again.
 
 use std::future::Future;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use linch_core::JsonValue;
@@ -125,27 +123,6 @@ pub struct StepTicket {
     name: String,
     call_key: String,
     occurrence: u64,
-    /// The place the step holds under `max_records` until it completes or
-    /// the ticket is dropped.
-    _pending: PendingStep,
-}
-
-/// One begun step among the context's pending ones.
-#[derive(Debug)]
-struct PendingStep(Arc<AtomicU64>);
-
-impl PendingStep {
-    /// Take a place; also the steps pending before this one.
-    fn reserve(pending: &Arc<AtomicU64>) -> (Self, u64) {
-        let before = pending.fetch_add(1, Ordering::SeqCst);
-        (Self(Arc::clone(pending)), before)
-    }
-}
-
-impl Drop for PendingStep {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
-    }
 }
 
 /// What [`WorkflowContext::step_begin`] found in the journal.
@@ -173,9 +150,7 @@ impl WorkflowContext {
     ///
     /// Raises:
     ///     WorkflowError: `Encode` when `key` does not encode, `Aborted`
-    ///         when the cancel token fired first, `LimitExceeded` when
-    ///         the pending steps and the journal's records fill
-    ///         `max_records`.
+    ///         when the cancel token fired first.
     pub fn step_begin(
         &self,
         name: &str,
@@ -197,15 +172,13 @@ impl WorkflowContext {
             return Ok(StepSlot::Replayed(value));
         }
         self.check_cancel(&label)?;
-        let (pending, before) = PendingStep::reserve(&self.inner.pending_steps);
-        self.check_room_with(before)?;
+        self.check_room()?;
         event.kind = WorkflowKind::StepStart;
         self.emit(event);
         Ok(StepSlot::Run(StepTicket {
             name: name.to_owned(),
             call_key,
             occurrence,
-            _pending: pending,
         }))
     }
 
@@ -220,10 +193,7 @@ impl WorkflowContext {
         ticket: StepTicket,
         value: JsonValue,
     ) -> Result<(), WorkflowError> {
-        // The ticket's own place is the record's.
-        let others = self.pending().saturating_sub(1);
-        let (call_key, occurrence) = (&ticket.call_key, ticket.occurrence);
-        self.record_with(call_key, occurrence, &value, others)
+        self.record(&ticket.call_key, ticket.occurrence, &value)
             .await?;
         let mut event = event(
             WorkflowKind::StepEnd,

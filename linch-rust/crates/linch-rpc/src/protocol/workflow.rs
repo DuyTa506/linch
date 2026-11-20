@@ -15,6 +15,12 @@ use serde::{Deserialize, Serialize};
 /// ids of the runs the workflow's agent calls make.
 pub const MAX_WORKFLOW_ID_BYTES: usize = 256;
 
+/// Most steps one driven workflow may have begun with `workflow.step.begin`
+/// and not completed or abandoned: past it `workflow.step.begin` is refused
+/// (`-32005`, `kind: pending_steps`). A client that gives a ticket back
+/// with `workflow.step.abandon` when its function fails never reaches it.
+pub const MAX_PENDING_STEPS: usize = 1024;
+
 /// A spending cap shared by every agent call of one workflow.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -211,6 +217,27 @@ pub struct WorkflowStepBegun {
     /// absent for a replayed step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ticket: Option<String>,
+}
+
+/// Params of `workflow.step.abandon`: give back a ticket whose function
+/// failed in the client, so the step is not pending any more. The step
+/// journals nothing and runs again on the next drive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowStepAbandonParams {
+    /// The workflow.
+    pub run_id: String,
+    /// The ticket `workflow.step.begin` gave.
+    pub ticket: String,
+}
+
+/// Result of `workflow.step.abandon`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowStepAbandoned {
+    /// Whether the ticket was pending: `false` for one already completed or
+    /// abandoned, or never given, so giving a ticket back twice is harmless.
+    pub abandoned: bool,
 }
 
 /// Params of `workflow.step.complete`. The result is `{}`.

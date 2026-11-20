@@ -299,39 +299,6 @@ async fn caps_on_records_and_their_size_refuse_before_a_call_spends() {
 }
 
 #[tokio::test]
-async fn begun_steps_count_against_max_records_until_completed_or_dropped() {
-    let store = Arc::new(MemoryJournalStore::default());
-    let mut capped = options(&store, "w1", &Recorder::default());
-    capped.max_records = Some(2);
-    let session = WorkflowSession::open(&capped).await.unwrap();
-    let wf = session.context();
-    let begin = || wf.step_begin("s", None);
-    let StepSlot::Run(first) = begin().unwrap() else {
-        panic!("a new step has no record")
-    };
-    let StepSlot::Run(second) = begin().unwrap() else {
-        panic!("a new step has no record")
-    };
-    let full = begin();
-    assert!(
-        matches!(full, Err(WorkflowError::LimitExceeded { max: 2, .. })),
-        "{full:?}"
-    );
-    // A dropped ticket gives its place back; a completed one holds a record.
-    drop(second);
-    wf.step_complete(first, json!(1)).await.unwrap();
-    let StepSlot::Run(third) = begin().unwrap() else {
-        panic!("a new step has no record")
-    };
-    wf.step_complete(third, json!(2)).await.unwrap();
-    assert!(matches!(
-        begin(),
-        Err(WorkflowError::LimitExceeded { max: 2, .. })
-    ));
-    assert_eq!(wf.pending(), 0);
-}
-
-#[tokio::test]
 async fn calls_that_journal_nothing_are_counted_against_max_records() {
     let store = Arc::new(MemoryJournalStore::default());
     let mut capped = options(&store, "w1", &Recorder::default());
