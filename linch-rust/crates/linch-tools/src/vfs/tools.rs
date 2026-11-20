@@ -169,7 +169,7 @@ impl ReadFile {
                 "path": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Virtual file path, e.g. '/offload/s1/web_search_abc_3fa9c1d2e4b5a678.txt'."
+                    "description": "Virtual file path, e.g. '/offload/web_search_abc.txt'."
                 },
                 "offset": {
                     "type": "integer",
