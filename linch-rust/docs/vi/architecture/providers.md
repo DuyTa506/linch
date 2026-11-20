@@ -504,8 +504,12 @@ chứa các phép tra cứu và thăm dò): Anthropic 200000; Gemini 2000000 cho
 `OpenAiChatOptions` và `ServerOptions` nhận một `context_window` được ưu tiên.
 Một server profile nêu quy tắc của nó (`ChatProfile::context`): vLLM và SGLang đọc
 `max_model_len` của từng model từ `GET /v1/models`, llama.cpp đọc `n_ctx` từ
-`GET /props` (rồi đến của gốc), một lần trong `prepare`, trong vòng 2 giây, với
-bearer key của lời gọi. Một lần thăm dò thất bại để lại 128000. Không giống Python, một
+`GET {base}/props` (base không kết thúc bằng `/v1` thì còn thử `{base}/v1/props`;
+không bao giờ hỏi đường dẫn cha của một base `/v1`, vì `base_url` của tenant được
+duyệt theo đường dẫn và lần thăm dò gửi kèm key), một lần trong `prepare`, trong vòng
+2 giây, với bearer key của lời gọi. llama.cpp gốc chỉ phục vụ `/props` ở đường dẫn gốc,
+nên sau một base `/v1` nó không tìm được cửa sổ trừ khi một proxy phục vụ `{base}/props`:
+hãy đặt `context_window` ở đó. Một lần thăm dò thất bại để lại 128000. Không giống Python, một
 cửa sổ llama.cpp đã cấu hình bỏ qua lần thăm dò thay vì dùng làm phương án dự phòng của nó.
 
 ### Chuẩn hóa usage

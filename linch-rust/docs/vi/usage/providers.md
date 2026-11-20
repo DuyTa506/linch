@@ -107,7 +107,7 @@ cho mọi model. Khi không có, nó là giá trị của Python Linch:
 | `openai-chat` | `gpt-5.5` và `gpt-5.4` 400000, `o1` 200000, còn lại 128000 |
 | `deepseek`, `scripted` | 128000 |
 | `vllm`, `sglang` | Được hỏi khi agent mở: `max_model_len` của model trên `GET /v1/models` (server có một model thì trả lời cho mọi tên), nếu không thì 128000 |
-| `llamacpp` | Được hỏi khi agent mở: `n_ctx` trên `GET /props`, nếu không thì 128000 |
+| `llamacpp` | Được hỏi khi agent mở: `n_ctx` trên `GET {base_url}/props`, nếu không thì 128000. Lần thăm dò ở trong `base_url` (không bao giờ hỏi đường dẫn cha của một base `/v1`), và llama.cpp gốc chỉ phục vụ `/props` ở đường dẫn gốc, nên sau một base `/v1` hãy đặt `context_window` |
 
 Server chỉ được hỏi một lần, tối đa 2 giây, với cùng key như các lời gọi của nó;
 server nào không trả lời sẽ để lại 128000 và việc mở agent vẫn tiếp tục.

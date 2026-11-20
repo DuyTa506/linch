@@ -511,8 +511,12 @@ holds the lookups and probes): Anthropic 200000; Gemini 2000000 for
 `OpenAiChatOptions` and `ServerOptions` take a `context_window` that wins.
 A server profile states its rule (`ChatProfile::context`): vLLM and SGLang read
 each model's `max_model_len` from `GET /v1/models`, llama.cpp `n_ctx` from
-`GET /props` (then the root's), once in `prepare`, within 2 seconds, with the
-call's bearer key. A failed probe leaves 128000. Unlike Python, a configured
+`GET {base}/props` (a base that does not end in `/v1` also tries
+`{base}/v1/props`; the parent of a `/v1` base is never asked, since a tenant's
+`base_url` is admitted by its path and the probe sends the key), once in
+`prepare`, within 2 seconds, with the call's bearer key. A stock llama.cpp
+serves `/props` at its root only, so behind a `/v1` base it finds no window
+unless a proxy serves `{base}/props`: set `context_window` there. A failed probe leaves 128000. Unlike Python, a configured
 llama.cpp window skips the probe rather than serving as its fallback.
 
 ### Usage normalization

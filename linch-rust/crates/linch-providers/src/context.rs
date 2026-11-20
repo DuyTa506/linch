@@ -154,15 +154,16 @@ fn n_ctx(value: &JsonValue) -> Option<u64> {
     nested.filter(|&n| n > 0).or(top.filter(|&n| n > 0))
 }
 
-/// `{base}/props`, then the root's `/props` when the base ends in `/v1`,
-/// else `{base}/v1/props`.
+/// `{base}/props`, and `{base}/v1/props` too when the base does not end in
+/// `/v1`. Never the parent of the base: a tenant's `base_url` is admitted by
+/// its path, and the probe sends the key.
 pub(crate) fn props_urls(base_url: &str) -> Vec<String> {
     let base = base_url.trim_end_matches('/');
-    let other = match base.strip_suffix("/v1") {
-        Some(root) => format!("{}/props", root.trim_end_matches('/')),
-        None => format!("{base}/v1/props"),
-    };
-    vec![format!("{base}/props"), other]
+    let mut urls = vec![format!("{base}/props")];
+    if !base.ends_with("/v1") {
+        urls.push(format!("{base}/v1/props"));
+    }
+    urls
 }
 
 #[cfg(test)]

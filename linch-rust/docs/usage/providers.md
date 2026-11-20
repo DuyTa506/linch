@@ -107,7 +107,7 @@ replaces it for every model. Absent, it is Python Linch's:
 | `openai-chat` | `gpt-5.5` and `gpt-5.4` 400000, `o1` 200000, else 128000 |
 | `deepseek`, `scripted` | 128000 |
 | `vllm`, `sglang` | Asked when the agent opens: the model's `max_model_len` on `GET /v1/models` (a server with one model answers for any name), else 128000 |
-| `llamacpp` | Asked when the agent opens: `n_ctx` on `GET /props`, else 128000 |
+| `llamacpp` | Asked when the agent opens: `n_ctx` on `GET {base_url}/props`, else 128000. The probe stays under `base_url` (it never asks the parent of a `/v1` base), and a stock llama.cpp serves `/props` at its root only, so behind a `/v1` base set `context_window` |
 
 A server is asked once, for at most 2 seconds, with the same key as its calls;
 one that does not answer leaves 128000 and the open goes on.
