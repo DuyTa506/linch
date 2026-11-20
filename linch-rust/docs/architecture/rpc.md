@@ -74,12 +74,12 @@ to its handler. Params types refuse unknown fields; `OpenParams` takes
 | `run.answer` | `AnswerParams` (`protocol.rs:256`) `{agent, run_id, answers, principal?}`, `answers` keyed by `request_id` | `run.rs:61-67`, through `claim` | the same |
 | `run.steer` | `SteerParams` `{agent, run_id, text, id?, principal?}` | `Server::steer_run` (`run.rs`): `Agent::steer`. A run this process drives takes it through its inbox and answers after its next step's flush; a suspended run is claimed, written to and put back in its suspension; a run another process leases is `-32033` | `Steered` `{queued: true, id}` |
 | `run.cancel` | `CancelParams` `{run_id, agent?}` | `Server::cancel` (`run.rs`): cancels a run this connection drives with its token; else, given `agent`, ends a suspended run with `Agent::cancel`, the run counted as driven meanwhile so an approve here gets `-32002` | `{cancelled}` |
-| `run.events` | `EventsParams` | `agents.rs:93-100`: `Agent::events` | `{events}`, the durable envelopes after `after_seq` |
+| `run.events` | `EventsParams` | `server/agents.rs`: `Server::events`, `page` over `Agent::events` | `{events, next_after_seq?}`: with neither `limit` nor `max_bytes`, every envelope when they fit one message (`max_message_bytes` less 128 bytes of framing), else `-32052` and no page; with either, at most `limit` (1000 by default, 10000 at most) and `max_bytes` (8 MiB by default and at most) encoded, larger values lowered. The first envelope is always taken; one that cannot fit a message with its framing is `-32051` (`data.seq`). `next_after_seq` is present while more follow |
 | `provider.capabilities` | `ProviderModelParams` `{provider, model}`: a `provider` as in an agent config (`protocol.rs`) | `server/provider.rs`: `ProviderConfig::build_keyless`, `Provider::prepare`, `Provider::capabilities`; no key needed | `ProviderCapabilities` |
 | `provider.models` | `ProviderParams` `{provider}` | `server/provider.rs`: `ProviderConfig::build`, `Provider::list_models`; needs the key | `{models}`, `ModelInfo` per model |
 | `provider.model` | `ProviderModelParams` | `server/provider.rs`: `Provider::model_info` | `ModelInfo`; `-32036` when the list lacks it |
 | `eval.run` | `EvalRunParams` `{agent, cases, scorers?, include_events?}` (`protocol/monitor.rs`) | `server/monitor.rs`: `run_eval_as` on the agent, owner the server id, at most 256 cases from a tenant; takes a tenant run place and marks the agent busy (`agent.close` is `-32002`) until it ends; stops with the connection | the eval result as JSON (`total`, `passed`, `pass_rate`, `total_cost_usd`, `usage`, `duration_ms`, `cases`) and `markdown`; bad cases or scorers are `-32602` |
-| `run.report` | `ReportParams` `{agent, run_id, timeline?}` | `server/monitor.rs`: `build_run_report` over `Agent::run_record` and `Agent::events` | `{report, markdown}`; an unknown run is `-32021` |
+| `run.report` | `ReportParams` `{agent, run_id, timeline?}` | `server/monitor.rs`: `build_run_report` over `Agent::run_record` and `Agent::events` | `{report, markdown, truncated?}`; strings over 64 KiB are cut with a marker (counted in `truncated.strings`), the timeline loses its last events past 8 MiB (`truncated.timeline_omitted`), then each tool call's text is cut to 8 KiB, then 1 KiB (`truncated.tool_call_text`); a report over 8 MiB even then is `-32603`; an unknown run is `-32021` |
 | `workflow.start` | `WorkflowStartParams` `{agent, run_id, budget?, resume?, principal?}` (`protocol/workflow.rs`) | `Server::start_workflow` (`server/workflow.rs`): `admit_principal`, tenant caps, then `WorkflowSession::open_held`; `-32045` while another client drives it, `-32049` for `resume` answers when the journal holds nothing | `WorkflowStarted` `{records, resumed, previous?, limits?}` |
 | `workflow.agent` | `WorkflowAgentParams` `{run_id, prompt, name?, subagent?, label?, key?, output_schema?, fork?, timeout_ms?, retry?, branch?, call_id?}` | `workflow_agent`: `WorkflowContext::agent_with` on the branch; dropped with the connection like a run | `WorkflowAgentResult` `{text, structured?, session_id, tokens, cost_usd, replayed}` |
 | `workflow.step.begin`, `workflow.step.complete` | `{run_id, name, key?, branch?}`, `{run_id, ticket, value}` | `step_begin`, `step_complete`; the ticket is held by the server | `{replayed, value?, ticket?}`, `{}` |
@@ -162,6 +162,8 @@ docs (`lib.rs:518-569`) and the codes in `crates/linch-rpc/src/error.rs:24-183`.
 | -32048 | `WORKFLOW_NOT_FOUND` | `WorkflowNotFound` | This connection drives no workflow with that id: it never sent `workflow.start` for it, or already finished it |
 | -32049 | `WORKFLOW_NO_JOURNAL` | `WorkflowNoJournal` | `workflow.start` with `resume` answers for a workflow whose journal holds nothing (it never ran here, or a memory-store agent's journal lived in another connection). Nothing was claimed |
 | -32050 | `RUN_PRUNED` | `RunPruned` (a `RunNotFound`) | A run a retention pass deleted (its record and events): `run.events`, a resume, approve, answer, steer, cancel or report of it. `data.run_id`. The server remembers a pruned run for its tombstone period (30 days by default); after that the same read is `-32021`. A wrong id is always `-32021` |
+| -32051 | `EVENT_TOO_LARGE` | `EventTooLarge` (a `RunError`) | `run.events` met one envelope that cannot fit a message with its framing; `data.seq` is its seq. Ask again with `after_seq` set to it to continue after it; the envelope itself is in the stores |
+| -32052 | `EVENTS_TOO_LONG` | `RpcError` | `run.events` without `limit` and `max_bytes` found more envelopes than one message holds, and answers nothing; `data.seq` is the first that did not fit. Ask again with `max_bytes` or `limit` to read the run in pages; `Agent.events` always does |
 
 `RunError::ContractMismatch {expected, found}` names its contracts from the
 agent's side: `expected` is the contract of the agent that tried to
@@ -243,6 +245,17 @@ requests; and its tenant, `None` for a local client.
    already read finish, drops every run where it stands (a durable run stays
    resumable), fails the waiting server requests, then closes every agent's
    MCP servers. The writer drains the queue and the connection returns.
+   The whole teardown has one deadline, `SHUTDOWN_GRACE` (15 s;
+   `connection.rs`), counted from the stop or from the end of input once the
+   read loop reads it (it does not read while it waits for room in a full
+   queue of 1024, so then only a stop starts the count; a task started with
+   the connection waits on the server's shutdown token and then sleeps). Calls run under it (`server.rs`, `receive`), the read loop races
+   the stop while it hands a refusal to a full queue, and the writer is
+   awaited until it. At the deadline the calls in flight are dropped, the
+   writer is aborted and its queue and transport dropped: a client that
+   cannot take the queue in that time is cut however slowly it reads. The
+   WebSocket's close frame waits only for what is left of the same 15 s
+   (`linch-server/src/http.rs`).
 
 ### Ordering
 

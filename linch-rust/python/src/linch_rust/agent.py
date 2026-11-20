@@ -11,7 +11,7 @@ from typing import Any
 from . import schedule as _schedule
 from ._rpc import Connection, RunQueue
 from .config import OutputSchema, Principal, ToolChoice
-from .errors import LinchError
+from .errors import EventsIncomplete, LinchError
 from .events import Envelope, decode_envelope
 from .monitor import (
     CustomScorer,
@@ -24,6 +24,10 @@ from .monitor import (
 )
 from .run import Observer, Run
 from .schedule import CHECK_IN, Job, Schedule
+
+# The bytes of one `run.events` page `Agent.events` asks for (the most the
+# server gives a page).
+_EVENTS_PAGE_BYTES = 8 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -368,14 +372,44 @@ class Agent:
         """Return a run's durable envelopes with a seq above `after_seq`, in order.
 
         Stream-only kinds (`partial_assistant`, `tool_progress`, `hook`,
-        `cache_diagnostic`) are never replayed.
+        `cache_diagnostic`) are never replayed. The server answers a long run
+        in pages; this reads them all, one call per page.
 
         Raises:
             RunError: The stores could not be read, or the run is unknown.
+            EventsIncomplete: The read stopped early (a `RunError`); its
+                `events` hold the envelopes read so far. `EventTooLarge` is
+                one: an envelope is too long for a message, `seq` names it,
+                and `events(run_id, after_seq=seq)` goes on after it. A page
+                whose cursor does not advance is another.
         """
-        params = {"agent": self.handle, "run_id": run_id, "after_seq": after_seq}
-        answer = await self._conn.request("run.events", params)
-        return [decode_envelope(raw) for raw in answer["events"]]
+        envelopes: list[Envelope] = []
+        while True:
+            # Naming a page is what makes the server answer with a cursor: a
+            # request without limits is the whole run or an error.
+            params = {
+                "agent": self.handle,
+                "run_id": run_id,
+                "after_seq": after_seq,
+                "max_bytes": _EVENTS_PAGE_BYTES,
+            }
+            try:
+                answer = await self._conn.request("run.events", params)
+            except EventsIncomplete as error:
+                error.events = envelopes
+                raise
+            envelopes.extend(decode_envelope(raw) for raw in answer["events"])
+            next_after_seq = answer.get("next_after_seq")
+            if next_after_seq is None:
+                return envelopes
+            if next_after_seq <= after_seq:
+                message = (
+                    f"run.events did not advance: next_after_seq {next_after_seq} after {after_seq}"
+                )
+                error = EventsIncomplete(-32603, message)
+                error.events = envelopes
+                raise error
+            after_seq = next_after_seq
 
     async def eval(
         self,

@@ -332,11 +332,27 @@
 //! `provider_info` or `provider_base_url`), and may make 10 `provider.models`
 //! and `provider.model` calls a minute (`-32005`, `kind` `provider_calls`).
 //!
-//! **`run.events`** `{agent, run_id, after_seq?}`
+//! **`run.events`** `{agent, run_id, after_seq?, limit?, max_bytes?}`
 //! ([`EventsParams`](protocol::EventsParams)) returns
-//! `{"events": [<envelope>...]}`: the run's durable envelopes with a seq
-//! greater than `after_seq` (default 0), in order, for replay after a
-//! reconnect.
+//! `{"events": [<envelope>...], "next_after_seq"?: n}`: one page of the run's
+//! durable envelopes with a seq greater than `after_seq` (default 0), in
+//! order, for replay after a reconnect. With neither `limit` nor
+//! `max_bytes` the answer holds every envelope when they fit one message
+//! (`max_message_bytes` less 128 bytes of framing) and is `-32052` when they
+//! do not (`data.seq` is the first that did not fit): never a first page
+//! with a cursor. With either, a page holds at most `limit` envelopes (1000 when absent, 10000
+//! at most) and `max_bytes` encoded bytes (8 MiB when absent and at most);
+//! larger values are lowered and 0 is `-32602`. The first envelope is always
+//! taken. While more follow, `next_after_seq` is the seq of the last
+//! envelope returned: ask again with it as `after_seq`. An envelope that
+//! cannot fit a message with its framing is `-32051` with `data.seq`: ask
+//! again with `after_seq` set to that seq to continue after it.
+//!
+//! **`run.report`** `{agent, run_id, timeline?}` answers
+//! `{"report", "markdown", "truncated"?}`; strings over 64 KiB in it are cut
+//! with a marker, the timeline loses its last events past 8 MiB, and then the
+//! text of each tool call is cut to 8 KiB, then 1 KiB, all counted in
+//! `truncated`; a report over 8 MiB even then is `-32603`.
 //!
 //! ## Scheduler
 //!
@@ -636,4 +652,4 @@ pub use background::BackgroundAgents;
 pub use client::{Client, ClientError, NOTIFICATION_CAPACITY, Notifications, RequestHandler};
 pub use error::{ErrorObject, code};
 pub use message::{Id, Message, Notification, Request, Response, Version};
-pub use server::{MAX_LINE_BYTES, serve, serve_lines, serve_messages};
+pub use server::{MAX_LINE_BYTES, SHUTDOWN_GRACE, serve, serve_lines, serve_messages};

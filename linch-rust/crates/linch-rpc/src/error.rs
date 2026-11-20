@@ -189,6 +189,17 @@ pub mod code {
     /// keeps a record of what it pruned for a bounded time; after that the
     /// run reads as not found (`-32021`).
     pub const RUN_PRUNED: i64 = -32050;
+    /// `run.events` met an envelope too long to be answered in one message
+    /// (with the answer's framing it is over `max_message_bytes`). `data.seq`
+    /// is its seq: ask again with `after_seq` set to it to continue after
+    /// it. The envelope is in the stores and was streamed live.
+    pub const EVENT_TOO_LARGE: i64 = -32051;
+    /// `run.events` without `limit` and `max_bytes` found more envelopes than
+    /// one message holds. Nothing is answered: such a request is the whole
+    /// remainder or this error, never a first page with a cursor. `data.seq`
+    /// is the first envelope that did not fit; ask again with `max_bytes` or
+    /// `limit` to read the run in pages.
+    pub const EVENTS_TOO_LONG: i64 = -32052;
 }
 
 impl ErrorObject {

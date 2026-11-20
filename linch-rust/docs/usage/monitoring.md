@@ -264,7 +264,15 @@ The `RunReport` fields:
 | `long_run` | Context growth, quality and resume signals |
 | `timeline` | Every event; empty unless `timeline=True` |
 
-A report never fails on a strange stream: a run with no `result` event has
+A report is built to fit 8 MiB, well within one message. Three steps, in this order, while it is longer:
+
+1. A string longer than 64 KiB (a long answer or tool result) is cut and ends in `... [truncated: N more bytes]`.
+2. Past 8 MiB the timeline loses its last events.
+3. Past 8 MiB still, the text of each tool call (its input and its result) is cut to 8 KiB, then to 1 KiB.
+
+When anything was cut, the answer has `truncated`: `{"strings": n, "timeline_omitted": m, "tool_call_text": k}`, where `timeline_omitted` is present only if events were dropped and `tool_call_text` (the number of tool calls whose text was shortened) only if step 3 ran. Read the full text with `agent.events`. A report that is still over 8 MiB with every tool call at 1 KiB (many thousands of tool calls) is refused with `-32603`; read such a run with `agent.events`.
+
+The shape of the stream does not matter: a run with no `result` event has
 `final: None` and the status it had. An unknown run is `RunNotFound`.
 
 To find the slow or failing tool of a run, read `summary["tools"]`. To compare

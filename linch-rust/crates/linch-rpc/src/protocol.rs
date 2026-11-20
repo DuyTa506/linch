@@ -409,6 +409,18 @@ pub struct EventsParams {
     /// Return the envelopes with a greater seq (default 0: all).
     #[serde(default)]
     pub after_seq: u64,
+    /// The most envelopes in the answer: 1000 when absent, at most 10000
+    /// (a larger value is lowered to it), never 0. With neither `limit` nor
+    /// `max_bytes` the answer holds every envelope after `after_seq` when they
+    /// fit in one message, and is `-32052` when they do not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+    /// The most encoded bytes of envelopes in the answer: 8 MiB when
+    /// absent, at most 8 MiB (a larger value is lowered to it), never 0. An
+    /// envelope that alone is longer is still returned, alone, unless it
+    /// cannot fit in a message (`-32051`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<u64>,
 }
 
 /// Result of `run.events`.
@@ -417,6 +429,11 @@ pub struct EventsParams {
 pub struct Events {
     /// Durable envelopes in seq order.
     pub events: Vec<Envelope>,
+    /// Present when more envelopes follow: ask again with `after_seq` set
+    /// to this (the seq of the last envelope returned). Absent on the last
+    /// page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_after_seq: Option<u64>,
 }
 
 /// Params of the `run.event` notification: consecutive envelopes of one

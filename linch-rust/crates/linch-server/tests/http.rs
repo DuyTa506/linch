@@ -52,7 +52,7 @@ async fn send(socket: &mut Socket, id: u64, method: &str, params: Value) {
     socket
         .send(Message::Text(request.to_string().into()))
         .await
-        .unwrap();
+        .unwrap_or_else(|error| panic!("sending {method}: {error}"));
 }
 
 async fn recv(socket: &mut Socket) -> Option<Value> {
@@ -275,6 +275,70 @@ async fn a_websocket_that_stops_answering_pings_is_dropped_and_frees_its_place()
     );
     drop(silent);
     server.stop().await;
+}
+
+/// A server whose tenant has one connection place, with a client logged in
+/// over a WebSocket that has started a run streaming tens of megabytes and
+/// reads none of it: the writer is blocked inside the socket.
+async fn stuck_websocket(liveness: Value) -> (Running, SocketAddr, Socket) {
+    let text = json!({"http": "127.0.0.1:0", "liveness": liveness,
+                      "tenants": {"acme": {"tokens": [{"value": TOKEN}],
+                                           "allow": {"max_connections": 1,
+                                                     "scripted_provider": true}}}});
+    let (server, listening) = running(&ServerConfig::from_json(&text.to_string()).unwrap()).await;
+    let address = listening.http.unwrap();
+    let mut stuck = connect(address, Some(&format!("Bearer {TOKEN}")))
+        .await
+        .unwrap();
+    let open = scripted(&"x".repeat(12 * 1024 * 1024));
+    send(&mut stuck, 1, "agent.open", open).await;
+    let opened = recv(&mut stuck).await.unwrap();
+    let agent = opened["result"]["agent"].clone();
+    let start = json!({"agent": agent, "session_id": "s1", "prompt": "hi"});
+    send(&mut stuck, 2, "run.start", start).await;
+    // Held open and never read again: the run's output fills the socket.
+    (server, address, stuck)
+}
+
+/// A ping that cannot be sent ends the connection (the blocked writer holds
+/// the socket's lock), and the blocked writer is given up at the end of the
+/// shutdown grace, so the place is free again.
+#[tokio::test]
+async fn a_websocket_that_stops_reading_mid_stream_is_dropped_and_frees_its_place() {
+    let live = json!({"ping_interval_ms": 200, "pong_timeout_ms": 3000});
+    let (server, address, stuck) = stuck_websocket(live).await;
+    let bearer = format!("Bearer {TOKEN}");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    let replacement = loop {
+        match connect(address, Some(&bearer)).await {
+            Ok(socket) => break socket,
+            Err(Error::Http(response)) if response.status() == StatusCode::TOO_MANY_REQUESTS => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "a connection whose client reads nothing keeps its place"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(error) => panic!("{error}"),
+        }
+    };
+    drop((stuck, replacement));
+    server.stop().await;
+}
+
+/// A stop ends a connection whose client reads nothing within the shutdown
+/// grace altogether: the queue, the writer and the close frame included.
+#[tokio::test]
+async fn a_stop_ends_a_websocket_that_reads_nothing_within_the_grace() {
+    let (server, _address, stuck) = stuck_websocket(json!({})).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let took = server.stop_timed().await;
+    let grace = linch_rpc::SHUTDOWN_GRACE;
+    assert!(
+        took <= grace + Duration::from_secs(2),
+        "the server took {took:?} to stop, the grace is {grace:?}"
+    );
+    drop(stuck);
 }
 
 /// A client that reads answers every ping with a pong (its WebSocket code

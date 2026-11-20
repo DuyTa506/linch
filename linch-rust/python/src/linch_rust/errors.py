@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .events import Envelope
 
 
 class LinchError(Exception):
@@ -184,6 +187,35 @@ class RunPruned(RunNotFound):
     def run_id(self) -> str:
         """The id of the pruned run."""
         return _field(self.data, "run_id")
+
+
+class EventsIncomplete(RunError):
+    """`Agent.events` stopped before the end of the run's events.
+
+    Attributes:
+        events: The envelopes read before it stopped, in order.
+        seq: The seq the read stopped at, when the server named one.
+    """
+
+    def __init__(self, code: int, message: str, data: Any = None) -> None:
+        super().__init__(code, message, data)
+        self.events: list[Envelope] = []
+
+    @property
+    def seq(self) -> int | None:
+        """The seq the read stopped at, or `None`."""
+        value = _int_field(self.data, "seq")
+        return value or None
+
+
+class EventTooLarge(EventsIncomplete):
+    """One envelope is too long for a message (-32051), so `run.events` cannot
+    return it.
+
+    `events` holds what was read before it and `seq` names it. To go on after
+    it, call `Agent.events(run_id, after_seq=error.seq)`; the envelope itself
+    can only be read from the stores.
+    """
 
 
 class LeaseLost(RunError):
@@ -516,6 +548,7 @@ _BY_CODE: dict[int, type[RpcError]] = {
     -32048: WorkflowNotFound,
     -32049: WorkflowNoJournal,
     -32050: RunPruned,
+    -32051: EventTooLarge,
     -32016: SchemaNewer,
     -32022: LeaseLost,
     -32025: ContractMismatch,

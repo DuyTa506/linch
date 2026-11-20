@@ -13,7 +13,7 @@ exception class tells you its family:
 |---|---|---|
 | `ProtocolError` | -32700, -32600, -32601, -32602, -32603 | A config or declaration the server cannot read (-32602); a method the server binary lacks (-32601: the binary is older than the client); a bug in the server (-32603: report it with the server's stderr) |
 | `OpenError` | -32010 to -32016 | `open_agent`: the config, provider, stores, a schema newer than the server (-32016, `SchemaNewer`) or an MCP server failed; -32012 is a run contract that could not be digested (report it) |
-| `RunError` and its subclasses | -32020 to -32034, -32038 and -32050 | The end of a run's stream, or `agent.events` |
+| `RunError` and its subclasses | -32020 to -32034, -32038, -32050 and -32051 | The end of a run's stream, or `agent.events` |
 | `AgentNotFound`, `RunBusy` | -32001, -32002 | The call itself |
 | `Unauthenticated`, `NotAllowed`, `LimitReached` | -32003, -32004, -32005 | A remote server's token, tenant checks and caps ([A remote server](#a-remote-server-serverconnect)) |
 | `ProviderInfoError` and its subclasses | -32035 to -32037 | `provider.models` and `provider.model`, asked before an agent opens |

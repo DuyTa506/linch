@@ -20,7 +20,7 @@ use futures::{SinkExt, StreamExt};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder;
 use hyper_util::service::TowerToHyperService;
-use linch_rpc::{Access, MAX_LINE_BYTES, Tokens};
+use linch_rpc::{Access, MAX_LINE_BYTES, SHUTDOWN_GRACE, Tokens};
 
 use crate::liveness::Liveness;
 use tokio::net::{TcpListener, TcpStream};
@@ -274,18 +274,36 @@ async fn serve_socket(socket: WebSocket, access: Access, stop: CancellationToken
     let ended = stop.child_token();
     let closing = Arc::clone(&sink);
     let pinging = ping(sink, pulse, started, live, ended.clone());
+    // When the end began, if it was a stop or a ping that could not be sent:
+    // the connection's shutdown grace runs from then, and the close frame
+    // below waits only for what is left of it.
+    let began = {
+        let ended = ended.clone();
+        tokio::spawn(async move {
+            ended.cancelled().await;
+            Instant::now()
+        })
+    };
     let serving = linch_rpc::serve_messages(incoming, Box::pin(outgoing), access, ended);
     // A connection's I/O error ends only that connection.
     tokio::select! {
         _ = serving => {}
         () = pinging => {}
         // When the client closes, the input ends and the connection finishes
-        // its calls; it is not cut short.
+        // its calls within the shutdown grace.
         () = async { reading.await; std::future::pending::<()>().await } => {}
     }
-    // Say goodbye if the peer is still there to hear it.
+    // Say goodbye if the peer is still there to hear it, inside the same
+    // grace as the rest of the shutdown.
+    let left = if began.is_finished() {
+        let since = began.await.map_or(Duration::ZERO, |at| at.elapsed());
+        SHUTDOWN_GRACE.saturating_sub(since)
+    } else {
+        began.abort();
+        SHUTDOWN_GRACE
+    };
     let close = async { closing.lock().await.close().await };
-    let _ = tokio::time::timeout(Duration::from_secs(5), close).await;
+    let _ = tokio::time::timeout(left, close).await;
 }
 
 /// Ping the client every `ping_interval` until it falls silent for

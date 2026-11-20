@@ -14,7 +14,7 @@ ghi "fragment" chỉ trích phần cố định của một thông báo dài hơ
 |---|---|---|
 | `ProtocolError` | -32700, -32600, -32601, -32602, -32603 | Một cấu hình hoặc khai báo mà server không đọc được (-32602); một method mà binary của server không có (-32601: binary cũ hơn client); một lỗi của server (-32603: báo cáo kèm stderr của server) |
 | `OpenError` | -32010 đến -32016 | `open_agent`: cấu hình, provider, kho lưu trữ, một schema mới hơn server (-32016, `SchemaNewer`) hoặc một MCP server bị lỗi; -32012 là run contract không tính được digest (hãy báo cáo) |
-| `RunError` và các lớp con | -32020 đến -32034, -32038 và -32050 | Cuối stream của một run, hoặc `agent.events` |
+| `RunError` và các lớp con | -32020 đến -32034, -32038, -32050 và -32051 | Cuối stream của một run, hoặc `agent.events` |
 | `AgentNotFound`, `RunBusy` | -32001, -32002 | Chính lệnh gọi |
 | `Unauthenticated`, `NotAllowed`, `LimitReached` | -32003, -32004, -32005 | Token, các kiểm tra tenant và giới hạn của server từ xa ([Server từ xa](#server-từ-xa-serverconnect)) |
 | `ProviderInfoError` và các lớp con | -32035 đến -32037 | `provider.models` và `provider.model`, hỏi trước khi mở agent |

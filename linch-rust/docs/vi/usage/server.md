@@ -615,8 +615,24 @@ Một client vẫn kết nối nhưng **ngừng đọc** (buffer socket và hàn
 riêng, nên không server nào khác tiếp quản được run khi kết nối còn sống ([Run
 leases](./stores.md#run-leases)). Một WebSocket không đọc gì cũng không nhận được ping: nó bị kết
 thúc khi một ping không gửi được trong `pong_timeout_ms`, và các run của nó bị bỏ như trên. Unix
-socket và stdio không có write timeout: một client cục bộ không bao giờ đọc lại giữ các run của
-nó cho đến khi đóng.
+socket và stdio không có write timeout khi kết nối đang chạy: một client cục bộ không bao giờ đọc
+lại giữ các run của nó cho đến khi đóng.
+
+**Sau một lần dừng, output đã xếp hàng được ghi trong tối đa 15 giây; một client không nhận kịp
+trong thời gian đó bị cắt, dù nó đọc chậm đến đâu.** Một lần dừng là SIGTERM hoặc SIGINT, hoặc
+input của kết nối đã hết khi kết nối đọc đến chỗ đó. Kết nối ngừng đọc input khi có 1024 câu trả
+lời nằm trong hàng đợi chưa được đọc (hàng đợi đầy, vòng đọc chờ chỗ trống), nên một client đã
+kết thúc input mà vẫn không đọc gì thì không bắt đầu khoảng ân hạn theo cách đó; chỉ SIGTERM
+hoặc SIGINT làm được, hoặc client nhận câu trả lời trở lại, sau đó kết nối đọc được chỗ hết
+input. Từ một lần dừng, kết nối có một khoảng ân hạn 15 s (`SHUTDOWN_GRACE`, một hằng
+số của `linch-rpc`, không phải setting) để hoàn tất các lời gọi đang chạy và ghi những gì đã xếp
+hàng. Hết khoảng đó, các lời gọi còn chạy bị bỏ, hàng đợi bị bỏ, writer bị abort và kết nối
+đóng, nên chỗ tenant của nó và việc tắt server không còn chờ client đó. Mọi lần chờ của việc tắt
+đều nằm trong một hạn chót này: các lời gọi đang trao câu trả lời cho hàng đợi đầy, vòng đọc,
+writer và khung close của WebSocket. Một client đọc hết ngay lập tức nhận mọi câu trả lời đã xếp
+hàng và kết nối kết thúc ngay khi chúng được ghi xong. Với WebSocket có ping không gửi được, kết
+nối kết thúc tại `pong_timeout_ms` rồi có cùng 15 s đó, nên chỗ của nó được trả lại chậm nhất
+`pong_timeout_ms` cộng 15 s sau.
 
 **Một client đang bận nhưng còn sống phải giữ cho event loop của nó chạy.** Pong đến từ code
 WebSocket của client, chạy trên event loop của nó. Một client Python có loop bị chặn lâu hơn

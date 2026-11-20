@@ -9,6 +9,7 @@ from typing import Any, cast
 import pytest
 
 from linch_rust import (
+    Agent,
     AgentNotFound,
     ConnectionClosed,
     InvalidSchedule,
@@ -83,6 +84,124 @@ async def test_events_read_with_the_run_answer_reach_the_run() -> None:
     assert [queue.get_nowait(), queue.get_nowait()] == [batch["envelopes"], RunEnd(None)]
     reader.feed_eof()
     await conn.finish()
+
+
+class Paging:
+    """A stream writer that answers `run.events` two envelopes at a time."""
+
+    def __init__(self, reader: asyncio.StreamReader, seqs: list[int]) -> None:
+        self.reader = reader
+        self.seqs = seqs
+        self.after: list[int] = []
+
+    def write(self, data: bytes) -> None:
+        request = json.loads(data)
+        after = request["params"]["after_seq"]
+        self.after.append(after)
+        page = [seq for seq in self.seqs if seq > after][:2]
+        result: dict[str, Any] = {
+            "events": [
+                {"v": 1, "seq": seq, "run_id": "r1", "ts_ms": 0, "event": {"type": "custom"}}
+                for seq in page
+            ]
+        }
+        if page and page[-1] < self.seqs[-1]:
+            result["next_after_seq"] = page[-1]
+        line = {"jsonrpc": "2.0", "id": request["id"], "result": result}
+        self.reader.feed_data(json.dumps(line).encode() + b"\n")
+
+    async def drain(self) -> None:
+        return None
+
+
+async def test_events_follows_the_cursor_until_the_last_page() -> None:
+    reader = asyncio.StreamReader()
+    writer = Paging(reader, [1, 2, 3, 4, 5])
+    conn = Connection(StreamTransport(reader, cast(asyncio.StreamWriter, writer)))
+    agent = Agent(conn, "agent-1", "digest")
+
+    envelopes = await agent.events("r1", after_seq=0)
+
+    assert [envelope.seq for envelope in envelopes] == [1, 2, 3, 4, 5]
+    assert writer.after == [0, 2, 4]
+    reader.feed_eof()
+    await conn.finish()
+
+
+class Scripted:
+    """A stream writer that answers each `run.events` with `answer(nth, params)`."""
+
+    def __init__(self, reader: asyncio.StreamReader, answer: Any) -> None:
+        self.reader = reader
+        self.answer = answer
+        self.requests: list[dict[str, Any]] = []
+
+    def write(self, data: bytes) -> None:
+        request = json.loads(data)
+        self.requests.append(request["params"])
+        body = self.answer(len(self.requests), request["params"])
+        line = {"jsonrpc": "2.0", "id": request["id"], **body}
+        self.reader.feed_data(json.dumps(line).encode() + b"\n")
+
+    async def drain(self) -> None:
+        return None
+
+
+def _envelope(seq: int) -> dict[str, Any]:
+    return {"v": 1, "seq": seq, "run_id": "r1", "ts_ms": 0, "event": {"type": "custom"}}
+
+
+async def _read_events(answer: Any) -> tuple[Agent, Scripted, asyncio.StreamReader]:
+    reader = asyncio.StreamReader()
+    writer = Scripted(reader, answer)
+    conn = Connection(StreamTransport(reader, cast(asyncio.StreamWriter, writer)))
+    return Agent(conn, "agent-1", "digest"), writer, reader
+
+
+async def test_a_cursor_that_does_not_advance_ends_with_an_error() -> None:
+    def answer(nth: int, params: dict[str, Any]) -> dict[str, Any]:
+        events = [_envelope(1)] if nth == 1 else []
+        return {"result": {"events": events, "next_after_seq": params["after_seq"] or 1}}
+
+    agent, writer, reader = await _read_events(answer)
+    with pytest.raises(RunError, match="did not advance") as raised:
+        await asyncio.wait_for(agent.events("r1"), 2.0)
+    assert len(writer.requests) < 10
+    assert [e.seq for e in getattr(raised.value, "events", [])] == [1]
+    reader.feed_eof()
+
+
+async def test_an_envelope_too_long_for_a_message_keeps_the_pages_already_read() -> None:
+    def answer(nth: int, params: dict[str, Any]) -> dict[str, Any]:
+        if nth == 1:
+            return {"result": {"events": [_envelope(1), _envelope(2)], "next_after_seq": 2}}
+        data = {"seq": 3}
+        message = "event 3 is 16777200 bytes; ask again with after_seq 3 to go on after it"
+        return {"error": {"code": -32051, "message": message, "data": data}}
+
+    agent, writer, reader = await _read_events(answer)
+    with pytest.raises(RunError) as raised:
+        await agent.events("r1")
+    error = cast(Any, raised.value)
+    assert error.seq == 3
+    assert [e.seq for e in error.events] == [1, 2]
+    # Two pages were asked for: the refusal came on the second.
+    assert writer.requests[-1]["after_seq"] == 2
+    reader.feed_eof()
+
+
+async def test_events_are_always_asked_for_in_pages() -> None:
+    # A request without `limit` and `max_bytes` is the whole run in one
+    # answer or an error, so the client always names a page.
+    def answer(nth: int, params: dict[str, Any]) -> dict[str, Any]:
+        if nth == 1:
+            return {"result": {"events": [_envelope(1)], "next_after_seq": 1}}
+        return {"result": {"events": [_envelope(2)]}}
+
+    agent, writer, reader = await _read_events(answer)
+    assert [e.seq for e in await agent.events("r1")] == [1, 2]
+    assert [request.get("max_bytes") for request in writer.requests] == [8 * 1024 * 1024] * 2
+    reader.feed_eof()
 
 
 async def test_a_run_that_failed_inside_the_server_ends_with_a_run_error() -> None:
