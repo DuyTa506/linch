@@ -759,14 +759,16 @@ server. Một lượt tốn bao nhiêu lần ghi và chúng được gom nhóm r
 
 ### Run dài được đọc từng trang
 
-`agent.events` trả về cả run: nó tự đi theo các trang của server. Trên wire, `run.events` trả lời
+`agent.events` trả về cả run: nó luôn xin theo trang (`max_bytes` 8 MiB) và tự đi theo các trang đó. Trên wire, `run.events` trả lời
 từng message, và một message chứa tối đa `limits.max_message_bytes` của `server.info` (16 MiB)
 tính cả khung. Một request nhận được:
 
-- **Không có `limit` lẫn `max_bytes`** (những gì một client cũ gửi): mọi envelope vừa một message
-  (16 MiB trừ 128 byte khung), như trước đây; và chỉ khi phần còn lại không vừa thì là một trang
-  đầu cỡ đó cùng `next_after_seq`, chỗ mà server cũ trả lời bằng một lỗi. Vì vậy một client bỏ qua
-  `next_after_seq` chỉ có thể bỏ sót event ở chỗ trước đây nó nhận một lỗi.
+- **Không có `limit` lẫn `max_bytes`** (những gì một client cũ gửi): mọi envelope sau `after_seq`
+  trong một câu trả lời khi chúng vừa một message (16 MiB trừ 128 byte khung), như trước đây; khi
+  không vừa thì là một lỗi, `-32052`, và không có gì được trả lời: không bao giờ là một trang đầu
+  cùng một cursor. Vì vậy một client không biết `next_after_seq` nhận cả run hoặc một lỗi, và
+  không có event nào mất đi mà không có dấu hiệu. `data.seq` là envelope đầu tiên không vừa, và
+  thông báo nói hãy hỏi lại với `max_bytes` hoặc `limit`, thứ chia trang kèm cursor.
 - **`limit`, `max_bytes` hoặc cả hai**: tối đa `limit` envelope (1000 khi không có) và
   `max_bytes` byte đã mã hóa (8 MiB khi không có). Giá trị vượt mức tối đa (10000 envelope,
   8 MiB) bị hạ xuống mức đó, dù lớn đến đâu; 0 là `-32602`. Envelope đầu của một trang luôn được

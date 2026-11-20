@@ -163,19 +163,21 @@ impl Server {
         if params.max_bytes == Some(0) {
             return Err(invalid_params("max_bytes is at least 1"));
         }
-        let (limit, max_bytes) = match (params.limit, params.max_bytes) {
-            (None, None) => (usize::MAX, EVENTS_MESSAGE_BYTES),
-            (limit, bytes) => (
-                lowered(limit, EVENTS_LIMIT_DEFAULT, EVENTS_LIMIT_MAX),
-                lowered(bytes, EVENTS_BYTES_MAX, EVENTS_BYTES_MAX),
-            ),
+        let whole = params.limit.is_none() && params.max_bytes.is_none();
+        let (limit, max_bytes) = if whole {
+            (usize::MAX, EVENTS_MESSAGE_BYTES)
+        } else {
+            (
+                lowered(params.limit, EVENTS_LIMIT_DEFAULT, EVENTS_LIMIT_MAX),
+                lowered(params.max_bytes, EVENTS_BYTES_MAX, EVENTS_BYTES_MAX),
+            )
         };
         let agent = lock(&self.0.tables).agent(&params.agent)?;
         let events = agent
             .events(&params.run_id, params.after_seq)
             .await
             .map_err(|error| ErrorObject::from(&error))?;
-        let (events, next_after_seq) = page(events, limit, max_bytes)?;
+        let (events, next_after_seq) = page(events, limit, max_bytes, whole)?;
         to_value(&Events {
             events,
             next_after_seq,
@@ -194,11 +196,14 @@ fn lowered(value: Option<u64>, default: usize, most: usize) -> usize {
 /// (a comma counts with each), and the seq of the last one when more
 /// follow. The first envelope is always taken, so a reader makes progress;
 /// one that cannot fit in a message with its answer's framing is refused,
-/// naming its seq.
+/// naming its seq. With `whole` the page is all of `events` or an error
+/// (`EVENTS_TOO_LONG`, naming the first envelope that did not fit): a
+/// cursor is only for a caller that asked to be paged.
 fn page(
     mut events: Vec<Envelope>,
     limit: usize,
     max_bytes: usize,
+    whole: bool,
 ) -> Result<(Vec<Envelope>, Option<u64>), ErrorObject> {
     let mut bytes = 0;
     let mut taken = 0;
@@ -224,6 +229,19 @@ fn page(
         taken += 1;
     }
     let more = taken < events.len();
+    if whole && more {
+        let seq = events[taken].seq;
+        let message = format!(
+            "run.events without limit or max_bytes answers the whole run in one message, and \
+             the {total} envelopes after after_seq are longer than one message ({taken} fit; \
+             event {seq} does not); ask again with max_bytes or limit to read them in pages, \
+             following next_after_seq",
+            total = events.len()
+        );
+        return Err(
+            ErrorObject::new(code::EVENTS_TOO_LONG, message).with_data(json!({ "seq": seq }))
+        );
+    }
     events.truncate(taken);
     let next = events.last().filter(|_| more).map(|envelope| envelope.seq);
     Ok((events, next))
@@ -291,23 +309,23 @@ mod tests {
     #[test]
     fn a_page_stops_at_the_limit_and_names_the_seq_to_continue_from() {
         let events: Vec<_> = (1..=5).map(|seq| envelope(seq, 10)).collect();
-        let (first, next) = page(events.clone(), 2, usize::MAX).unwrap();
+        let (first, next) = page(events.clone(), 2, usize::MAX, false).unwrap();
         assert_eq!((seqs(&first), next), (vec![1, 2], Some(2)));
-        let (rest, next) = page(events, 5, usize::MAX).unwrap();
+        let (rest, next) = page(events, 5, usize::MAX, false).unwrap();
         assert_eq!((seqs(&rest), next), (vec![1, 2, 3, 4, 5], None));
     }
 
     #[test]
     fn a_page_stops_before_the_envelope_that_passes_the_byte_bound() {
         let events: Vec<_> = (1..=4).map(|seq| envelope(seq, 1000)).collect();
-        let (taken, next) = page(events, 100, 2500).unwrap();
+        let (taken, next) = page(events, 100, 2500, false).unwrap();
         assert_eq!((seqs(&taken), next), (vec![1, 2], Some(2)));
     }
 
     #[test]
     fn an_envelope_over_the_byte_bound_is_returned_alone() {
         let events = vec![envelope(1, 5000), envelope(2, 10)];
-        let (taken, next) = page(events, 100, 100).unwrap();
+        let (taken, next) = page(events, 100, 100, false).unwrap();
         assert_eq!((seqs(&taken), next), (vec![1], Some(1)));
     }
 
@@ -323,10 +341,11 @@ mod tests {
     #[test]
     fn an_envelope_that_fits_a_message_with_its_framing_is_returned_alone() {
         let live = envelope_of(2, MAX_LINE_BYTES - 100_000);
-        let (taken, next) = page(vec![envelope(1, 10), live], 100, EVENTS_BYTES_MAX).unwrap();
+        let (taken, next) =
+            page(vec![envelope(1, 10), live], 100, EVENTS_BYTES_MAX, false).unwrap();
         assert_eq!((seqs(&taken), next), (vec![1], Some(1)));
         let edge = envelope_of(2, EVENTS_MESSAGE_BYTES);
-        let (taken, next) = page(vec![edge], usize::MAX, EVENTS_MESSAGE_BYTES).unwrap();
+        let (taken, next) = page(vec![edge], usize::MAX, EVENTS_MESSAGE_BYTES, true).unwrap();
         assert_eq!((seqs(&taken), next), (vec![2], None));
         let the_answer = json!({"jsonrpc": "2.0", "id": u64::MAX, "result": Events {
             events: taken, next_after_seq: Some(u64::MAX)}});
@@ -334,15 +353,31 @@ mod tests {
     }
 
     #[test]
+    fn a_whole_answer_that_does_not_fit_a_message_is_an_error_naming_the_first_that_did_not() {
+        let events = vec![
+            envelope(1, 10),
+            envelope(2, 10),
+            envelope_of(3, EVENTS_MESSAGE_BYTES),
+        ];
+        let error = page(events.clone(), usize::MAX, EVENTS_MESSAGE_BYTES, true).unwrap_err();
+        assert_eq!(error.code, code::EVENTS_TOO_LONG);
+        assert_eq!(error.data, Some(json!({"seq": 3})));
+        assert!(error.message.contains("max_bytes"), "{}", error.message);
+        // The same events paged are not an error.
+        let (taken, next) = page(events, usize::MAX, EVENTS_MESSAGE_BYTES, false).unwrap();
+        assert_eq!((seqs(&taken), next), (vec![1, 2], Some(2)));
+    }
+
+    #[test]
     fn an_envelope_too_long_for_one_message_is_refused_with_its_seq() {
         let too_long = envelope_of(7, EVENTS_MESSAGE_BYTES + 1);
-        let error = page(vec![too_long], usize::MAX, EVENTS_MESSAGE_BYTES).unwrap_err();
+        let error = page(vec![too_long], usize::MAX, EVENTS_MESSAGE_BYTES, true).unwrap_err();
         assert_eq!(error.code, code::EVENT_TOO_LARGE);
         assert_eq!(error.data, Some(json!({"seq": 7})));
         assert!(error.message.contains("after_seq 7"), "{}", error.message);
         // Earlier envelopes are still returned: the refusal waits for its turn.
         let events = vec![envelope(1, 10), envelope_of(2, MAX_LINE_BYTES)];
-        let (taken, next) = page(events, 100, EVENTS_MESSAGE_BYTES).unwrap();
+        let (taken, next) = page(events, 100, EVENTS_MESSAGE_BYTES, false).unwrap();
         assert_eq!((seqs(&taken), next), (vec![1], Some(1)));
     }
 }

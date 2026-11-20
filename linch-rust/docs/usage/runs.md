@@ -754,17 +754,19 @@ process. How many writes a turn costs and how they are grouped is in the
 
 ### Long runs are read in pages
 
-`agent.events` returns the whole run: it follows the server's pages for you.
+`agent.events` returns the whole run: it always asks for pages (`max_bytes` of 8 MiB) and follows them for you.
 On the wire, `run.events` answers one message at a time, and a message holds
 at most `limits.max_message_bytes` of `server.info` (16 MiB) in all. What
 a request gets:
 
 - **Neither `limit` nor `max_bytes`** (what an older client sends): every
-  envelope that fits one message (16 MiB less 128 bytes of framing), as
-  before; and only when the rest would not fit, a first page of that size
-  plus `next_after_seq`, where an older server answered with an error. A
-  client that ignores `next_after_seq` can therefore miss events only where
-  it used to get an error.
+  envelope after `after_seq` in one answer when they fit one message (16 MiB
+  less 128 bytes of framing), as before; when they do not, an error,
+  `-32052`, and nothing is answered: never a first page with a cursor. A
+  client that does not know `next_after_seq` therefore gets the whole run or
+  an error, and no events are lost without a sign. `data.seq` is the first
+  envelope that did not fit, and the message says to ask again with
+  `max_bytes` or `limit`, which pages with a cursor.
 - **`limit`, `max_bytes` or both**: at most `limit` envelopes (1000 when
   absent) and `max_bytes` encoded bytes (8 MiB when absent). A value above
   the most (10000 envelopes, 8 MiB) is lowered to it, whatever its size; 0 is

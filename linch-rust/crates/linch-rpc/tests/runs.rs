@@ -10,7 +10,7 @@ use common::*;
 use linch::events::kinds::ResultSubtype;
 use linch::{Event, Persistence, RunId};
 use linch_rpc::protocol::{Cancelled, Events, method};
-use linch_rpc::{ErrorObject, code};
+use linch_rpc::{ClientError, ErrorObject, code};
 use serde_json::{Value, json};
 
 fn subtype(event: &Event) -> ResultSubtype {
@@ -189,7 +189,8 @@ async fn run_events_of_a_large_run_can_be_read_page_by_page() {
     let durable = (ended.envelopes.iter())
         .filter(|e| e.event.persistence() == Persistence::Both)
         .count();
-    let pages = read_pages(&rpc, &agent, &run_id, json!({})).await;
+    let extra = json!({"max_bytes": 8 * 1024 * 1024});
+    let pages = read_pages(&rpc, &agent, &run_id, extra).await;
     assert!(pages.len() > 1, "{} page for a run of 18 MiB", pages.len());
     let read: Vec<_> = pages.iter().flatten().collect();
     assert_eq!(read.len(), durable);
@@ -299,8 +300,54 @@ async fn a_run_whose_envelopes_streamed_live_can_be_replayed() {
     let durable = (ended.envelopes.iter())
         .filter(|e| e.event.persistence() == Persistence::Both)
         .count();
-    let pages = read_pages(&rpc, &agent, &run_id, json!({})).await;
+    let extra = json!({"max_bytes": 8 * 1024 * 1024});
+    let pages = read_pages(&rpc, &agent, &run_id, extra).await;
     assert_eq!(pages.iter().map(Vec::len).sum::<usize>(), durable);
+}
+
+/// A request without `limit` and `max_bytes` is the whole remainder in one
+/// answer or an error: never a first page with a cursor, which a client
+/// that does not know the cursor would take for the whole run.
+#[tokio::test]
+async fn run_events_without_limits_is_the_whole_run_or_an_error() {
+    let mut rpc = Rpc::new();
+    let text = "x".repeat(9 * 1024 * 1024);
+    let agent = rpc.open(scripted(vec![text_turn(&text)], None, "")).await;
+    let prompt = "p".repeat(9 * 1024 * 1024);
+    let run_id = rpc.start(&agent, "s1", &prompt).await;
+    let ended = rpc.until_end(&run_id).await;
+    assert!(ended.error.is_none(), "the run itself streams fine");
+    let params = json!({"agent": agent, "run_id": run_id});
+    let answer = rpc.call(method::RUN_EVENTS, params).await;
+    let error = match answer {
+        Ok(answer) => panic!(
+            "{} envelopes and next_after_seq {:?} for a run that is longer than a message",
+            answer["events"].as_array().unwrap().len(),
+            answer.get("next_after_seq")
+        ),
+        Err(ClientError::Rpc(error)) => error,
+        Err(other) => panic!("{other:?}"),
+    };
+    assert_eq!(error.code, code::EVENTS_TOO_LONG, "{error:?}");
+    assert!(error.message.contains("max_bytes"), "{}", error.message);
+    let seq = error.data.as_ref().and_then(|data| data["seq"].as_u64());
+    let durable: Vec<u64> = (ended.envelopes.iter())
+        .filter(|e| e.event.persistence() == Persistence::Both)
+        .map(|e| e.seq)
+        .collect();
+    assert!(
+        durable.contains(&seq.expect("data.seq")),
+        "{seq:?} {durable:?}"
+    );
+    // The error names the way: `limit` or `max_bytes` pages with a cursor.
+    for extra in [
+        json!({"limit": 1000}),
+        json!({"max_bytes": 4 * 1024 * 1024}),
+    ] {
+        let pages = read_pages(&rpc, &agent, &run_id, extra).await;
+        assert!(pages.len() > 1);
+        assert_eq!(pages.iter().map(Vec::len).sum::<usize>(), durable.len());
+    }
 }
 
 /// A `limit` or `max_bytes` above the most is lowered to it, whatever its

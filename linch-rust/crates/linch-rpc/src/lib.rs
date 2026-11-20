@@ -337,10 +337,10 @@
 //! `{"events": [<envelope>...], "next_after_seq"?: n}`: one page of the run's
 //! durable envelopes with a seq greater than `after_seq` (default 0), in
 //! order, for replay after a reconnect. With neither `limit` nor
-//! `max_bytes` the answer holds every envelope that fits one message
-//! (`max_message_bytes` less 128 bytes of framing), and only when the rest
-//! would not fit a first page of that size plus `next_after_seq`. With
-//! either, a page holds at most `limit` envelopes (1000 when absent, 10000
+//! `max_bytes` the answer holds every envelope when they fit one message
+//! (`max_message_bytes` less 128 bytes of framing) and is `-32052` when they
+//! do not (`data.seq` is the first that did not fit): never a first page
+//! with a cursor. With either, a page holds at most `limit` envelopes (1000 when absent, 10000
 //! at most) and `max_bytes` encoded bytes (8 MiB when absent and at most);
 //! larger values are lowered and 0 is `-32602`. The first envelope is always
 //! taken. While more follow, `next_after_seq` is the seq of the last

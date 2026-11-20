@@ -25,6 +25,10 @@ from .monitor import (
 from .run import Observer, Run
 from .schedule import CHECK_IN, Job, Schedule
 
+# The bytes of one `run.events` page `Agent.events` asks for (the most the
+# server gives a page).
+_EVENTS_PAGE_BYTES = 8 * 1024 * 1024
+
 
 @dataclass(frozen=True)
 class Allow:
@@ -381,7 +385,14 @@ class Agent:
         """
         envelopes: list[Envelope] = []
         while True:
-            params = {"agent": self.handle, "run_id": run_id, "after_seq": after_seq}
+            # Naming a page is what makes the server answer with a cursor: a
+            # request without limits is the whole run or an error.
+            params = {
+                "agent": self.handle,
+                "run_id": run_id,
+                "after_seq": after_seq,
+                "max_bytes": _EVENTS_PAGE_BYTES,
+            }
             try:
                 answer = await self._conn.request("run.events", params)
             except EventsIncomplete as error:

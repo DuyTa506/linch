@@ -190,6 +190,20 @@ async def test_an_envelope_too_long_for_a_message_keeps_the_pages_already_read()
     reader.feed_eof()
 
 
+async def test_events_are_always_asked_for_in_pages() -> None:
+    # A request without `limit` and `max_bytes` is the whole run in one
+    # answer or an error, so the client always names a page.
+    def answer(nth: int, params: dict[str, Any]) -> dict[str, Any]:
+        if nth == 1:
+            return {"result": {"events": [_envelope(1)], "next_after_seq": 1}}
+        return {"result": {"events": [_envelope(2)]}}
+
+    agent, writer, reader = await _read_events(answer)
+    assert [e.seq for e in await agent.events("r1")] == [1, 2]
+    assert [request.get("max_bytes") for request in writer.requests] == [8 * 1024 * 1024] * 2
+    reader.feed_eof()
+
+
 async def test_a_run_that_failed_inside_the_server_ends_with_a_run_error() -> None:
     panic = {"code": -32603, "message": "the run failed inside the server (a panic)"}
     lines = [
