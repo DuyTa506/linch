@@ -28,7 +28,10 @@ the [architecture providers page](../architecture/providers.md).
 
 `base_url` replaces the provider's endpoint. Any other field is refused at open
 with a `ProtocolError` (code -32602), so a config can never carry an
-`api_key`.
+`api_key`. In Rust, `Debug` and serializing an `AgentConfig` show a
+`base_url`'s user name, password and query as `redacted` (`https://redacted:redacted@gw/v1?redacted`),
+like an MCP URL, and `to_value_with_secrets` keeps them for the wire; a URL with none of
+the three is written as given. Put a token in the server's environment where you can.
 
 ### Request settings
 

@@ -146,3 +146,48 @@ fn provider_header_values_are_hidden_but_the_wire_form_keeps_them() {
     );
     assert_eq!(serde_json::from_value::<AgentConfig>(wire).unwrap(), config);
 }
+
+#[test]
+fn a_provider_base_url_hides_its_userinfo_and_query_but_the_wire_form_keeps_them() {
+    let config: AgentConfig = serde_json::from_value(json!({
+        "namespace": "t",
+        "spec": {"model": "m"},
+        "provider": {"id": "vllm",
+                     "base_url": "https://tok-user:tok-pass@gw.internal/v1?key=tok-query"},
+    }))
+    .unwrap();
+    let text = serde_json::to_string(&config).unwrap();
+    for secret in ["tok-user", "tok-pass", "tok-query"] {
+        assert!(!text.contains(secret), "{text}");
+        assert!(!format!("{config:?}").contains(secret), "{config:?}");
+    }
+    let shown = serde_json::to_value(&config).unwrap();
+    assert_eq!(
+        shown["provider"]["base_url"],
+        "https://redacted:redacted@gw.internal/v1?redacted"
+    );
+    let wire = config.to_value_with_secrets().unwrap();
+    assert_eq!(
+        wire["provider"]["base_url"],
+        "https://tok-user:tok-pass@gw.internal/v1?key=tok-query"
+    );
+    assert_eq!(serde_json::from_value::<AgentConfig>(wire).unwrap(), config);
+}
+
+#[test]
+fn a_provider_base_url_without_secrets_is_written_as_given() {
+    for url in [
+        "http://gw.internal",
+        "http://GW.internal:80/v1/",
+        "https://api.x.test/v1",
+    ] {
+        let config: AgentConfig = serde_json::from_value(json!({
+            "namespace": "t",
+            "spec": {"model": "m"},
+            "provider": {"id": "vllm", "base_url": url},
+        }))
+        .unwrap();
+        let shown = serde_json::to_value(&config).unwrap();
+        assert_eq!(shown["provider"]["base_url"], url);
+    }
+}

@@ -16,6 +16,7 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 - A lease renewal that arrives after the release is `LeaseLost` and no longer leases the run again; the epoch fence is unchanged.
 - A job heartbeat that arrives after the attempt released or failed the job answers `false` and no longer hides the job for a visibility timeout.
 - `create` of a run id that retention pruned (its tombstone is still kept) answers `Conflict`, like an existing id, instead of starting a second run.
+- In Rust, `Debug` and serializing a provider `base_url` show its user name, password and query as `redacted`, as for an MCP URL; `to_value_with_secrets` keeps them for the wire.
 
 ## 0.2.0 - 2026-11-19
 

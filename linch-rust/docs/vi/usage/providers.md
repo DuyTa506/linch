@@ -30,7 +30,10 @@ server; cách mỗi adapter ánh xạ request, thinking và usage nằm ở
 
 `base_url` thay thế endpoint của provider. Mọi trường khác đều bị từ chối lúc mở
 bằng một `ProtocolError` (code -32602), nên một config không bao giờ có thể chứa
-`api_key`.
+`api_key`. Trong Rust, `Debug` và việc serialize một `AgentConfig` hiện user name, mật khẩu
+và query của `base_url` là `redacted` (`https://redacted:redacted@gw/v1?redacted`), giống một URL MCP,
+còn `to_value_with_secrets` giữ chúng cho wire; URL không có cả ba thì được ghi nguyên văn.
+Hãy đặt token trong môi trường của server khi có thể.
 
 ### Cài đặt request
 
