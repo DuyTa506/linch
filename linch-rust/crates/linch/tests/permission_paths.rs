@@ -97,3 +97,53 @@ async fn a_virtual_path_is_still_judged_against_the_project_root() {
     let input = json!({"path": "notes/a", "content": "x"});
     assert!(is_refused(&acme, &acme.join("app"), "write_file", input).await);
 }
+
+/// Write `file_path` over `workspace` with permissions naming `project_root`
+/// (as spelled), and say which half of "the deny rule held" failed.
+async fn assert_write_denied(workspace: &Path, project_root: &Path, file_path: &str, real: &Path) {
+    let refused = write_is_refused(workspace, project_root, file_path).await;
+    assert!(
+        refused,
+        "refused: the write to {file_path} was allowed under project_root {}",
+        project_root.display()
+    );
+    assert!(
+        !real.exists(),
+        "absent: the write was refused yet {} exists",
+        real.display()
+    );
+}
+
+#[tokio::test]
+async fn a_symlinked_project_root_above_the_workspace_keeps_its_deny() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let acme = base.join("acme");
+    std::fs::create_dir_all(acme.join("app/secrets")).unwrap();
+    // The project root is a link that sits beside the workspace and points
+    // below it: really `acme/app`.
+    let link = base.join("plink");
+    std::os::unix::fs::symlink(acme.join("app"), &link).unwrap();
+    let real = acme.join("app/secrets/new");
+    assert_write_denied(&acme, &link, "app/secrets/new", &real).await;
+    // A path outside `secrets/**` is still allowed, so the deny is not a
+    // blanket refusal.
+    assert!(!write_is_refused(&acme, &link, "app/notes-ok").await);
+    assert!(acme.join("app/notes-ok").exists());
+}
+
+#[tokio::test]
+async fn a_symlinked_project_root_deeper_than_its_target_keeps_its_deny() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let acme = base.join("acme");
+    std::fs::create_dir_all(acme.join("app/secrets")).unwrap();
+    std::fs::create_dir_all(base.join("a/b/c")).unwrap();
+    // `a/b/c/plink` is really `acme`; the project root is `plink/app`, the
+    // workspace `acme`.
+    let link = base.join("a/b/c/plink");
+    std::os::unix::fs::symlink(&acme, &link).unwrap();
+    let root = link.join("app");
+    let real = acme.join("app/secrets/new");
+    assert_write_denied(&acme, &root, "app/secrets/new", &real).await;
+}

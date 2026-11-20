@@ -179,7 +179,9 @@ impl AgentConfig {
             .layers
             .extend(self.profile.and_then(|p| p.deny_layer()));
         let path_base = match &root {
-            Some(workspace) => workspace_base(&policy.project_root, workspace).await,
+            Some(workspace) => workspace_engine(&policy, workspace)
+                .await?
+                .map(|engine| (workspace.clone(), engine)),
             None => None,
         };
         let permissions = PermissionEngine::new(policy)?;
@@ -290,8 +292,8 @@ impl AgentConfig {
             // A compaction folds or clears what the model read: it reads a
             // file again before changing it (Python's `reset_read_tracker`).
             .on_compact(move |session| unread.forget(session));
-        if let Some(base) = path_base {
-            builder = builder.path_base(base, WORKSPACE_PATH_TOOLS);
+        if let Some((workspace, engine)) = path_base {
+            builder = builder.path_base(workspace, engine, WORKSPACE_PATH_TOOLS);
         }
         if let Some(gate) = gate {
             builder = builder.provider_gate(gate);
@@ -504,31 +506,28 @@ pub const RELEASE_WAIT: Duration = Duration::from_secs(5);
 /// The workspace tools whose path fields name a file under the workspace.
 const WORKSPACE_PATH_TOOLS: [&str; 5] = ["Read", "Write", "Edit", "Grep", "Glob"];
 
-/// Where the workspace tools resolve a relative path, as a path from
-/// `project_root`, or `None` when that is the project root itself.
+/// The engine that judges the workspace tools' relative paths, or `None`
+/// when they resolve them in the project root itself.
 ///
 /// Permission joins a relative path to the project root. The workspace tools
-/// join it to `workspace` (canonical), so this is the way from the one to the
-/// other, spelled from the canonical project root: below it a plain relative
-/// path, above it `..` segments. A project root that is a symlink to the
-/// workspace, or the workspace itself spelled another way, gives `None`.
-async fn workspace_base(project_root: &str, workspace: &str) -> Option<String> {
-    let root = tokio::fs::canonicalize(project_root).await;
-    let root = root.unwrap_or_else(|_| PathBuf::from(project_root));
-    let way = relative_path(&root, Path::new(workspace));
-    (!way.is_empty()).then_some(way)
-}
-
-/// The path that leads from the directory `from` to `to`, both absolute and
-/// normalized: empty when they are the same.
-fn relative_path(from: &Path, to: &Path) -> String {
-    let (from, to): (Vec<_>, Vec<_>) = (from.components().collect(), to.components().collect());
-    let shared = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
-    let ups = std::iter::repeat_n("..".to_owned(), from.len() - shared);
-    let downs = to[shared..]
-        .iter()
-        .map(|part| part.as_os_str().to_string_lossy().into_owned());
-    ups.chain(downs).collect::<Vec<_>>().join("/")
+/// join it to `workspace` (canonical), so for them the policy names its
+/// project root in the same canonical form and the call's directory is the
+/// workspace: a link in the root's spelling, above or below the workspace,
+/// cannot shift what a rule covers. The policy the run contract holds is not
+/// this copy. A project root that is the workspace, however spelled, gives
+/// `None`.
+async fn workspace_engine(
+    policy: &PermissionPolicy,
+    workspace: &str,
+) -> Result<Option<PermissionEngine>, OpenError> {
+    let root = tokio::fs::canonicalize(&policy.project_root).await;
+    let root = root.unwrap_or_else(|_| PathBuf::from(&policy.project_root));
+    if root == Path::new(workspace) {
+        return Ok(None);
+    }
+    let mut policy = policy.clone();
+    policy.project_root = root.to_string_lossy().into_owned();
+    Ok(Some(PermissionEngine::new(policy)?))
 }
 
 /// The workspace tools that run commands, which the `bash` switch turns off
@@ -836,20 +835,5 @@ fn summary(config: ReasoningSummaryConfig) -> ReasoningSummary {
         ReasoningSummaryConfig::Auto => ReasoningSummary::Auto,
         ReasoningSummaryConfig::Concise => ReasoningSummary::Concise,
         ReasoningSummaryConfig::Detailed => ReasoningSummary::Detailed,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_way_between_two_directories_is_spelled_from_the_first() {
-        let way = |from: &str, to: &str| relative_path(Path::new(from), Path::new(to));
-        assert_eq!(way("/srv/acme", "/srv/acme"), "");
-        assert_eq!(way("/srv/acme", "/srv/acme/app/src"), "app/src");
-        assert_eq!(way("/srv/acme/app", "/srv/acme"), "..");
-        assert_eq!(way("/srv/acme/app", "/srv/other/x"), "../../other/x");
-        assert_eq!(way("/", "/srv/acme"), "srv/acme");
     }
 }

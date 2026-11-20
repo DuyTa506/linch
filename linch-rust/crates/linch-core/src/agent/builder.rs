@@ -107,18 +107,23 @@ impl AgentBuilder {
     /// For file tools that join a path to a directory other than the project
     /// root (a workspace): without this a rule is matched against a path the
     /// tool never touches. Other tools keep the project root, and the
-    /// run contract does not change.
+    /// run contract does not change: it holds the policy given to
+    /// [`permissions`](Self::permissions), not the one given here.
     ///
     /// Args:
-    ///     base: The directory, absolute or relative to the project root.
+    ///     base: The absolute directory the tools resolve a relative path in.
+    ///     engine: The agent's policy with its project root spelled in the
+    ///         same canonical form as `base`, so a relative path is
+    ///         compared with the root as the tool will reach it.
     ///     tools: Names of the tools that resolve a relative path in it.
     pub fn path_base(
         mut self,
         base: impl Into<String>,
+        engine: PermissionEngine,
         tools: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         let tools = tools.into_iter().map(Into::into).collect();
-        self.path_base = Some(PathBase::new(base.into(), tools));
+        self.path_base = Some(PathBase::new(base.into(), engine, tools));
         self
     }
 

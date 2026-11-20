@@ -149,24 +149,28 @@ pub enum PlannedAction {
 ///
 /// Permission judges a relative path against the project root. A tool that
 /// joins it to another directory (the workspace) acts on a different path
-/// than the one judged, so the agent names that directory for those tools.
+/// than the one judged, so the agent names that directory for those tools,
+/// and the engine that judges them names the project root in the same
+/// (canonical) form as that directory.
 #[derive(Debug, Clone)]
 pub(crate) struct PathBase {
     dir: String,
+    engine: PermissionEngine,
     tools: HashSet<String>,
 }
 
 impl PathBase {
-    /// `tools` resolve relative paths in `dir`: a path relative to the
-    /// project root, or an absolute one.
-    pub(crate) fn new(dir: String, tools: HashSet<String>) -> Self {
-        Self { dir, tools }
+    /// `tools` resolve relative paths in `dir`, an absolute directory.
+    /// `engine` holds the agent's policy with its project root spelled as
+    /// `dir` is.
+    pub(crate) fn new(dir: String, engine: PermissionEngine, tools: HashSet<String>) -> Self {
+        Self { dir, engine, tools }
     }
 
-    /// The directory `tool` resolves a relative path in, if it is one of
-    /// the tools this base covers.
-    fn cwd(&self, tool: &str) -> Option<&str> {
-        self.tools.contains(tool).then_some(self.dir.as_str())
+    /// The engine that judges `tool` and the directory it resolves a
+    /// relative path in, if it is one of the tools this base covers.
+    fn judge(&self, tool: &str) -> Option<(&PermissionEngine, &str)> {
+        (self.tools.contains(tool)).then_some((&self.engine, self.dir.as_str()))
     }
 }
 
@@ -396,8 +400,12 @@ impl Planner<'_> {
         let principal = self.run.principal.as_ref();
         let scope = tool.tool().scope();
         let mut permission_call = PermissionCall::new(&call.tool_name, scope, &call.input);
-        permission_call.cwd = self.path_base.and_then(|base| base.cwd(&call.tool_name));
-        let mut decision = self.permissions.evaluate(&permission_call, principal);
+        let (engine, cwd) = match self.path_base.and_then(|base| base.judge(&call.tool_name)) {
+            Some((engine, cwd)) => (engine, Some(cwd)),
+            None => (self.permissions, None),
+        };
+        permission_call.cwd = cwd;
+        let mut decision = engine.evaluate(&permission_call, principal);
         if let PermissionDecision::Ask { reason } = &decision
             && !self.hooks.permission_request.is_empty()
         {

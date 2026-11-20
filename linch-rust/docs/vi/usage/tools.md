@@ -399,7 +399,8 @@ Khi không có `permissions`, mode là `default` và project root là workspace 
 nó, tức workspace, nên khi `project_root` nằm trên hoặc dưới workspace (hoặc là
 `/`), một lần ghi vào `app/secrets/key` là đường dẫn `<workspace>/app/secrets/key`:
 project root quyết định nó có nằm trong hay không, và một rule tương đối khớp
-phần bên dưới project root. Cách viết là `accept_edits` và `skip_dangerous`, không phải `acceptEdits` và
+phần bên dưới project root. Project root được so ở dạng canonical, nên một
+`project_root` viết qua symlink phủ cùng các file với thư mục thật. Cách viết là `accept_edits` và `skip_dangerous`, không phải `acceptEdits` và
 `skip-dangerous` của Python Linch; cách viết khác sẽ là một `ProtocolError` lúc
 mở.
 
