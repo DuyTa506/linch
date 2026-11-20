@@ -30,6 +30,8 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
   word is matched unquoted (`\rm`, `r""m`) while arguments stay as written, so a deny rule
   `* --force` does not match a commit message that contains `--force`. Allow rules still match
   the segment as written. Regex patterns follow the same rule.
+- After `env`, Bash deny and ask rules read any word with an `=` that does not start with `-` as an
+  assignment (`a.b=1`, `1X=1`, `a-b=1`), as `env` does; other wrappers keep the identifier check.
 - After a wrapper option that takes an argument (`env -u`, `time -o`, `exec -a`), Bash deny and ask
   rules skip redirection words before reading the argument, so `env -u 2>&1 X touch M` is read as
   `touch M`.

@@ -344,3 +344,20 @@ def test_a_deny_rule_covers_a_command_behind_a_redirect_before_an_option_argumen
 ) -> None:
     assert _deny_touch(command) == "deny"
     assert _bash([BashRule("rm", "deny")], "env -u 2>&1 rm make", "skip-dangerous") == "allow"
+
+
+# Source: `a_deny_rule_covers_a_command_behind_an_env_assignment_that_is_not_an_identifier`.
+@pytest.mark.parametrize(
+    "command",
+    ["env X=1 touch M", "env a.b=1 touch M", "env 1X=1 touch M", "env a-b=1 -i touch M"],
+)
+def test_a_deny_rule_covers_a_command_behind_an_env_assignment_that_is_not_an_identifier(
+    command: str,
+) -> None:
+    assert _deny_touch(command) == "deny"
+    assert _bash([BashRule("touch", "deny")], "env a.b=1 touch", "skip-dangerous") == "deny"
+
+
+def test_only_env_reads_any_word_with_an_equals_sign_as_an_assignment() -> None:
+    assert _deny_touch("time a.b=1 touch M") == "allow"
+    assert _deny_touch("command a.b=1 touch M") == "allow"

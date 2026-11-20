@@ -390,8 +390,16 @@ def _strip_prefix(segment: str) -> tuple[str, bool]:
             return rest, True
         plain_assignment = _is_assignment(word)
         name = "" if plain_assignment else _unquote(word)
-        # `env "X=1" cmd`: the wrapper reads the word unquoted.
-        assignment = plain_assignment or (wrapper is not None and _is_assignment(name))
+        # `env "X=1" cmd`: the wrapper reads the word unquoted, and `env` takes any word
+        # with an `=` that does not start with `-` as an assignment.
+        assignment = plain_assignment or (
+            wrapper is not None
+            and (
+                ("=" in name and not name.startswith("-"))
+                if wrapper[0] == "env"
+                else _is_assignment(name)
+            )
+        )
         skip = 1
         if assignment:
             pass
