@@ -321,8 +321,11 @@ status: final
 - **Tệp đã thay đổi.** Nếu tệp thay đổi sau lần model đọc, `Write` và `Edit` trả lời `Read this file again before writing it.` hoặc `... before editing it.`; `Read` thấy tệp đổi giữa chừng trả lời `File changed while reading; Read this file again.`
 - **`old_string` rỗng.** `Edit` chấp nhận nó, như `Edit` của Python. Nó khớp ở
   mọi vị trí, nên với tệp rỗng thì văn bản mới được chèn vào, với tệp không rỗng
-  thì bị từ chối vì mơ hồ trừ khi đặt `replace_all` (chèn ở mọi vị trí và cần
-  đã đọc toàn bộ tệp), và dòng đầu tiên phải đã được đọc.
+  thì bị từ chối vì mơ hồ, và dòng đầu tiên phải đã được đọc. Với `replace_all`
+  nó bị từ chối với mã `empty_old_string`.
+- **Kích thước của `Edit`.** Một `Edit` mà kết quả vượt 10 MiB (giới hạn của
+  `Read`) bị từ chối với mã `too_large` trước khi kết quả được dựng, và tệp giữ
+  nguyên; điều này giới hạn `replace_all` như `edit_file` đã bị giới hạn.
 - **Giới hạn phạm vi.** Đường dẫn là tương đối so với workspace. `..`, đường dẫn
   tuyệt đối nằm ngoài nó và symlink dẫn ra ngoài đều bị từ chối.
 - **`Bash` mặc định không bị giới hạn phạm vi.** Với backend `local` mặc định, nó
@@ -395,7 +398,12 @@ tạm dừng run cho tới khi bạn [phê duyệt](#phê-duyệt) nó.
 
 Khi không có `permissions`, mode là `default` và project root là workspace (hoặc
 `/`). Khi có `permissions`, `project_root` là bắt buộc và phải là đường dẫn tuyệt
-đối. Cách viết là `accept_edits` và `skip_dangerous`, không phải `acceptEdits` và
+đối. Một đường dẫn tương đối trong lời gọi được xét ở nơi các tool file phân giải
+nó, tức workspace, nên khi `project_root` nằm trên hoặc dưới workspace (hoặc là
+`/`), một lần ghi vào `app/secrets/key` là đường dẫn `<workspace>/app/secrets/key`:
+project root quyết định nó có nằm trong hay không, và một rule tương đối khớp
+phần bên dưới project root. Project root được so ở dạng canonical, nên một
+`project_root` viết qua symlink phủ cùng các file với thư mục thật. Cách viết là `accept_edits` và `skip_dangerous`, không phải `acceptEdits` và
 `skip-dangerous` của Python Linch; cách viết khác sẽ là một `ProtocolError` lúc
 mở.
 
@@ -493,8 +501,41 @@ Cách các rule kết hợp:
 - Giữa các layer, một deny từ bất kỳ layer nào là quyết định cuối; nếu không, layer
   cuối cùng đã quyết định sẽ thắng. Khi không layer nào quyết định, mode quyết
   định.
-- Một lệnh shell mà bộ tách lệnh không mô hình hóa được (chẳng hạn có `$(...)`) có
-  thể bị rule deny hoặc ask nhưng không bao giờ được rule allow.
+- Một lệnh shell mà bộ tách lệnh không mô hình hóa được có thể bị rule deny
+  hoặc ask nhưng không bao giờ được rule allow, kể cả `*`. Gồm `$(...)` và dấu
+  backtick, dấu `&` chạy nền hoặc `&>`, chú thích `#`, here-document, `>|`,
+  `>& 2`, `${...}` trong dấu nháy kép mà phần thân có dấu nháy, dấu gạch chéo
+  ngược, `${` lồng hay `$[`, `${` theo sau bởi khoảng trắng hoặc `|`, `env -S`,
+  và vị trí lệnh là phép khai triển `$`, khai triển ngoặc nhọn (`{rm,-rf}`),
+  `function`, `coproc`, gán phần tử mảng (`a[0]=1`) hay chuyển hướng `{fd}>file`.
+- Một rule allow hẹp (pattern không phải `*` trần) không bao phủ lệnh chuyển
+  hướng đầu ra vào một tệp (`echo x > file`, `>>`, `2>file`, `<>`): lệnh đó sẽ
+  hỏi. Vì vậy rule allow cho `echo` hay `git *` không cho `echo x > file` hay
+  `git log > file` đi qua, còn rule allow-all `*` cho phép `pytest -q > test.log`
+  như mọi lệnh khác. `>&` theo sau đúng bởi chữ số hoặc `-` (`2>&1`, `>&2`,
+  `>&-`) nhân bản descriptor, còn `/dev/null`, `/dev/stdout` và `/dev/stderr`
+  không phải tệp; không cái nào tính là chuyển hướng vào tệp. Mọi từ khác sau
+  `>&` (`>&2file`) là một tệp, và `*` cho phép như mọi chuyển hướng vào tệp khác.
+  Rule khớp đầu tiên của một đoạn quyết định đoạn đó có phải allow-all hay
+  không. Rule deny và ask không đổi.
+- Các rule deny và ask dựa trên tên lệnh chỉ là nỗ lực tối đa đối với một shell
+  mà engine không chạy, và sandbox mới là ranh giới. Một rule khớp từng đoạn
+  như đã viết, rồi khớp lại trên các từ luôn được dựng lại: bỏ dấu nháy từng từ
+  (`\rm`, `r""m`, `git 'push'`), gộp khoảng trắng thành một dấu cách, bỏ các
+  chuyển hướng ở bất kỳ vị trí nào, và đối số trong dấu nháy vẫn là một từ (nên
+  `* --force` không khớp bên trong thông điệp commit). Các từ đứng trước lệnh
+  cũng bị gỡ: phép gán `NAME=value`, các từ khóa dành riêng `if`, `then`,
+  `else`, `elif`, `do`, `while`, `until`, `!` và `{`, cùng `time`, `exec`,
+  `command`, `builtin` và `env` (có hoặc không có dấu nháy) với các tùy chọn của
+  chúng, đọc sau khi bỏ dấu nháy: tùy chọn ngắn gộp (`env -iu NAME`,
+  `exec -la NAME`), tiền tố duy nhất của tùy chọn dài (`env --uns NAME`) và đối
+  số của `env -u`/`-C`/`-a`, `time -f`/`-o` và `exec -a`; sau `env`, mọi từ có
+  dấu `=` là phép gán. `command -v NAME` không phải lệnh tên `NAME`. Rule allow
+  không bao giờ khớp các dạng dựng lại này: `X=1 echo` không phải `echo`.
+  Không được bao phủ: các cách viết và wrapper khác (`/bin/rm`, `sudo`, `nice`,
+  `nohup`, `setsid`, `timeout`, `xargs`, `eval`, `sh -c`), lệnh do phép thay thế
+  hay biến tạo ra, và ngữ cảnh số học như `x='a[$(cmd)]'; echo $[x]`, không
+  được báo là không phân tích được.
 - Đường dẫn nằm ngoài project root không bao giờ khớp một rule allow.
 
 `auto_allow` (danh sách tên tool) cho phép các tool đó ở mọi mode trừ khi một rule
@@ -705,7 +746,12 @@ trước. Mọi thứ còn lại nằm ở [Scheduler](./scheduler.md#để-mode
 văn bản nằm trong kho, không phải trên đĩa: ghi chú nháp, kế hoạch, và cả các kết
 quả tool quá lớn cho cuộc hội thoại. Với `offload_threshold_tokens`, một kết quả
 (chuỗi, giá trị có cấu trúc hoặc lỗi) được ước tính trên số token đó sẽ được ghi vào
-`/offload/<tool>_<tool_use_id>.txt` và model nhận vài dòng đầu cùng đường dẫn:
+`/offload/<session>/<tool>_<tool_use_id>_<digest>.txt` và model nhận vài dòng đầu cùng
+đường dẫn. Digest là 16 chữ số hex của SHA-256 của văn bản được lưu, nên một nhà cung cấp
+lặp lại call id (`call_0` trong mọi response) không bao giờ làm kết quả này ghi đè kết quả
+khác, và cùng một kết quả lần nữa là cùng một tệp. Một id dài, rỗng hoặc chứa ký tự ngoài
+chữ, chữ số, `_`, `-` và `.` được rút thành vài ký tự đọc được đầu tiên, một dấu `~` và
+digest của cả id, để một đoạn đường dẫn luôn ngắn trên mọi backend:
 
 ```python
 import asyncio
@@ -727,7 +773,7 @@ config: AgentConfig = {
         "id": "scripted",
         "turns": [
             tool_turn("c1", "export_logs", {"service": "api"}),
-            tool_turn("c2", "read_file", {"path": "/offload/export_logs_c1.txt", "offset": 1999}),
+            tool_turn("c2", "read_file", {"path": "/offload/s1/export_logs_c1_97b1a5182a18162f.txt", "offset": 1999}),
             text_turn("Read the tail."),
         ],
     },
@@ -749,7 +795,7 @@ asyncio.run(main())
 ```
 
 ```text
-export_logs: 371 chars, ends 'read the rest, or ls("/offload") to list offloaded results.]'
+export_logs: 414 chars, ends 'd the rest, or ls("/offload/s1") to list offloaded results.]'
 read_file: 27 chars, ends 'api line 1999\napi line 2000'
 ```
 
@@ -771,9 +817,9 @@ thứ compaction và context window phải trả giá. Một số tool tự gi�
 | Tool | Giới hạn |
 |---|---|
 | `Bash`, `BashOutput` | 4000 byte đầu và 26000 byte cuối của mỗi luồng |
-| `Grep` | mặc định 250 mục, đầu ra tối đa 30000 byte |
+| `Grep` | mặc định 250 mục, đầu ra tối đa 30000 byte; mẫu biên dịch quá 10 MiB là `invalid_query`; một lời gọi chạy quá 30 s thất bại với `timed_out` (một dòng rất dài không thể bị ngắt nên có thể chạy lâu hơn) |
 | `Glob` | 1000 đường dẫn |
-| Một tool MCP | 30000 byte văn bản kết quả |
+| Một tool MCP | 30000 byte văn bản kết quả hoặc văn bản lỗi; tối đa 8 ảnh và 4 MiB dữ liệu ảnh cùng MIME type, mỗi MIME type tối đa 255 byte |
 | `memory_recall` | 8 KiB ngữ cảnh được gợi lại mỗi request |
 | `Read` | mặc định 2000 dòng và tệp tối đa 10 MiB; một dòng không bị giới hạn độ rộng, nên một dòng minify có thể trả về hàng megabyte (một khoảng trống đã biết: offload bên dưới phủ cả kết quả của `Read` và `read_file` phân trang một dòng dài, nhưng chính `Read` không cắt dòng) |
 

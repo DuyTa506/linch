@@ -7,7 +7,7 @@ use linch_core::JsonValue;
 use serde::Serializer;
 use url::Url;
 
-use super::{AgentConfig, McpTransportConfig, StoreConfig};
+use super::{AgentConfig, McpTransportConfig, ProviderConfig, StoreConfig};
 
 /// Written in place of an env or header value, an argument, or a DSN or
 /// URL that is not a URL.
@@ -41,21 +41,46 @@ pub(super) fn url<S: Serializer>(url: &str, serializer: S) -> Result<S::Ok, S::E
     serializer.serialize_str(&redact_url(url))
 }
 
-/// `url` with its user name, password and query replaced; the scheme,
-/// host, port and path stay. A URL that does not parse is replaced whole.
+/// Serialize an optional `url` as [`redact_url`] writes it.
+pub(super) fn url_option<S: Serializer>(
+    url: &Option<String>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match url {
+        Some(url) => serializer.serialize_str(&redact_url(url)),
+        None => serializer.serialize_none(),
+    }
+}
+
+/// `url` with its user name, password and query replaced and its fragment
+/// dropped; the scheme, host, port and path stay. A URL without any of the
+/// four is returned as given. One that does not parse, or has no host
+/// (`user:token@host:8443/v1` parses as scheme `user`), is replaced whole.
 pub(super) fn redact_url(url: &str) -> String {
-    let Ok(mut url) = Url::parse(url) else {
+    let Ok(mut parsed) = Url::parse(url) else {
         return REDACTED.into();
     };
-    let user = url.username().is_empty() || url.set_username(REDACTED_IN_URL).is_ok();
-    let password = url.password().is_none() || url.set_password(Some(REDACTED_IN_URL)).is_ok();
+    if parsed.cannot_be_a_base() || parsed.host_str().is_none() {
+        return REDACTED.into();
+    }
+    if parsed.username().is_empty()
+        && parsed.password().is_none()
+        && parsed.query().is_none()
+        && parsed.fragment().is_none()
+    {
+        return url.to_owned();
+    }
+    parsed.set_fragment(None);
+    let user = parsed.username().is_empty() || parsed.set_username(REDACTED_IN_URL).is_ok();
+    let password =
+        parsed.password().is_none() || parsed.set_password(Some(REDACTED_IN_URL)).is_ok();
     if !(user && password) {
         return REDACTED.into();
     }
-    if url.query().is_some() {
-        url.set_query(Some(REDACTED_IN_URL));
+    if parsed.query().is_some() {
+        parsed.set_query(Some(REDACTED_IN_URL));
     }
-    url.into()
+    parsed.into()
 }
 
 fn redact_dsn(dsn: &str) -> String {
@@ -109,6 +134,9 @@ impl AgentConfig {
                 }
             }
         }
+        if let Some(url) = provider_base_url(&self.provider) {
+            value["provider"]["base_url"] = JsonValue::from(url);
+        }
         if let Some(request) = self.provider.request()
             && !request.default_headers.is_empty()
         {
@@ -116,5 +144,20 @@ impl AgentConfig {
                 serde_json::to_value(&request.default_headers)?;
         }
         Ok(value)
+    }
+}
+
+/// The `base_url` a provider config names, if any.
+fn provider_base_url(provider: &ProviderConfig) -> Option<&str> {
+    match provider {
+        ProviderConfig::DeepSeek { base_url, .. }
+        | ProviderConfig::OpenAiChat { base_url, .. }
+        | ProviderConfig::OpenAiResponses { base_url, .. }
+        | ProviderConfig::Anthropic { base_url, .. }
+        | ProviderConfig::Gemini { base_url, .. } => base_url.as_deref(),
+        ProviderConfig::Vllm { base_url, .. }
+        | ProviderConfig::SgLang { base_url, .. }
+        | ProviderConfig::LlamaCpp { base_url, .. } => Some(base_url),
+        ProviderConfig::Scripted { .. } => None,
     }
 }

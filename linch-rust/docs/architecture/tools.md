@@ -103,7 +103,10 @@ the tools and the listed skills at that moment
 starts with exactly those bytes, so the prompt cache keeps them whatever the
 registry, the skills or the subagents do. A change goes at the tail instead:
 a `CatalogChangeBlock` (Python Linch's `<system-reminder>` text) in the next
-user message the run logs anyway, so it costs no write.
+user message the run logs anyway, so it costs no write. The notice text
+escapes `<`, `>` and `&` in every tool and skill name and description it
+lists (the structured fields keep the raw text), so a description cannot
+close the wrapper.
 
 - A removed tool keeps its row; a call to it is refused as not registered.
 - An added tool is appended to the request's tools, which costs the cache
@@ -253,7 +256,29 @@ shell for `Bash`; see [Execution backends](#execution-backends)), sharing one
 
 Grep and Glob skip ignored files and do not follow symlinks; Grep also skips
 hidden and binary files, and Glob lists hidden files only when the pattern
-names a dot segment (`crates/linch-tools/src/fs.rs:232-248`).
+names a dot segment (`crates/linch-tools/src/fs.rs:232-248`). A Grep pattern
+may compile to at most 10 MiB (`REGEX_SIZE_LIMIT`; a larger one is an
+`invalid_query`) and one matcher's lazy DFA cache holds at most 32 MiB
+(`REGEX_DFA_CACHE_LIMIT`; a pattern that needs more runs on a slower engine),
+so one call's memory is bounded besides the 10 MiB the searcher holds of a file.
+The measured price: a 64 KiB line of random `a` and `b` with `[ab]{1,20000}c`
+took 6.3 s and 386 MiB with the library's limits and takes 16.2 s and 36 MiB
+with these (17.3 s and 68 MiB at 64 MiB, 5.3 s and 131 MiB at 128 MiB, so no
+value keeps both under about 100 MiB and within twice the time), and a Unicode
+class repeated many times (`\w{300}`, `\w{500}`, `\p{L}{500}`, `\w{1000}`) is
+now an `invalid_query` (it compiles in 20 to 50 MiB). The error names the way
+out: a smaller count or an ASCII class.
+
+A call also has a wall-clock limit, `SEARCH_TIME_LIMIT` (30 s,
+`crates/linch-tools/src/fs/local.rs`). It is checked between files and each
+time the search reads more of a file (once per buffer), and past it the call
+fails with `timed_out`, saying how many files were searched in full and which
+file it was in, and a cancelled call stops at the same points. The residual:
+one regex search over a single very long line cannot be interrupted, so a
+line of up to 10 MiB (the most the searcher holds) can run past the limit. The
+64 KiB case above took 6 to 17 s; the cost grows with the line, and a 10 MiB
+line would take about 160 times that (about 15 to 45 minutes, an estimate by
+scaling, not a measurement).
 
 ### Read before write
 
@@ -404,7 +429,9 @@ kills the new group.
   server's terminal.
 - The seccomp filter (`crates/linch-tools/src/exec/sandbox/seccomp.rs`) kills a
   syscall of a foreign architecture, refuses x32 syscalls, `io_uring_setup`
-  and `socket(AF_UNIX)`, and with the network off every `socket`. Landlock
+  and `socket(AF_UNIX)`, System V IPC and POSIX message queue calls (objects
+  checked by user id, which Landlock does not cover), and with the network off
+  every `socket`. Landlock
   restricts pathname Unix sockets only from ABI 9, and a socket of the
   server's user (a session bus, a Docker socket) would start something
   outside the sandbox. The filter is a denylist: a syscall it does not name
@@ -466,7 +493,10 @@ result, so every backend that edits through it (Postgres too) is bounded and
 `replace_all` cannot multiply a file without limit. `write_file` refuses
 content past it; a backend's own `write` does not check, so the offload hook
 can store a large result. The tools report both as `too_large`, naming the
-path, and leave the file as it was.
+path, and leave the file as it was. The workspace `Edit` does the same sum
+(`text.len() - n*old.len() + n*new.len()`, checked) before it builds the
+result and refuses above `MAX_READ_BYTES`; an empty `old_string` with
+`replace_all` is refused as `empty_old_string`.
 
 | Backend | Where files live |
 |---|---|
@@ -486,13 +516,14 @@ each session a fresh memory backend (call `forget` when it ends), and
 `vfs::PROMPT` (`tools.rs:24`) teaches the model the virtual filesystem; the
 host adds it to the system prompt when it offers these tools.
 
-`ResultOffload` (`crates/linch-tools/src/vfs/offload.rs:87`) is a
+`ResultOffload` (`crates/linch-tools/src/vfs/offload.rs:88`) is a
 `post_tool_use` hook. A result estimated above `threshold_tokens` (four bytes
-per token) is written whole to `/offload/{tool}_{tool_use_id}.txt` and
+per token) is written whole to `/offload/{session}/{tool}_{tool_use_id}_{digest}.txt`
+(`linch_core::vfs::offload_path`) and
 replaced by its first 10 lines (at most 2000 bytes; the pointer says "cut at
 2000 bytes" when the bytes ended the preview) and a pointer the model can
-follow with `read_file`. Three kinds are covered (`offload.rs:152`,
-`offload.rs:190`):
+follow with `read_file`. Three kinds are covered (`offload.rs:165`,
+`offload.rs:203`):
 
 - A string is stored as it is.
 - A structured value is sized by its compact canonical JSON, stored as
@@ -505,8 +536,24 @@ follow with `read_file`. Three kinds are covered (`offload.rs:152`,
   which errors are retried does not change), and the `details` gain the sizes
   and the path when they are an object or absent.
 
+The name is made without asking the backend: `digest` is 16 hex digits of the
+SHA-256 of the stored text, and each of session, tool and call id is one path
+segment, kept as it is when it is at most 48 bytes of `[A-Za-z0-9_.-]` (not only
+dots) and otherwise cut to at most 32 readable bytes, `~` and 16 hex digits of
+its own SHA-256 (an empty session id is the digest of the empty string, so the
+directory is never missing). `~` is outside the plain set, so the two forms
+never meet, and no file name is longer than 120 bytes. Because the text
+is in the name, two results are one file only when they are the same text: a
+provider that repeats call ids across turns, two agents on a shared backend,
+and a retry after a crash can write one name concurrently and each write is
+the same text, so a logged pointer never names a different result. There is no
+`exists` probe, so a repeated id costs no extra backend call. The loop guard
+strips the path from a pointer with `linch_core::vfs::without_offload_path`, in
+the same module as the naming, so a stuck model repeating a call whose result is
+offloaded still trips after three calls whatever the names.
+
 The four virtual filesystem tools are never offloaded, so reading an
-offloaded file back is never offloaded again (`offload.rs:254`). `read_file`
+offloaded file back is never offloaded again (`offload.rs:267`). `read_file`
 returns at most 16384 bytes of one line per call (`tools.rs:277`), ending a
 cut line with the call that continues it (`byte_offset`), so one huge line
 pages like many short ones; a file with no longer line reads byte for byte as
@@ -516,9 +563,10 @@ it is stored.
   session log and later requests hold the pointer, not the payload.
 - The backend write finishes before the hook answers, so a logged pointer
   names a written file when the backend is durable. A crash between the write
-  and the tool end leaves an unreferenced file; a retry of the call writes the
-  same path (`offload.rs:12-20`).
-- The hook fails open (`offload.rs:245`): a storage failure shows in the hook
+  and the tool end leaves an unreferenced file; a retry that yields the
+  same text writes the same path, and a different text writes a new file
+  (`offload.rs:12-21`).
+- The hook fails open (`offload.rs:259`): a storage failure shows in the hook
   record and the original result goes to the model.
 - Its policy id `linch.vfs.offload`, version 2, is part of the run contract.
   The version moves when what the hook covers does, and `read_file`'s schema

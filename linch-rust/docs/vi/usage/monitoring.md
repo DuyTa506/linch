@@ -172,7 +172,10 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Một case là `{prompt, expected?, metadata?}`; prompt không được rỗng. Một case
+Một case là `{prompt, expected?, metadata?}`; prompt không được rỗng. `eval.run` của
+một tenant nhận tối đa 256 case (`-32602` nếu vượt, trước khi có run nào chạy); kết nối
+cục bộ không có giới hạn. Các run được server nhận bằng id của nó như mọi run nó
+điều khiển. Một case
 đạt khi run của nó không ghi lỗi nào và không scorer nào trả về `False`. Một
 scorer trả về `None` (không xác định) khi run thiếu dữ liệu mà nó đọc, và không
 xác định thì không làm case thất bại.

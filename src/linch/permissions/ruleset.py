@@ -23,10 +23,10 @@ from .rules import (
     BashRule,
     PermissionRule,
     ToolRule,
-    _contains_unparsed_shell_construct,
     _match_unparsed_bash_rule,
     match_tool_rule,
 )
+from .shell import has_unparsed_construct
 
 
 @dataclass(slots=True)
@@ -99,7 +99,7 @@ def _unparsed_bash_deny_floor(
     if call.tool.name != "Bash":
         return None
     command = call.input.get("command")
-    if not isinstance(command, str) or not _contains_unparsed_shell_construct(command):
+    if not isinstance(command, str) or not has_unparsed_construct(command):
         return None
 
     saw_bash_deny = False
@@ -113,6 +113,6 @@ def _unparsed_bash_deny_floor(
                 continue
             if isinstance(rule, BashRule) and rule.decision == "deny":
                 saw_bash_deny = True
-                if _match_unparsed_bash_rule(rule, command.strip()):
+                if _match_unparsed_bash_rule(rule, command):
                     return PermissionDecision(decision="deny", reason="bash rule matched Bash.")
     return PermissionDecision(decision="ask") if saw_bash_deny else None

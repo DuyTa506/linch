@@ -84,7 +84,11 @@ linch-server: listening on ws://127.0.0.1:8731/rpc
 - The config is read once at startup, and strictly: an unknown field at any
   level, an unset token variable, a workspace root that does not exist or a
   cap of 0 stops the server with exit status 2 and the reason on stderr.
-  Exit status 1 means an I/O failure; 0 a clean stop.
+  Exit status 1 means an I/O failure; 0 a clean stop. A parse error says
+  what kind of mistake it is, what was expected and the line and column, and
+  never repeats a string of the file (an unknown field is not named: the
+  list of the fields that were expected and the position point at it), for
+  the file holds tokens and DSNs.
 - A socket file left by a stopped server is replaced, and the file is
   removed at shutdown. Its permissions follow the umask.
 - HTTP is plain: put TLS in front of it, or listen on loopback only.
@@ -130,7 +134,7 @@ token twice is refused. A tenant only a worker serves needs no token.
 | `workspace_roots` | none | Directories a `workspace`, a `project_root` or a `config_dir` may be or lie under |
 | `postgres_dsns` | none | Postgres targets a store DSN may use: host, port or socket, database, user, startup options and TLS files must all match one entry, and its `sslmode` must be the entry's or stricter |
 | `mcp_commands` | none | MCP stdio servers, `{"command", "args", "env"}`: the command and argument list must match exactly, and the transport may set only the `env` names listed |
-| `mcp_urls` | none | Endpoints an MCP HTTP transport may name, matched like `provider_base_urls` |
+| `mcp_urls` | none | Endpoints an MCP HTTP transport may name, matched on scheme, host, port and path: an entry with a path (`https://mcp.internal/mcp`) allows that path and what lies below it (`/mcp/sse`, not `/mcpx`; a trailing slash is ignored); one with none (`https://mcp.internal`) allows every path on that origin. A URL with an escape in its path is refused under an entry that has a path. The path match judges the URL the client names, so it relies on the MCP transport not following redirects. `provider_base_urls` stays exact: its path entry allows that path alone |
 | `max_schedules` | none: no schedules | Schedules the tenant may keep in each database ([Scheduler](./scheduler.md#what-a-tenant-may-schedule)); without it an agent with `schedule_tools` is refused |
 | `min_schedule_interval_ms` | 60000 | The shortest time between two fires of its schedules |
 | `tool_cache` | `false` | `spec.tool_cache`, which keeps results in the server's memory or database for the tenant's namespace; bounded to 1024 entries, a one-hour ttl, 1 MiB a result and 32 tools. The agent also needs `spec.redaction` over tool results, and the entries serve only the session that stored them |
@@ -138,7 +142,7 @@ token twice is refused. A tenant only a worker serves needs no token.
 | `max_tool_cache_bytes` | 67108864 (64 MiB) | Bytes of cached results all of the tenant's namespaces may hold together; at least 1 |
 | `workflow` | none: no workflows | `workflow.*` ([Workflows](./workflows.md#admission)): `{}` allows them with the default caps, or set `max_workflows` (4), `max_records` (10000), `max_fan_out` (8), `max_record_bytes` (1 MiB), `max_tokens`, `max_cost_usd` |
 | `max_queued_jobs` | none: no background runs | Unfinished background jobs it may have when it queues one |
-| `system_sections` | none | System prompt sections `{"name", "text", "order"?, "cacheable"?}` added to every agent of the tenant; the tenant cannot remove or rename them, and `replace_defaults` leaves them in. Changing them refuses the resume of the tenant's in-flight runs ([Agent config](./agent.md#system-sections)) |
+| `system_sections` | none | System prompt sections `{"name", "text", "order"?, "cacheable"?}` added to every agent of the tenant; the tenant cannot remove or rename them, and neither `replace_defaults` nor a `before_provider_call` callback's `rewrite` removes them (they are put back where the request had them, with their `order` position and `cacheable` flag). Changing them refuses the resume of the tenant's in-flight runs ([Agent config](./agent.md#system-sections)) |
 | `memory` | `false`: no long-term memory | Whether a config may turn on [`memory`](./memory.md#built-in-long-term-memory) |
 | `max_memories` | none, which refuses `memory` (the server will not load a config with `memory` and no cap) | Memories it may keep in all its namespaces of a database; an agent's own `max_memories` and `max_memories_per_scope` are held to it |
 | `required_policy` | none | A [`spec.policy`](./agent.md#policy) every agent of the tenant carries: the tenant's own policy is added to it, and the operator's rules stay in the run. It orders the model's calls, counted from the agent's own tool results; it does not bind what the tenant's host does (a host tool, hook or cache can answer a required call), so keep permissions and the sandbox for security ([below](#what-admission-refuses-and-why)) |
@@ -351,7 +355,8 @@ curl -i -H "Authorization: Bearer $LINCH_TOKEN_ACME" \
   tenant, or the call raises `NotAllowed` (`kind == "principal"`). The server
   does not fill one in.
 - Tokens are kept only as SHA-256 digests and compared in constant time. No
-  token is written to any output.
+  token is written to any output: a token, `cache_salt_secret` or `worker.dsn` given in the wrong shape (a bare string
+  where `{"env": ...}` or `{"value": ...}` belongs) is refused with `expected an object with `env` or `value``, without the value.
 
 ### What keeps tenants apart
 
@@ -532,8 +537,15 @@ silently instead:
   tenant sets none, else the lesser of the two caps (a tenant that sets
   `max_corrections` may lower it, not raise it). A rule naming a tool the
   agent lacks refuses the open (`OpenError`), never dropped; the tenant's
-  error does not name the tool or echo a pattern, as the operator wrote the rule
-  (the server config refuses a `required_policy` whose check does not compile).
+  error for a policy problem that can involve the operator's rules read with
+  its own (`BuildError::Policy`, `data.kind` `policy`: a tool the agent lacks,
+  a cycle, a check that does not compile, a `tool_choice` that defeats the
+  rules) is one fixed sentence that does not name the tool or echo a pattern,
+  as the operator wrote the rule; the original text goes to the server log
+  (`warn`, with the tenant's name) and never to the client. A defect in the
+  text of the tenant's own rule or gate (a blank gate name, `min_calls` of 0,
+  a gate that asks for nothing) keeps its message
+  (the server refuses at start a `required_policy` that no agent could run: a check that does not compile, a blank gate name, a `min_calls` of 0, a cycle).
   The rules bind the model's call order only: a client's host tool under a
   required name, a `pre_tool_use` hook, a `post_tool_use` replacement or a
   cache hit can still satisfy a prerequisite, so this is not enforcement

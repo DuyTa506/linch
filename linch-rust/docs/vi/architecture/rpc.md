@@ -80,11 +80,12 @@ tới handler của nó. Các kiểu params từ chối trường không biết;
 | `provider.capabilities` | `ProviderModelParams` `{provider, model}`: một `provider` như trong cấu hình agent (`protocol.rs`) | `server/provider.rs`: `ProviderConfig::build_keyless`, `Provider::prepare`, `Provider::capabilities`; không cần key | `ProviderCapabilities` |
 | `provider.models` | `ProviderParams` `{provider}` | `server/provider.rs`: `ProviderConfig::build`, `Provider::list_models`; cần key | `{models}`, một `ModelInfo` cho mỗi model |
 | `provider.model` | `ProviderModelParams` | `server/provider.rs`: `Provider::model_info` | `ModelInfo`; `-32036` khi danh sách không có nó |
-| `eval.run` | `EvalRunParams` `{agent, cases, scorers?, include_events?}` (`protocol/monitor.rs`) | `server/monitor.rs`: `run_eval` trên agent; chiếm một chỗ run của tenant và đánh dấu agent bận (`agent.close` trả `-32002`) cho đến khi xong; dừng cùng kết nối | kết quả eval dạng JSON (`total`, `passed`, `pass_rate`, `total_cost_usd`, `usage`, `duration_ms`, `cases`) và `markdown`; case hoặc scorer sai là `-32602` |
-| `run.report` | `ReportParams` `{agent, run_id, timeline?}` | `server/monitor.rs`: `build_run_report` trên `Agent::run_record` và `Agent::events` | `{report, markdown, truncated?}`; chuỗi dài hơn 64 KiB bị cắt kèm dấu (đếm trong `truncated.strings`) timeline mất các event cuối khi vượt 8 MiB (`truncated.timeline_omitted`), rồi văn bản của mỗi tool call bị cắt còn 8 KiB, rồi 1 KiB (`truncated.tool_call_text`); report vẫn vượt 8 MiB sau đó là `-32603`; run không tồn tại là `-32021` |
+| `eval.run` | `EvalRunParams` `{agent, cases, scorers?, include_events?}` (`protocol/monitor.rs`) | `server/monitor.rs`: `run_eval_as` trên agent, owner là server id, tối đa 256 case từ một tenant; chiếm một chỗ run của tenant và đánh dấu agent bận (`agent.close` trả `-32002`) cho đến khi xong; dừng cùng kết nối | kết quả eval dạng JSON (`total`, `passed`, `pass_rate`, `total_cost_usd`, `usage`, `duration_ms`, `cases`) và `markdown`; case hoặc scorer sai là `-32602` |
+| `run.report` | `ReportParams` `{agent, run_id, timeline?}` | `server/monitor.rs`: `build_run_report` trên `Agent::run_record` và `Agent::events` | `{report, markdown, truncated?}`; chuỗi dài hơn 64 KiB bị cắt kèm dấu (đếm trong `truncated.strings`), timeline mất các event cuối khi vượt 8 MiB (`truncated.timeline_omitted`), rồi văn bản của mỗi tool call bị cắt còn 8 KiB, rồi 1 KiB (`truncated.tool_call_text`); report vẫn vượt 8 MiB sau đó là `-32603`; run không tồn tại là `-32021` |
 | `workflow.start` | `WorkflowStartParams` `{agent, run_id, budget?, resume?, principal?}` (`protocol/workflow.rs`) | `Server::start_workflow` (`server/workflow.rs`): `admit_principal`, các mức trần của tenant, rồi `WorkflowSession::open_held`; `-32045` khi một client khác đang drive nó | `WorkflowStarted` `{records, resumed, previous?, limits?}` |
 | `workflow.agent` | `WorkflowAgentParams` `{run_id, prompt, name?, subagent?, label?, key?, output_schema?, fork?, timeout_ms?, retry?, branch?, call_id?}` | `workflow_agent`: `WorkflowContext::agent_with` trên nhánh; bị bỏ cùng kết nối như một run | `WorkflowAgentResult` `{text, structured?, session_id, tokens, cost_usd, replayed}` |
 | `workflow.step.begin`, `workflow.step.complete` | `{run_id, name, key?, branch?}`, `{run_id, ticket, value}` | `step_begin`, `step_complete`; ticket do server giữ | `{replayed, value?, ticket?}`, `{}` |
+| `workflow.step.abandon` | `{run_id, ticket}` | trả lại một ticket mà function của nó thất bại trong client (capability `workflow_step_abandon`); idempotent; một workflow của tenant giữ tối đa `MAX_CALL_KEYS` (10.000, hoặc `max_records` nếu lớn hơn) ticket, vượt thì `workflow.step.begin` bị từ chối (`-32005`, `kind: pending_steps`) | `{abandoned}` |
 | `workflow.interrupt` | `{run_id, key, payload?, branch?}` | `WorkflowContext::interrupt` | `{suspended, value?}` |
 | `workflow.cancel` | `{run_id, call_id?}` | hủy một lời gọi agent đang chạy, hoặc tất cả | `{cancelled}` |
 | `workflow.finish` | `{run_id, ok}` | kết thúc các lời gọi đang chạy, ghi trạng thái (`awaiting_input` khi một interrupt đã suspend nó), giải phóng hold | `{status}` |
@@ -127,7 +128,7 @@ docs (`lib.rs:518-569`) và các mã nằm trong `crates/linch-rpc/src/error.rs:
 | -32004 | `NOT_ALLOWED` | `NotAllowed` | Một kiểm tra tenant từ chối; `data.kind` nêu tên nó (bảng trong [Server](../usage/server.md#những-gì-admission-từ-chối-và-lý-do)), trong đó có `run_bound`, `workflow_principal` và `cache_isolation` |
 | -32005 | `LIMIT_REACHED` | `LimitReached` | Đã chạm một giới hạn và chưa có gì bắt đầu; `data: {kind, max}`, `kind` là một trong `runs`, `agents`, `connections`, `logins`, `schedules`, `jobs`, `workflows`, `agent_calls_in_flight`, `journal_records` hoặc `steers` (một run có 16 steer đang chờ), hoặc `provider_calls`, một tốc độ: tối đa `max` lời gọi `provider.models` và `provider.model` mỗi `per_seconds` (60) cho tenant |
 | -32010 | `BUILD_MISSING` | `OpenError` | `agent.open`: thiếu một binding bắt buộc |
-| -32011 | `BUILD_INVALID` | `OpenError` | `agent.open`: config không hợp lệ, hoặc lỗi workspace, policy hay tool. Trong đó có: `budget.max_cost_usd` trên một model không có giá (model chính hoặc một mục `fallback_models`; thông báo nêu tên model), `spec.call_timeout_ms` dưới 100, và `workflow.start` có `max_cost_usd` cho agent có model chưa có giá |
+| -32011 | `BUILD_INVALID` | `OpenError` | `agent.open`: config không hợp lệ, hoặc lỗi workspace, policy hay tool. Trong đó có: `budget.max_cost_usd` trên một model không có giá (model chính hoặc một mục `fallback_models`; thông báo nêu tên model), `spec.call_timeout_ms` dưới 100, và `workflow.start` có `max_cost_usd` cho agent có model chưa có giá. Một vấn đề về reliability policy có thể liên quan tới các rule đọc cùng nhau (`BuildError::Policy`: tool mà agent không có, một vòng, một check không biên dịch được, một `tool_choice` làm các rule không thể thỏa) mang `data: {"kind": "policy"}`; với tenant có `required_policy`, thông báo của nó được thay bằng một câu cố định và bản gốc được ghi vào log của server. Một lỗi trong văn bản của chính một rule là `BuildError::Invalid` thường, giữ nguyên thông báo |
 | -32012 | `BUILD_CONTRACT` | `OpenError` | `agent.open`: không tính được digest của run contract |
 | -32013 | `PROVIDER_UNAVAILABLE` | `OpenError` | Key của provider chưa đặt (`data.env` nêu biến của nó), hoặc không dựng được client của provider |
 | -32014 | `STORE_UNAVAILABLE` | `OpenError` | Không kết nối hay migrate được Postgres |
@@ -422,7 +423,12 @@ kết nối đã yêu cầu ([cách dùng](../usage/scheduler.md)).
   Mọi method của scheduler nêu tên một agent đang mở; pool Postgres của nó
   (`OpenedAgent::pool`) giữ các hàng, namespace của nó phân vùng chúng, và các bảng hàng đợi
   được migrate trên cơ sở dữ liệu của nó ở lần gọi scheduler đầu tiên (một lần cho mỗi
-  agent), nên một server không bao giờ lập lịch thì không bao giờ tạo chúng.
+  agent), nên một server không bao giờ lập lịch thì không bao giờ tạo chúng. Một tenant không có
+  `max_schedules` lẫn `max_queued_jobs` thì không bao giờ migrate: `schedule.list`,
+  `schedule.delete`, `job.list` và `job.get` vẫn đọc các bảng khi chúng đã có, ở bất kỳ migration nào (nó có thể dọn
+  những gì nó đã tạo; một lời gọi đọc mà schema cũ không trả lời được là một `-32014` chung,
+  không nêu tên bảng hay migration) và trả lời như một namespace rỗng khi các bảng chưa có
+  (`schedule.pause` và `schedule.resume` trả not found).
 - **Kiểm tra tenant.** Trước mọi truy vấn: `max_schedules` và `max_queued_jobs` phải được đặt
   (`-32004`, kind `schedules` và `background_runs`), và `Timing::shortest_gap` của một lịch
   phải ít nhất bằng `min_schedule_interval` (`kind: schedule_interval`). Bản thân các số đếm
@@ -489,7 +495,7 @@ từ chối ngay khi không khớp, thay vì lỗi ở method đầu tiên có h
 
 ```json
 {"server_version": "0.1.1", "protocol": 1, "contract_version": 1,
- "capabilities": ["cache_isolation", "exec_idempotency_key", "provider_info", "run_steer", "schedule", "workflow"],
+ "capabilities": ["cache_isolation", "exec_idempotency_key", "provider_info", "run_steer", "schedule", "workflow", "workflow_step_abandon"],
  "backends": ["local", "sandbox", "docker", "remote"],
  "limits": {"max_message_bytes": 16777216, "default_max_runs": 16}}
 ```

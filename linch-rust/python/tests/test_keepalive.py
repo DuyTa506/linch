@@ -93,9 +93,10 @@ async def test_whole_second_keepalive_times_are_set_without_a_warning() -> None:
 
 async def test_a_sub_second_keepalive_time_is_refused_at_startup() -> None:
     # The kernel takes whole seconds: a millisecond name is an unknown field, and 0 seconds is
-    # refused, both at startup (status 2, the field named), not once per connection.
+    # refused, both at startup (status 2; the unknown field is not named, the error lists the
+    # fields expected), not once per connection.
     for liveness, field in [
-        ({"keepalive_idle_ms": 1000, "keepalive_interval_ms": 500}, "keepalive_idle_ms"),
+        ({"keepalive_idle_ms": 1000, "keepalive_interval_ms": 500}, "unknown field"),
         ({"keepalive_idle_secs": 0}, "liveness.keepalive_idle_secs"),
     ]:
         status, stderr = await _stderr_after_two_connections(liveness)

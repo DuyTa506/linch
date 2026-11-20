@@ -18,6 +18,23 @@ mod tests;
 
 pub use error::StreamError;
 
+/// Most bytes one response may hold: its text, thinking, signatures and
+/// redacted data, and each call's id, name and input.
+///
+/// A response cannot hold more tokens than the model's context window, and
+/// the largest window in the adapters' tables is 2,000,000 tokens
+/// (`gemini-1.5-pro`); at up to 8 bytes a token that is 16 MiB, so the cap is
+/// twice that. A 128k-token answer is about 1 MiB.
+pub const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+
+/// Most tool calls one response may open: a 128k-token answer made of calls
+/// of 32 tokens each.
+pub const MAX_RESPONSE_TOOL_CALLS: usize = 4096;
+
+/// What one event that adds a block of its own costs beyond its payload, so
+/// a stream of empty ones is bounded too.
+const BLOCK_BYTES: usize = 64;
+
 /// The assembled assistant turn: one message plus provider accounting.
 ///
 /// Serializable so a hook (`after_provider_call`) can carry it as the
@@ -58,7 +75,8 @@ struct OpenCall {
 /// currently open; every opened call must end before `message_end`, and its
 /// concatenated input deltas should parse as a JSON object. `message_end`'s
 /// `stop_reason` is `tool_use` if and only if at least one tool call
-/// completed.
+/// completed. A response holds at most [`MAX_RESPONSE_BYTES`] bytes and
+/// [`MAX_RESPONSE_TOOL_CALLS`] calls: the push that passes either fails.
 ///
 /// A call whose input does not parse as a JSON object is not a stream
 /// error: the block is kept with an empty `input` and the model's text in
@@ -104,6 +122,8 @@ pub struct Assembler {
     /// output limit cut them off.
     broken_calls: HashSet<String>,
     seen_tool_ids: HashSet<String>,
+    /// What the response holds so far, against [`MAX_RESPONSE_BYTES`].
+    bytes: usize,
     stop_reason: Option<StopReason>,
     usage: Option<Usage>,
     provider_metadata: Option<JsonObject>,
@@ -165,15 +185,32 @@ impl Assembler {
         self.push_content_event(event)
     }
 
+    /// Count `bytes` more of the response against its cap.
+    fn spend(&mut self, bytes: usize) -> Result<(), StreamError> {
+        self.bytes = self.bytes.saturating_add(bytes);
+        if self.bytes > MAX_RESPONSE_BYTES {
+            return Err(StreamError::ResponseTooLarge {
+                limit: MAX_RESPONSE_BYTES,
+            });
+        }
+        Ok(())
+    }
+
     fn push_content_event(&mut self, event: ProviderEvent) -> Result<(), StreamError> {
         match event {
             ProviderEvent::MessageStart(_) => unreachable!("handled by push"),
             ProviderEvent::TextDelta(delta) => {
+                self.spend(delta.text.len())?;
                 self.flush_thinking();
                 self.text_buf.push_str(&delta.text);
                 Ok(())
             }
             ProviderEvent::ThinkingDelta(delta) => {
+                let signed = delta
+                    .signature
+                    .as_ref()
+                    .map_or(0, |s| BLOCK_BYTES + s.len());
+                self.spend(delta.text.len() + signed)?;
                 self.flush_text();
                 self.thinking_buf.push_str(&delta.text);
                 if let Some(signature) = delta.signature {
@@ -183,6 +220,7 @@ impl Assembler {
                 Ok(())
             }
             ProviderEvent::RedactedThinking(block) => {
+                self.spend(BLOCK_BYTES + block.data.len())?;
                 self.flush_text();
                 self.flush_thinking();
                 self.content.push(ContentBlock::RedactedThinking(block));
@@ -210,6 +248,12 @@ impl Assembler {
         if !self.seen_tool_ids.insert(start.id.clone()) {
             return Err(StreamError::DuplicateToolId { id: start.id });
         }
+        if self.seen_tool_ids.len() > MAX_RESPONSE_TOOL_CALLS {
+            return Err(StreamError::TooManyToolCalls {
+                limit: MAX_RESPONSE_TOOL_CALLS,
+            });
+        }
+        self.spend(BLOCK_BYTES + start.id.len() + start.name.len())?;
         self.open_calls.insert(
             start.id,
             OpenCall {
@@ -227,7 +271,7 @@ impl Assembler {
         match self.open_calls.get_mut(&delta.id) {
             Some(call) => {
                 call.input.push_str(&delta.json_delta);
-                Ok(())
+                self.spend(delta.json_delta.len())
             }
             None => Err(StreamError::UnknownToolId {
                 id: delta.id,

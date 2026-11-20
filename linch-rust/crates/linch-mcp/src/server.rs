@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use linch_core::ToolRegistry;
 use rmcp::model::PaginatedRequestParams;
@@ -9,6 +10,7 @@ use rmcp::service::{Peer, RoleClient, RunningService, ServiceError};
 use thiserror::Error;
 use tokio::sync::{Notify, Semaphore, watch};
 use tokio::task::JoinHandle;
+use tokio::time::{Instant, error::Elapsed};
 use tokio_util::sync::CancellationToken;
 
 use crate::catalog::{Catalog, SkippedTool};
@@ -22,6 +24,21 @@ const MAX_LIST_PAGES: usize = 100;
 
 /// Most tools kept from one listing; the rest are left out.
 const MAX_TOOLS: usize = 1_000;
+
+/// Most bytes kept from one listing: the sum, over its tools, of each tool
+/// as the server sent it (JSON), the title, the schemas, the icons and the
+/// metadata with the rest. The tools that fit, in order, are kept and the
+/// rest are left out, like the tools past [`MAX_TOOLS`]. A listing whose
+/// first tool alone is over it is refused: the first one fails the connect,
+/// a relist keeps the tools the server already has.
+const MAX_LIST_BYTES: usize = 4 * 1024 * 1024;
+
+/// Shortest time between the starts of two relists that
+/// `notifications/tools/list_changed` asks for. A notification that arrives
+/// sooner (or while a relist runs) waits, and the notifications that
+/// arrive meanwhile share the one relist that follows; the first
+/// notification after a quiet spell relists at once.
+const MIN_RELIST_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Where a server's connection stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,6 +248,7 @@ impl Supervisor {
         let stop = service.cancellation_token();
         let ended = service.waiting();
         tokio::pin!(ended);
+        let mut last_relist = None;
         let ended_by_itself = loop {
             tokio::select! {
                 biased;
@@ -242,12 +260,15 @@ impl Supervisor {
                     () = close.cancelled() => break false,
                     () = lost.cancelled() => break false,
                     _ = &mut ended => break true,
-                    listed = tokio::time::timeout(self.policy.attempt_timeout, list_tools(&peer)) => {
+                    listed = self.relist(&peer, &list_changed, &mut last_relist) => {
                         match listed {
                             Ok(Ok(tools)) => self.sync(tools),
-                            Ok(Err(ServiceError::TransportClosed)) => lost.cancel(),
-                            // A failed or timed-out relist keeps the current
-                            // tools; the next change or reconnect lists again.
+                            Ok(Err(ConnectError::ListTools(ServiceError::TransportClosed))) => {
+                                lost.cancel();
+                            }
+                            // A failed, refused or timed-out relist keeps the
+                            // current tools; the next change or reconnect
+                            // lists again.
                             _ => {}
                         }
                     }
@@ -266,6 +287,29 @@ impl Supervisor {
             stop.cancel();
             let _ = ended.await;
         }
+    }
+
+    /// List the tools again for a `list_changed`, at least
+    /// [`MIN_RELIST_INTERVAL`] after the last relist began. The wait comes
+    /// first and takes in the notifications that arrived during it, so the
+    /// listing that follows answers them all; `attempt_timeout` covers the
+    /// listing alone.
+    async fn relist(
+        &self,
+        peer: &Peer<RoleClient>,
+        list_changed: &Notify,
+        last: &mut Option<Instant>,
+    ) -> Result<Result<Vec<rmcp::model::Tool>, ConnectError>, Elapsed> {
+        if let Some(began) = *last {
+            tokio::time::sleep_until(began + MIN_RELIST_INTERVAL).await;
+            let _ = tokio::time::timeout(Duration::ZERO, list_changed.notified()).await;
+        }
+        *last = Some(Instant::now());
+        tokio::time::timeout(
+            self.policy.attempt_timeout,
+            list_tools(&self.link.server, peer),
+        )
+        .await
     }
 
     async fn reconnect(&self, close: &CancellationToken) -> Option<(Live, Vec<rmcp::model::Tool>)> {
@@ -299,7 +343,7 @@ impl Supervisor {
             .connect(Handler::new(Arc::clone(&list_changed)))
             .await?;
         let lost = CancellationToken::new();
-        match prepare(service.peer(), &list_changed, &lost).await {
+        match prepare(&self.link.server, service.peer(), &list_changed, &lost).await {
             Ok((listener, tools)) => Ok((
                 Live {
                     service,
@@ -350,6 +394,7 @@ impl Supervisor {
 /// Subscribe to tool changes when the protocol needs it, then list the
 /// tools. Subscribing first means no change is missed in between.
 async fn prepare(
+    server: &str,
     peer: &Peer<RoleClient>,
     list_changed: &Arc<Notify>,
     lost: &CancellationToken,
@@ -357,35 +402,67 @@ async fn prepare(
     let listener = Listener::start(peer, list_changed, lost)
         .await
         .map_err(ConnectError::Listen)?;
-    match list_tools(peer).await {
+    match list_tools(server, peer).await {
         Ok(tools) => Ok((listener, tools)),
         Err(error) => {
             if let Some(listener) = listener {
                 listener.stop().await;
             }
-            Err(ConnectError::ListTools(error))
+            Err(error)
         }
     }
 }
 
-/// Follow `tools/list` pages to the end, or until [`MAX_LIST_PAGES`] pages
-/// or [`MAX_TOOLS`] tools, so a server cannot keep the client listing or
-/// holding tools without end.
-async fn list_tools(peer: &Peer<RoleClient>) -> Result<Vec<rmcp::model::Tool>, ServiceError> {
+/// Follow `tools/list` pages to the end, or until [`MAX_LIST_PAGES`] pages,
+/// [`MAX_TOOLS`] tools or [`MAX_LIST_BYTES`] bytes, so a server cannot keep
+/// the client listing or holding tools without end. A listing that reaches
+/// the tool or byte bound keeps the tools before it, asks for no further
+/// page and logs a warning (`tracing`, target `linch_mcp`) naming the
+/// server; a first tool over the byte bound is
+/// [`ConnectError::ListTooLarge`].
+async fn list_tools(
+    server: &str,
+    peer: &Peer<RoleClient>,
+) -> Result<Vec<rmcp::model::Tool>, ConnectError> {
     let mut tools = Vec::new();
+    let mut bytes = 0usize;
     let mut cursor = None;
     for _ in 0..MAX_LIST_PAGES {
         let page = peer
             .list_tools(Some(PaginatedRequestParams::default().with_cursor(cursor)))
-            .await?;
-        tools.extend(page.tools);
+            .await
+            .map_err(ConnectError::ListTools)?;
+        for tool in page.tools {
+            let size = listed_bytes(&tool);
+            if tools.len() >= MAX_TOOLS || bytes.saturating_add(size) > MAX_LIST_BYTES {
+                if tools.is_empty() {
+                    return Err(ConnectError::ListTooLarge {
+                        limit: MAX_LIST_BYTES,
+                    });
+                }
+                tracing::warn!(
+                    server,
+                    kept = tools.len(),
+                    bytes,
+                    "the MCP server's tool list is over {MAX_TOOLS} tools or {MAX_LIST_BYTES} bytes; the rest are left out"
+                );
+                return Ok(tools);
+            }
+            bytes += size;
+            tools.push(tool);
+        }
         cursor = page.next_cursor;
-        if cursor.is_none() || tools.len() >= MAX_TOOLS {
+        if cursor.is_none() {
             break;
         }
     }
-    tools.truncate(MAX_TOOLS);
     Ok(tools)
+}
+
+/// What one tool holds in the listing, in bytes: the tool as the server
+/// sent it, as JSON.
+fn listed_bytes(tool: &rmcp::model::Tool) -> usize {
+    serde_json::to_vec(tool).map_or(usize::MAX, |json| json.len())
 }
 
 fn lock(catalog: &Mutex<Catalog>) -> MutexGuard<'_, Catalog> {

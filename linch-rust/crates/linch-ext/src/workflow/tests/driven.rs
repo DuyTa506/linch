@@ -299,6 +299,102 @@ async fn caps_on_records_and_their_size_refuse_before_a_call_spends() {
 }
 
 #[tokio::test]
+async fn calls_that_journal_nothing_are_counted_against_max_call_keys_not_max_records() {
+    let store = Arc::new(MemoryJournalStore::default());
+    let mut capped = options(&store, "w1", &Recorder::default());
+    capped.max_records = Some(1);
+    capped.max_call_keys = Some(3);
+    let session = WorkflowSession::open(&capped).await.unwrap();
+    let wf = session.context();
+    for number in 0..3 {
+        let asked = wf
+            .interrupt::<serde_json::Value>(&format!("k{number}"), json!({}))
+            .await;
+        assert!(
+            matches!(asked, Err(WorkflowError::Suspended(_))),
+            "{asked:?}"
+        );
+    }
+    let refused = wf.interrupt::<serde_json::Value>("k3", json!({})).await;
+    assert!(
+        matches!(
+            &refused,
+            Err(WorkflowError::LimitExceeded {
+                what: "call keys",
+                max: 3
+            })
+        ),
+        "{refused:?}"
+    );
+    // A key already used is not a new one.
+    let again = wf.interrupt::<serde_json::Value>("k0", json!({})).await;
+    assert!(
+        matches!(again, Err(WorkflowError::Suspended(_))),
+        "{again:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_replay_is_never_refused_by_max_call_keys() {
+    let store = Arc::new(MemoryJournalStore::default());
+    let first = options(&store, "w1", &Recorder::default());
+    run_workflow(first, |wf: WorkflowContext| async move {
+        for number in 0..5 {
+            wf.step(&format!("s{number}"), || async {
+                Ok::<_, std::io::Error>(number)
+            })
+            .await?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let mut again = options(&store, "w1", &Recorder::default());
+    again.max_call_keys = Some(2);
+    let replayed = run_workflow(again, |wf: WorkflowContext| async move {
+        let mut sum = 0;
+        for number in 0..5 {
+            sum += wf
+                .step(&format!("s{number}"), || async {
+                    Ok::<_, std::io::Error>(99)
+                })
+                .await?;
+        }
+        // A new key past the cap is refused.
+        let new = wf
+            .step("new", || async { Ok::<_, std::io::Error>(1) })
+            .await;
+        assert!(
+            matches!(
+                new,
+                Err(WorkflowError::LimitExceeded {
+                    what: "call keys",
+                    ..
+                })
+            ),
+            "{new:?}"
+        );
+        Ok(sum)
+    })
+    .await
+    .unwrap();
+    assert_eq!(replayed, 10);
+}
+
+#[tokio::test]
+async fn a_workflow_with_no_cap_keeps_every_pending_step() {
+    let store = Arc::new(MemoryJournalStore::default());
+    let session = WorkflowSession::open(&options(&store, "w1", &Recorder::default()))
+        .await
+        .unwrap();
+    let wf = session.context();
+    let tickets: Vec<_> = (0..50)
+        .map(|number| wf.step_begin(&format!("s{number}"), None).unwrap())
+        .collect();
+    assert_eq!(tickets.len(), 50);
+}
+
+#[tokio::test]
 async fn the_live_gate_is_asked_only_for_calls_that_run() {
     let fixture = scripted(vec![text_turn("a")]);
     let store = Arc::new(MemoryJournalStore::default());
@@ -356,4 +452,34 @@ async fn a_forked_call_continues_the_conversation_of_an_earlier_call() {
         "the fork has the prefix"
     );
     assert!(seen.contains("what was the number?"));
+}
+
+#[tokio::test]
+async fn an_interrupt_payload_over_max_record_bytes_is_refused_and_not_kept() {
+    let store = Arc::new(MemoryJournalStore::default());
+    let mut small = options(&store, "w1", &Recorder::default());
+    small.max_record_bytes = Some(64);
+    let session = WorkflowSession::open(&small).await.unwrap();
+    let wf = session.context();
+    let big = json!({"question": "x".repeat(1000)});
+    let refused = wf.interrupt::<serde_json::Value>("big", big).await;
+    assert!(
+        matches!(
+            &refused,
+            Err(WorkflowError::LimitExceeded {
+                what: "bytes in an interrupt payload",
+                max: 64
+            })
+        ),
+        "{refused:?}"
+    );
+    // Nothing is parked on it: the workflow does not suspend on a payload
+    // it refused.
+    let small_payload = wf
+        .interrupt::<serde_json::Value>("ok", json!({"q": "short"}))
+        .await;
+    assert!(
+        matches!(small_payload, Err(WorkflowError::Suspended(ref asked)) if asked.key == "ok"),
+        "{small_payload:?}"
+    );
 }

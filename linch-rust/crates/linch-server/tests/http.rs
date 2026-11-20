@@ -431,7 +431,7 @@ fn a_keepalive_time_the_kernel_would_refuse_is_refused_at_load() {
             json!({"keepalive_probes": 128}),
             "liveness.keepalive_probes",
         ),
-        (json!({"keepalive_idle_ms": 1500}), "keepalive_idle_ms"),
+        (json!({"keepalive_idle_ms": 1500}), "unknown field"),
     ] {
         let error = load(liveness).unwrap_err().to_string();
         assert!(error.contains(field), "{error}");

@@ -10,6 +10,75 @@ fn tenant(name: &str) -> Arc<Tenant> {
     Arc::new(Tenant::new(name, Allowlists::default()).unwrap())
 }
 
+/// What hides the operator's policy is the kind of the core error, not the
+/// words of its message.
+#[test]
+fn a_policy_error_is_hidden_whatever_its_wording() {
+    use linch::{BuildError, OpenError};
+
+    use crate::error::ErrorObject;
+
+    let required: linch::ReliabilityPolicy = serde_json::from_value(serde_json::json!({
+        "prerequisites": [{"tool": "update", "requires": ["lookup"]}],
+    }))
+    .unwrap();
+    let allow = Allowlists::default().required_policy(Some(required));
+    let acme = Tenant::new("acme", allow).unwrap();
+    let open = |build: BuildError| acme.open_error(ErrorObject::from(&OpenError::Build(build)));
+
+    // A message the old phrases never matched.
+    let reworded = open(BuildError::Policy(
+        "a rule cites \"update\", unknown here".into(),
+    ));
+    assert_eq!(
+        reworded.message,
+        "policy: the policy required for this tenant cannot run on this agent"
+    );
+    assert_eq!(reworded.data, None);
+    // Another kind of invalid agent keeps its message, whatever it says.
+    let other = open(BuildError::Invalid(
+        "policy: x is not a tool the agent has".into(),
+    ));
+    assert!(other.message.contains("not a tool the agent has"));
+    // Without a required policy the tenant reads its own error.
+    let free = Tenant::new("beta", Allowlists::default()).unwrap();
+    let error = OpenError::Build(BuildError::Policy("its own rule is wrong".into()));
+    let shown = free.open_error(ErrorObject::from(&error));
+    assert!(shown.message.contains("its own rule is wrong"));
+}
+
+/// A required policy with a defect of its own is the operator's to fix at
+/// the start, so a defect found at an open is always the tenant's text.
+#[test]
+fn a_required_policy_that_is_wrong_by_itself_is_refused_at_the_start() {
+    let wrong = |policy: serde_json::Value| {
+        let required: linch::ReliabilityPolicy = serde_json::from_value(policy).unwrap();
+        Tenant::new(
+            "acme",
+            Allowlists::default().required_policy(Some(required)),
+        )
+    };
+    for policy in [
+        serde_json::json!({"gates": [{"name": "secret-sauce"}]}),
+        serde_json::json!({"gates": [{"name": "g", "succeeded": ["a"], "min_calls": 0}]}),
+        serde_json::json!({"prerequisites": [{"tool": "a", "requires": ["a"]}]}),
+        serde_json::json!({"prerequisites": [
+            {"tool": "a", "requires": ["b"]}, {"tool": "b", "requires": ["a"]},
+        ]}),
+    ] {
+        let error = wrong(policy.clone()).err();
+        assert!(
+            matches!(error, Some(AccessError::RequiredPolicy { .. })),
+            "{policy}: {error:?}"
+        );
+    }
+    let sound = serde_json::json!({
+        "prerequisites": [{"tool": "update", "requires": ["lookup"]}],
+        "gates": [{"name": "looked-up", "succeeded": ["lookup"]}],
+    });
+    assert!(wrong(sound).is_ok());
+}
+
 #[test]
 fn tenant_names_are_plain_and_never_hold_a_slash() {
     for good in ["acme", "a.b_c-9", &"x".repeat(64)] {
@@ -293,4 +362,85 @@ async fn admitting_a_config_again_adds_the_operator_sections_once() {
     assert_eq!(once, [policy, SystemSection::new("tone", "Brief.")]);
     tenant.admit(&mut config).await.unwrap();
     assert_eq!(config.spec.system.sections, once);
+}
+
+/// `linch_core::system::layout` sends every section, the operator's and the
+/// tenant's, sorted by `order`, each with its `cacheable` flag. The restore
+/// after a tenant's `before_provider_call` rewrite puts an operator block
+/// back where the request that was sent had it, so a rewrite that changes
+/// nothing yields the very same system (a cache hit), and an operator
+/// section the operator ordered last (a footer that is not cacheable) stays
+/// after the tenant's cacheable blocks.
+#[test]
+fn a_rewrite_that_changes_nothing_keeps_the_order_of_the_system() {
+    let sent = footer_request(&["Tone.", "Operator footer."]);
+    let confined = footer_tenant().confine_rewrite(&sent, sent.clone());
+    assert_eq!(confined.unwrap(), sent);
+}
+
+#[test]
+fn a_rewrite_puts_the_operators_blocks_back_where_they_were_sent() {
+    use linch::SystemBlock;
+
+    let sent = footer_request(&["Tone.", "Operator footer.", "Child body."]);
+    let tenant = footer_tenant();
+    let texts = |request: &linch::ProviderRequest| -> Vec<String> {
+        (request.system.iter())
+            .map(|block| block.text.clone())
+            .collect()
+    };
+    // The rewrite dropped every system block: the footer comes back as it
+    // was, not cacheable.
+    let mut dropped = sent.clone();
+    dropped.system.clear();
+    let confined = tenant.confine_rewrite(&sent, dropped).unwrap();
+    assert_eq!(confined.system, vec![sent.system[1].clone()]);
+    assert!(!confined.system[0].cacheable);
+    // The tenant's own blocks change around it.
+    let mut edited = sent.clone();
+    edited.system = vec![
+        SystemBlock {
+            text: "New tone.".into(),
+            cacheable: true,
+        },
+        SystemBlock {
+            text: "Extra.".into(),
+            cacheable: false,
+        },
+    ];
+    let confined = tenant.confine_rewrite(&sent, edited).unwrap();
+    assert_eq!(
+        texts(&confined),
+        ["New tone.", "Operator footer.", "Extra."]
+    );
+    // A request that carries none of the operator's (nothing to put back)
+    // is the callback's own.
+    let bare = footer_request(&["Tone."]);
+    let mut other = bare.clone();
+    other.system[0].text = "Changed.".into();
+    let confined = tenant.confine_rewrite(&bare, other.clone()).unwrap();
+    assert_eq!(confined, other);
+}
+
+fn footer_tenant() -> Tenant {
+    let footer = linch::SystemSection::new("footer", "Operator footer.")
+        .order(10)
+        .cacheable(false);
+    let allow = Allowlists::new()
+        .system_sections(std::slice::from_ref(&footer))
+        .unwrap();
+    Tenant::new("acme", allow).unwrap()
+}
+
+/// A request whose system is `texts`: the first cacheable (the tenant's
+/// section), "Operator footer." not.
+fn footer_request(texts: &[&str]) -> linch::ProviderRequest {
+    let system: Vec<_> = (texts.iter())
+        .enumerate()
+        .map(|(at, text)| serde_json::json!({"text": text, "cacheable": at == 0}))
+        .collect();
+    serde_json::from_value(serde_json::json!({
+        "model": "m", "tools": [], "messages": [], "system": system,
+    }))
+    .unwrap()
 }

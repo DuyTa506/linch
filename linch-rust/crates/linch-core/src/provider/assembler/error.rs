@@ -58,6 +58,31 @@ pub enum StreamError {
         /// this error.
         stop_reason: StopReason,
     },
+    /// One response held more than [`super::MAX_RESPONSE_BYTES`].
+    #[error("the response is longer than {limit} bytes")]
+    ResponseTooLarge {
+        /// The cap that was passed.
+        limit: usize,
+    },
+    /// One response opened more than [`super::MAX_RESPONSE_TOOL_CALLS`] calls.
+    #[error("the response holds more than {limit} tool calls")]
+    TooManyToolCalls {
+        /// The cap that was passed.
+        limit: usize,
+    },
+    /// One event of the response's byte stream held more than `limit`
+    /// bytes without its end, counted from the end of the last event (an
+    /// unterminated line included). The response is the same on the next
+    /// call, so it is not retried.
+    #[error("an event stream passed {limit} bytes without the end of an event")]
+    EventTooLarge {
+        /// The most bytes one event may hold.
+        limit: usize,
+    },
+    /// The response's byte stream held a byte that is not UTF-8. A
+    /// deterministic fault of the server, so it is not retried.
+    #[error("the event stream is not valid UTF-8")]
+    NotUtf8,
     /// The stream ended without ever pushing a `message_start`.
     #[error("stream ended before message_start")]
     EndedBeforeStart,

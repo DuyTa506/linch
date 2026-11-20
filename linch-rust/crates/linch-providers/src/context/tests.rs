@@ -1,7 +1,7 @@
 use linch_core::Provider;
 use serde_json::json;
 
-use crate::test_server::serve_once;
+use crate::test_server::{serve_once, serve_sequence};
 use crate::{
     Anthropic, AnthropicOptions, ApiKey, DeepSeek, DeepSeekOptions, Gemini, GeminiOptions,
     OpenAiChat, OpenAiChatOptions, OpenAiResponses, ResponsesOptions, Server, ServerOptions,
@@ -123,15 +123,42 @@ async fn llamacpp_reads_n_ctx_from_props() {
 }
 
 #[test]
-fn the_props_urls_try_the_base_then_the_root() {
+fn the_props_urls_stay_under_the_base() {
     assert_eq!(
         super::props_urls("http://h:8080/v1/"),
-        ["http://h:8080/v1/props", "http://h:8080/props"]
+        ["http://h:8080/v1/props"]
     );
     assert_eq!(
         super::props_urls("http://h:8080"),
         ["http://h:8080/props", "http://h:8080/v1/props"]
     );
+}
+
+/// A tenant allowlist entry with a path "allows that path alone", so the
+/// window probe of a base that ends in `/v1` asks that path, not the
+/// parent, and sends the key nowhere else.
+#[tokio::test]
+async fn the_props_probe_stays_under_the_base_url() {
+    let not_found =
+        || "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_owned();
+    let (url, served) = serve_sequence(vec![not_found(), not_found()]);
+    let mut options = ServerOptions::new(Server::LlamaCpp, format!("{url}/tenant-a/v1"));
+    options.api_key = Some(key());
+    let provider = OpenAiChat::server(options).unwrap();
+    provider.prepare().await;
+    // The server waits for two requests; a probe that stays under the base
+    // sends one, so this one lets the server finish either way.
+    let filler = format!("{url}/tenant-a/v1/filler");
+    let _ = reqwest::Client::new().get(&filler).send().await;
+    let heads = served.join().unwrap();
+    for head in &heads {
+        let line = head.lines().next().unwrap_or_default();
+        let keyed = head.to_ascii_lowercase().contains("authorization: bearer");
+        assert!(
+            line.contains(" /tenant-a/v1/"),
+            "the probe left the base path (key sent: {keyed}): {line}"
+        );
+    }
 }
 
 #[tokio::test]

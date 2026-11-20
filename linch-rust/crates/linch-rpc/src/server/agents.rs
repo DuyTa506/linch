@@ -67,7 +67,12 @@ impl Server {
             Some(_) => Some(Binding::register(&tools)?),
             None => None,
         };
-        let hooks = callback::hooks(params.callbacks, &handle, &self.0.peer)?;
+        let hooks = callback::hooks(
+            params.callbacks,
+            &handle,
+            &self.0.peer,
+            self.0.tenant.as_ref(),
+        )?;
         // A `remote` backend runs its commands in this connection's client.
         let remote = params.config.runs_bash_remotely();
         let remote =

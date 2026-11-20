@@ -280,7 +280,7 @@ what to do (prompt injection), and the model may follow it.
   from the run's options, not from the transcript.
 - An MCP tool is treated as `exec` scope unless the server is configured with
   `trust_annotations`, because a server's `readOnlyHint` is untrusted
-  (`linch-mcp/src/config.rs:152`, default `false` at `:173`). It asks before
+  (`linch-mcp/src/config.rs:176`, default `false` at `:197`). It asks before
   it runs in `default` mode ([Tools](./tools.md#mcp-tools)).
 
 **What they do not stop**

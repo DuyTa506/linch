@@ -394,6 +394,10 @@ impl From<&OpenError> for ErrorObject {
             OpenError::Mcp(McpError::Connect { server, .. }) => {
                 Self::new(code::MCP_UNAVAILABLE, message).with_data(json!({ "server": server }))
             }
+            OpenError::Build(BuildError::Policy(_)) => {
+                // Marked, so a tenant's answer can be told from the text.
+                Self::new(code::BUILD_INVALID, message).with_data(json!({ "kind": "policy" }))
+            }
             OpenError::Build(build) => Self::new(build_code(build), message),
         }
     }
@@ -402,7 +406,7 @@ impl From<&OpenError> for ErrorObject {
 fn build_code(error: &BuildError) -> i64 {
     match error {
         BuildError::Missing(_) => code::BUILD_MISSING,
-        BuildError::Invalid(_) => code::BUILD_INVALID,
+        BuildError::Invalid(_) | BuildError::Policy(_) => code::BUILD_INVALID,
         BuildError::Contract(_) => code::BUILD_CONTRACT,
     }
 }

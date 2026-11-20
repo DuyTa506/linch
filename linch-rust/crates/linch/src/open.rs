@@ -178,6 +178,12 @@ impl AgentConfig {
         policy
             .layers
             .extend(self.profile.and_then(|p| p.deny_layer()));
+        let path_base = match &root {
+            Some(workspace) => workspace_engine(&policy, workspace)
+                .await?
+                .map(|engine| (workspace.clone(), engine)),
+            None => None,
+        };
         let permissions = PermissionEngine::new(policy)?;
         let (runs, sessions, tasks, pool) = stores(self.stores, pools).await?;
         let ledger = match &self.task_ledger {
@@ -286,6 +292,9 @@ impl AgentConfig {
             // A compaction folds or clears what the model read: it reads a
             // file again before changing it (Python's `reset_read_tracker`).
             .on_compact(move |session| unread.forget(session));
+        if let Some((workspace, engine)) = path_base {
+            builder = builder.path_base(workspace, engine, WORKSPACE_PATH_TOOLS);
+        }
         if let Some(gate) = gate {
             builder = builder.provider_gate(gate);
         }
@@ -493,6 +502,33 @@ fn schedule_tools_bound(stores: &StoreConfig, tools: &ToolRegistry) -> Result<()
 /// dropped runs: each is one small write, so a database that does not take
 /// it within this long leaves those runs to wait out their leases.
 pub const RELEASE_WAIT: Duration = Duration::from_secs(5);
+
+/// The workspace tools whose path fields name a file under the workspace.
+const WORKSPACE_PATH_TOOLS: [&str; 5] = ["Read", "Write", "Edit", "Grep", "Glob"];
+
+/// The engine that judges the workspace tools' relative paths, or `None`
+/// when they resolve them in the project root itself.
+///
+/// Permission joins a relative path to the project root. The workspace tools
+/// join it to `workspace` (canonical), so for them the policy names its
+/// project root in the same canonical form and the call's directory is the
+/// workspace: a link in the root's spelling, above or below the workspace,
+/// cannot shift what a rule covers. The policy the run contract holds is not
+/// this copy, and a deny of the root as written still applies (see
+/// `scheduler::plan`). A project root written as the workspace gives `None`.
+async fn workspace_engine(
+    policy: &PermissionPolicy,
+    workspace: &str,
+) -> Result<Option<PermissionEngine>, OpenError> {
+    if policy.project_root == workspace {
+        return Ok(None);
+    }
+    let root = tokio::fs::canonicalize(&policy.project_root).await;
+    let root = root.unwrap_or_else(|_| PathBuf::from(&policy.project_root));
+    let mut policy = policy.clone();
+    policy.project_root = root.to_string_lossy().into_owned();
+    Ok(Some(PermissionEngine::new(policy)?))
+}
 
 /// The workspace tools that run commands, which the `bash` switch turns off
 /// together.

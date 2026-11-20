@@ -28,6 +28,8 @@ pub struct Fixture {
     pub cancelled: Arc<Notify>,
     /// `subscriptions/listen` streams opened so far.
     pub subscriptions: Arc<AtomicUsize>,
+    /// `tools/list` requests answered or started so far.
+    pub lists: Arc<AtomicUsize>,
     /// While set, `tools/list` never answers.
     pub hang_lists: Arc<AtomicBool>,
     /// Notified when a `tools/list` request starts hanging.
@@ -38,6 +40,9 @@ pub struct Fixture {
     legacy: bool,
     /// Whether every `tools/list` page holds one new tool and a next cursor.
     endless: bool,
+    /// Whether every `tools/list` answers a JSON-RPC error with a megabyte
+    /// of text.
+    fail_lists: bool,
 }
 
 impl Fixture {
@@ -47,11 +52,13 @@ impl Fixture {
             version: Arc::new(watch::Sender::new(0)),
             cancelled: Arc::new(Notify::new()),
             subscriptions: Arc::new(AtomicUsize::new(0)),
+            lists: Arc::new(AtomicUsize::new(0)),
             hang_lists: Arc::new(AtomicBool::new(false)),
             hung: Arc::new(Notify::new()),
             end_subscription: Arc::new(Notify::new()),
             legacy: false,
             endless: false,
+            fail_lists: false,
         }
     }
 
@@ -64,6 +71,12 @@ impl Fixture {
     /// A server whose tool list never ends: page `n` holds tool `p<n>`.
     pub fn endless(mut self) -> Self {
         self.endless = true;
+        self
+    }
+
+    /// A server whose `tools/list` fails with a megabyte-long message.
+    pub fn failing_lists(mut self) -> Self {
+        self.fail_lists = true;
         self
     }
 
@@ -90,6 +103,13 @@ pub fn tool(name: impl Into<Cow<'static, str>>, description: &'static str) -> To
         unreachable!()
     };
     Tool::new(name, description, Arc::new(schema))
+}
+
+/// A tool with a description of the caller's length.
+pub fn tool_described(name: impl Into<Cow<'static, str>>, description: String) -> Tool {
+    let mut tool = tool(name, "");
+    tool.description = Some(Cow::Owned(description));
+    tool
 }
 
 /// The tools the server can run.
@@ -134,10 +154,14 @@ impl ServerHandler for TestServer {
         request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
+        self.0.lists.fetch_add(1, Ordering::SeqCst);
         if self.0.hang_lists.load(Ordering::SeqCst) {
             self.0.hung.notify_one();
             context.ct.cancelled().await;
             return Err(ErrorData::internal_error("cancelled", None));
+        }
+        if self.0.fail_lists {
+            return Err(ErrorData::internal_error("e".repeat(1024 * 1024), None));
         }
         if self.0.endless {
             let page: u64 = request
@@ -177,6 +201,10 @@ impl ServerHandler for TestServer {
                 context.ct.cancelled().await;
                 self.0.cancelled.notify_one();
                 CallToolResult::success(vec![])
+            }
+            // A JSON-RPC error with a megabyte of text.
+            "rpc_error" => {
+                return Err(ErrorData::internal_error("e".repeat(1024 * 1024), None));
             }
             other => {
                 return Err(ErrorData::invalid_params(

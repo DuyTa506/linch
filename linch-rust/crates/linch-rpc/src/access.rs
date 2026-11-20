@@ -91,13 +91,23 @@ impl Tenant {
     /// Raises:
     ///     AccessError: If `name` is not 1-64 ASCII letters, digits, `.`,
     ///         `_` or `-`. It never holds `/`, so the namespace rule
-    ///         (`name` or `name/...`) cannot reach another tenant's.
+    ///         (`name` or `name/...`) cannot reach another tenant's. Also if
+    ///         the `required_policy` cannot run on any agent.
     pub fn new(name: impl Into<String>, allow: Allowlists) -> Result<Self, AccessError> {
         let name = name.into();
         let valid = (1..=64).contains(&name.len())
             && (name.bytes()).all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
         if !valid {
             return Err(AccessError::TenantName { name });
+        }
+        // An open shows a tenant the defects in the text of one rule as its
+        // own (`BuildError::Invalid`), so the operator's policy must have none.
+        if let Some(reason) = allow
+            .required_policy
+            .as_ref()
+            .and_then(|policy| policy.standalone_problem())
+        {
+            return Err(AccessError::RequiredPolicy { reason });
         }
         let places = |max: usize| Arc::new(Semaphore::new(max.min(Semaphore::MAX_PERMITS)));
         Ok(Self {
@@ -406,8 +416,9 @@ pub enum AccessError {
         /// The least bytes it may have.
         min: usize,
     },
-    /// The `required_policy` has a gate check that cannot be used (a
-    /// pattern that does not compile, a blank keyword).
+    /// The `required_policy` cannot be used by any agent: a gate check that
+    /// does not compile or has a blank keyword, a rule or gate wrong by its
+    /// own text (a blank gate name, a `min_calls` of 0), or a cycle.
     #[error("required_policy: {reason}")]
     RequiredPolicy {
         /// What is wrong with it.

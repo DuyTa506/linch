@@ -249,16 +249,56 @@ impl EvalResult {
 /// Returns:
 ///     One [`CaseResult`] per case, in case order.
 pub async fn run_eval(agent: &Agent, cases: &[EvalCase], scorers: &[Scorer]) -> EvalResult {
+    run_cases(agent, cases, scorers, None).await
+}
+
+/// [`run_eval`], with every run claimed under the lease owner `owner`.
+///
+/// For a host that names its runs' owner (the server id of `linch-rpc`)
+/// instead of the library's default.
+///
+/// Args:
+///     agent: The agent under test.
+///     cases: Cases to run, in order.
+///     scorers: Scorers applied to every case.
+///     owner: The lease owner every run is claimed under.
+///
+/// Returns:
+///     One [`CaseResult`] per case, in case order.
+pub async fn run_eval_as(
+    agent: &Agent,
+    cases: &[EvalCase],
+    scorers: &[Scorer],
+    owner: &str,
+) -> EvalResult {
+    run_cases(agent, cases, scorers, Some(owner)).await
+}
+
+async fn run_cases(
+    agent: &Agent,
+    cases: &[EvalCase],
+    scorers: &[Scorer],
+    owner: Option<&str>,
+) -> EvalResult {
     let mut results = Vec::with_capacity(cases.len());
     for case in cases {
-        results.push(run_case(agent, case, scorers).await);
+        results.push(run_case(agent, case, scorers, owner).await);
     }
     EvalResult { cases: results }
 }
 
-async fn run_case(agent: &Agent, case: &EvalCase, scorers: &[Scorer]) -> CaseResult {
+async fn run_case(
+    agent: &Agent,
+    case: &EvalCase,
+    scorers: &[Scorer],
+    owner: Option<&str>,
+) -> CaseResult {
     let session = SessionId::new(format!("eval-{}", Uuid::new_v4()));
-    let mut stream = agent.run(case.prompt.clone(), RunOptions::new(session.clone()));
+    let mut options = RunOptions::new(session.clone());
+    if let Some(owner) = owner {
+        options.owner = owner.to_owned();
+    }
+    let mut stream = agent.run(case.prompt.clone(), options);
     let mut events = Vec::new();
     let mut error = None;
     while let Some(item) = stream.next().await {

@@ -15,7 +15,8 @@
 //! hook answers, so a logged pointer always names a written file (for a
 //! durable backend). A crash after the write and before the tool end is
 //! durable leaves an unreferenced file; the resumed run reports the call as
-//! interrupted, and a retry of the same call overwrites the same path. With
+//! interrupted, and a retry that yields the same text writes the same path
+//! (a different text writes a new file: the name holds a digest). With
 //! [`super::MemorySessions`] the files live only as long as the process, so
 //! a run resumed elsewhere finds the pointer but not the file.
 
@@ -29,7 +30,7 @@ use linch_core::{
     to_canonical_string,
 };
 
-use super::{SessionFiles, VfsError, normalize_path};
+use super::{OFFLOADED_TO, SessionFiles, VfsError, normalize_path, offload_path};
 
 /// Policy id of [`ResultOffload`] in the run contract.
 const POLICY_ID: &str = "linch.vfs.offload";
@@ -49,8 +50,8 @@ pub struct OffloadConfig {
     pub threshold_tokens: u64,
     /// Leading lines kept inline as a preview (default 10).
     pub preview_lines: usize,
-    /// Virtual directory offloaded results are written under (default
-    /// `/offload`).
+    /// Virtual directory offloaded results are written under, in one
+    /// directory per session (default `/offload`).
     pub path_prefix: String,
     /// Tools whose results are never offloaded. The default holds the four
     /// virtual filesystem tools, so reading an offloaded file back is never
@@ -126,25 +127,37 @@ impl ResultOffload {
             ),
             false => (lines, String::new()),
         };
-        let prefix = &self.prefix;
+        let dir = path.rsplit_once('/').map_or("/", |(dir, _)| dir);
         format!(
-            "{preview}\n\n[Tool result truncated: ~{tokens} tokens ({bytes} bytes) offloaded to \
-             '{path}'. Showing the first {shown} lines{note}. Use read_file(path=\"{path}\", \
-             offset=..., limit=...) to read the rest, or ls(\"{prefix}\") to list offloaded \
+            "{preview}\n\n[Tool result truncated: ~{tokens} tokens ({bytes} bytes) {OFFLOADED_TO}{path}'. \
+             Showing the first {shown} lines{note}. Use read_file(path=\"{path}\", \
+             offset=..., limit=...) to read the rest, or ls(\"{dir}\") to list offloaded \
              results.]"
         )
     }
 
     /// Write `text` to the call's file and return its path.
+    ///
+    /// The path is `{prefix}/{session}/{tool}_{call id}_{digest}.txt` (see
+    /// [`offload_path`]). It is made without asking the backend what
+    /// exists, and two writers of one name write the same text, so no
+    /// result is ever replaced by a different one.
     async fn store(
         &self,
         request: &PostToolUseRequest,
         text: &str,
     ) -> Result<String, CallbackError> {
-        let name = format!("{}_{}.txt", request.tool_name, request.tool_use_id);
-        let path = normalize_path(&format!("{}/{name}", self.prefix))?;
-        let backend = self.files.backend(&request.session_id);
-        backend.write(&path, text).await?;
+        let path = offload_path(
+            &self.prefix,
+            request.session_id.as_str(),
+            &request.tool_name,
+            &request.tool_use_id,
+            text,
+        );
+        self.files
+            .backend(&request.session_id)
+            .write(&path, text)
+            .await?;
         Ok(path)
     }
 

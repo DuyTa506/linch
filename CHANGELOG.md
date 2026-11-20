@@ -9,6 +9,56 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
 
 ### Fixed
 
+- Bash rules treat more shell syntax as unparsed: such a command can still be denied or asked, and
+  is never allowed by a Bash rule. This adds `&>`, `|&`, `&` after an escaped or quoted `<` or `>`,
+  `>&` onto a file, an unquoted `#` at the start of a word, here-documents, `>|`, a `${...}` inside
+  double quotes whose body holds a quote, a backslash or a nested `${`, a `$` expansion, brace
+  expansion, `function` or `coproc` in command position, `a[0]=1`, a `{name}>` redirection and
+  `env -S`. A deny rule that follows a non-matching deny rule now also denies such a command.
+  Words are separated by space and tab only, and inside double quotes a backslash is kept before
+  any character except `$`, backtick, `"`, `\` and newline, so a pattern such as `cat "a\nb"`
+  matches only that text.
+- A Bash allow rule no longer covers a command segment that redirects output to a file (`>`, `>>`,
+  `>|`, `<>`, with or without a descriptor number): the call asks, or falls to the mode default
+  when no rule decides it. Descriptor duplication (`2>&1`, `>&2`, `>&-`, `<&3`) and exactly
+  `/dev/null`, `/dev/stdout` and `/dev/stderr` are not files. The allow-all rule (the bare
+  pattern `*`) is exempt, since it already allows every command; unparsed syntax is never
+  allowed, allow-all included. Deny and ask rules are unchanged.
+- Bash deny and ask rules see through the words in front of a command: leading assignments and
+  redirections, `if then else elif do while until ! {`, and `time exec command builtin env` (quoted
+  or not) with their options and option arguments (`command -v`/`-V` is kept whole). The command
+  word is matched unquoted (`\rm`, `r""m`) while arguments stay as written, so a deny rule
+  `* --force` does not match a commit message that contains `--force`. Allow rules still match
+  the segment as written. Regex patterns follow the same rule.
+- Bash deny and ask rules always match the segment's rebuilt words as well: blanks collapsed to one
+  space, each word unquoted and rewritten in single quotes when it is empty or holds a blank, quote
+  or backslash, and redirections (with the target of a bare operator) dropped wherever they appear.
+  `git push *` now denies `git  push origin`, `git<TAB>push origin` and `git 2>&1 push origin`,
+  while `git  status` and `git 2>&1 pull origin` stay allowed. The docs state that name-based
+  rules are best effort and list the classes they do not cover.
+- After `env`, Bash deny and ask rules read any word with an `=` that does not start with `-` as an
+  assignment (`a.b=1`, `1X=1`, `a-b=1`), as `env` does; other wrappers keep the identifier check.
+- After a wrapper option that takes an argument (`env -u`, `time -o`, `exec -a`), Bash deny and ask
+  rules skip redirection words before reading the argument, so `env -u 2>&1 X touch M` is read as
+  `touch M`.
+- A `${` followed by a blank, tab or `|`, inside or outside double quotes, makes the command
+  unparsed for Bash rules, since bash 5.3 reads `${ cmd; }` and `${| cmd; }` as command
+  substitutions.
+- Bash deny and ask rules match each word unquoted with the word boundaries kept (a word that is
+  empty or holds a blank, a quote or a backslash is written back in single quotes), so
+  `git push *` covers `git 'push' origin main` and `rm -rf *` covers `rm '-rf' build`, while
+  `* --force` still does not match inside `git commit -m 'never --force'`.
+- Bash deny and ask rules read wrapper options unquoted (`env "-i" cmd`, `env "X=1" cmd`) and as
+  GNU does: bundled short options (`env -iu NAME`, `time -po FILE`, `exec -la NAME`), unique
+  prefixes of long options (`env --uns NAME`, `time --outp FILE`) with an optional `=value`, and
+  the argument of `env -u`/`-C`/`-a`, `time -f`/`-o` and `exec -a`. `env -S` and
+  `--split-string`, quoted or bundled, make the command unparsed.
+- `>&` followed by anything other than exactly digits or `-` is a file redirect for Bash allow
+  rules (`>&2file`, `>&2-`, `>&-file`), not a descriptor duplication; a narrow allow rule asks and
+  the allow-all rule still allows. A blank after `>&` is unparsed.
+- A `$[` inside the `${...}` of a double-quoted parameter expansion makes the command unparsed
+  for Bash rules, as a quote or a nested `${` already did, since bash nests the arithmetic and a
+  `}` inside it does not end the expansion.
 - The compaction summary no longer loses early content. The summary request ended with the
   folded history's last user message, which the model answered ("Acknowledged. Received log
   excerpt 2...") instead of summarizing. It now ends with one user message carrying a guard

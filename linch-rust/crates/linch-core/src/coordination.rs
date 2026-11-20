@@ -29,6 +29,7 @@ mod mailbox;
 mod send;
 
 pub use correlation::Correlator;
+pub(crate) use mailbox::escape;
 pub use mailbox::{InMemoryMailbox, Mailbox, MailboxError, MailboxMessage};
 pub use send::SEND_MESSAGE_TOOL;
 pub(crate) use send::SendMessageTool;
