@@ -159,6 +159,17 @@ impl ReliabilityPolicy {
         Rules::new(self.clone()).err()
     }
 
+    /// Why this policy is wrong whichever agent runs it, if it is: a
+    /// `check` that cannot be used, a rule or gate that is wrong by its own
+    /// text, a blank tool name or a cycle. Which tools an agent has is not
+    /// asked.
+    pub fn standalone_problem(&self) -> Option<String> {
+        self.compile_problem().or_else(|| {
+            self.problem(|_| true, None)
+                .map(|(PolicyProblem::Own(text) | PolicyProblem::Joint(text))| text)
+        })
+    }
+
     /// Why this policy cannot run on an agent, if it cannot.
     ///
     /// A defect in the text of one rule or gate, whatever the agent and the

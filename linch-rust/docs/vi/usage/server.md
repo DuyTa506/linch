@@ -524,8 +524,8 @@ chối:
   (`BuildError::Policy`, `data.kind` là `policy`: tool mà agent không có, một vòng, một check không biên dịch được,
   một `tool_choice` làm các rule không thể thỏa) là một câu cố định không nêu tên tool hay lặp lại pattern, vì rule do operator viết;
   văn bản gốc được ghi vào log của server (`warn`, kèm tên tenant) và không bao giờ gửi cho client. Một lỗi trong
-  chính văn bản rule hay gate của tenant (tên gate trống, `min_calls` bằng 0, gate không yêu cầu gì) giữ nguyên thông báo (config
-  server từ chối một `required_policy` có check không biên dịch được). Các rule chỉ ràng buộc
+  chính văn bản rule hay gate của tenant (tên gate trống, `min_calls` bằng 0, gate không yêu cầu gì) giữ nguyên thông báo (server từ chối
+  ngay lúc khởi động một `required_policy` mà không agent nào chạy được: check không biên dịch được, tên gate trống, `min_calls` bằng 0, một vòng). Các rule chỉ ràng buộc
   thứ tự lời gọi của model: một host tool của client dưới tên bắt buộc, một hook
   `pre_tool_use`, một thay thế của `post_tool_use` hay một cache hit vẫn có thể thỏa
   một prerequisite, nên đây không phải cưỡng chế đối với host của chính tenant.

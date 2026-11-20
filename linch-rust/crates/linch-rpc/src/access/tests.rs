@@ -115,6 +115,38 @@ fn a_hidden_policy_error_is_logged_with_its_tenant() {
     );
 }
 
+/// A required policy with a defect of its own is the operator's to fix at
+/// the start, so a defect found at an open is always the tenant's text.
+#[test]
+fn a_required_policy_that_is_wrong_by_itself_is_refused_at_the_start() {
+    let wrong = |policy: serde_json::Value| {
+        let required: linch::ReliabilityPolicy = serde_json::from_value(policy).unwrap();
+        Tenant::new(
+            "acme",
+            Allowlists::default().required_policy(Some(required)),
+        )
+    };
+    for policy in [
+        serde_json::json!({"gates": [{"name": "secret-sauce"}]}),
+        serde_json::json!({"gates": [{"name": "g", "succeeded": ["a"], "min_calls": 0}]}),
+        serde_json::json!({"prerequisites": [{"tool": "a", "requires": ["a"]}]}),
+        serde_json::json!({"prerequisites": [
+            {"tool": "a", "requires": ["b"]}, {"tool": "b", "requires": ["a"]},
+        ]}),
+    ] {
+        let error = wrong(policy.clone()).err();
+        assert!(
+            matches!(error, Some(AccessError::RequiredPolicy { .. })),
+            "{policy}: {error:?}"
+        );
+    }
+    let sound = serde_json::json!({
+        "prerequisites": [{"tool": "update", "requires": ["lookup"]}],
+        "gates": [{"name": "looked-up", "succeeded": ["lookup"]}],
+    });
+    assert!(wrong(sound).is_ok());
+}
+
 #[test]
 fn tenant_names_are_plain_and_never_hold_a_slash() {
     for good in ["acme", "a.b_c-9", &"x".repeat(64)] {

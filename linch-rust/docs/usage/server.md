@@ -540,7 +540,7 @@ silently instead:
   (`warn`, with the tenant's name) and never to the client. A defect in the
   text of the tenant's own rule or gate (a blank gate name, `min_calls` of 0,
   a gate that asks for nothing) keeps its message
-  (the server config refuses a `required_policy` whose check does not compile).
+  (the server refuses at start a `required_policy` that no agent could run: a check that does not compile, a blank gate name, a `min_calls` of 0, a cycle).
   The rules bind the model's call order only: a client's host tool under a
   required name, a `pre_tool_use` hook, a `post_tool_use` replacement or a
   cache hit can still satisfy a prerequisite, so this is not enforcement
