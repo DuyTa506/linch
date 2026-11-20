@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -42,6 +43,9 @@ pub(super) struct Inner {
     store: Arc<dyn JournalStore>,
     pub(super) lease: JournalLease,
     journal: Mutex<Journal>,
+    /// Steps begun with [`step_begin`](WorkflowContext::step_begin) and not
+    /// completed or dropped yet; each holds a place under `max_records`.
+    pub(super) pending_steps: Arc<AtomicU64>,
     on_event: Option<EventSink>,
     pub(super) step_timeout: Option<Duration>,
     pub(super) cancel: CancellationToken,
@@ -94,6 +98,7 @@ impl WorkflowContext {
             store: options.journal.clone(),
             lease,
             journal: Mutex::new(journal),
+            pending_steps: Arc::default(),
             on_event: options.on_event.clone(),
             step_timeout: options.step_timeout,
             cancel: options.cancel.clone(),
@@ -151,7 +156,15 @@ impl WorkflowContext {
     /// different order on replay, where journaled calls return at once; a
     /// count shared across branches would hand one branch another's
     /// record.
-    pub(super) fn next_occurrence(&self, call_key: &str) -> (String, u64, Option<JsonValue>) {
+    ///
+    /// With `max_records` set, a call whose key this run has not used and
+    /// no record answers is refused once the run holds that many keys, so
+    /// calls that journal nothing (a suspended interrupt, a failed call)
+    /// cannot grow the counters without bound.
+    pub(super) fn next_occurrence(
+        &self,
+        call_key: &str,
+    ) -> Result<(String, u64, Option<JsonValue>), WorkflowError> {
         let path = branch_path();
         let key = if path.is_empty() {
             call_key.to_owned()
@@ -159,20 +172,39 @@ impl WorkflowContext {
             format!("{call_key}@{path}")
         };
         let mut journal = lock(&self.inner.journal);
-        let counter = journal.counters.entry(key.clone()).or_default();
-        let occurrence = *counter;
-        *counter += 1;
+        let seen = journal.counters.get(&key).copied();
+        let occurrence = seen.unwrap_or_default();
         let cached = journal.records.get(&(key.clone(), occurrence)).cloned();
-        (key, occurrence, cached)
+        if let Some(max) = self.inner.max_records {
+            if seen.is_none() && cached.is_none() && journal.counters.len() as u64 >= max {
+                return Err(WorkflowError::LimitExceeded {
+                    what: "journal records",
+                    max,
+                });
+            }
+        }
+        journal.counters.insert(key.clone(), occurrence + 1);
+        Ok((key, occurrence, cached))
     }
 
-    /// `LimitExceeded` when the journal holds as many records as it may.
-    /// Checked before live work starts, so a call that could not be
+    /// `LimitExceeded` when the journal holds as many records as it may,
+    /// counting the steps begun and not completed, which will each journal
+    /// one. Checked before live work starts, so a call that could not be
     /// journaled never spends.
     pub(super) fn check_room(&self) -> Result<(), WorkflowError> {
+        self.check_room_with(self.pending())
+    }
+
+    /// Steps begun and not completed or dropped.
+    pub(super) fn pending(&self) -> u64 {
+        self.inner.pending_steps.load(Ordering::SeqCst)
+    }
+
+    /// [`check_room`](Self::check_room) given the pending steps to count.
+    pub(super) fn check_room_with(&self, pending: u64) -> Result<(), WorkflowError> {
         if let Some(max) = self.inner.max_records {
             let held = lock(&self.inner.journal).records.len() as u64;
-            if held >= max {
+            if held + pending >= max {
                 return Err(WorkflowError::LimitExceeded {
                     what: "journal records",
                     max,
@@ -189,7 +221,20 @@ impl WorkflowContext {
         occurrence: u64,
         value: &JsonValue,
     ) -> Result<(), WorkflowError> {
-        self.check_room()?;
+        self.record_with(call_key, occurrence, value, self.pending())
+            .await
+    }
+
+    /// [`record`](Self::record) given the pending steps to count: a step
+    /// completing leaves its own place out.
+    pub(super) async fn record_with(
+        &self,
+        call_key: &str,
+        occurrence: u64,
+        value: &JsonValue,
+        pending: u64,
+    ) -> Result<(), WorkflowError> {
+        self.check_room_with(pending)?;
         let too_big = (self.inner.max_record_bytes).filter(|max| value.to_string().len() > *max);
         if let Some(max) = too_big {
             return Err(WorkflowError::LimitExceeded {

@@ -299,6 +299,81 @@ async fn caps_on_records_and_their_size_refuse_before_a_call_spends() {
 }
 
 #[tokio::test]
+async fn begun_steps_count_against_max_records_until_completed_or_dropped() {
+    let store = Arc::new(MemoryJournalStore::default());
+    let mut capped = options(&store, "w1", &Recorder::default());
+    capped.max_records = Some(2);
+    let session = WorkflowSession::open(&capped).await.unwrap();
+    let wf = session.context();
+    let begin = || wf.step_begin("s", None);
+    let StepSlot::Run(first) = begin().unwrap() else {
+        panic!("a new step has no record")
+    };
+    let StepSlot::Run(second) = begin().unwrap() else {
+        panic!("a new step has no record")
+    };
+    let full = begin();
+    assert!(
+        matches!(full, Err(WorkflowError::LimitExceeded { max: 2, .. })),
+        "{full:?}"
+    );
+    // A dropped ticket gives its place back; a completed one holds a record.
+    drop(second);
+    wf.step_complete(first, json!(1)).await.unwrap();
+    let StepSlot::Run(third) = begin().unwrap() else {
+        panic!("a new step has no record")
+    };
+    wf.step_complete(third, json!(2)).await.unwrap();
+    assert!(matches!(
+        begin(),
+        Err(WorkflowError::LimitExceeded { max: 2, .. })
+    ));
+    assert_eq!(wf.pending(), 0);
+}
+
+#[tokio::test]
+async fn calls_that_journal_nothing_are_counted_against_max_records() {
+    let store = Arc::new(MemoryJournalStore::default());
+    let mut capped = options(&store, "w1", &Recorder::default());
+    capped.max_records = Some(3);
+    let session = WorkflowSession::open(&capped).await.unwrap();
+    let wf = session.context();
+    for number in 0..3 {
+        let asked = wf
+            .interrupt::<serde_json::Value>(&format!("k{number}"), json!({}))
+            .await;
+        assert!(
+            matches!(asked, Err(WorkflowError::Suspended(_))),
+            "{asked:?}"
+        );
+    }
+    let refused = wf.interrupt::<serde_json::Value>("k3", json!({})).await;
+    assert!(
+        matches!(refused, Err(WorkflowError::LimitExceeded { max: 3, .. })),
+        "{refused:?}"
+    );
+    // A key already used is not a new one.
+    let again = wf.interrupt::<serde_json::Value>("k0", json!({})).await;
+    assert!(
+        matches!(again, Err(WorkflowError::Suspended(_))),
+        "{again:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_workflow_with_no_cap_keeps_every_pending_step() {
+    let store = Arc::new(MemoryJournalStore::default());
+    let session = WorkflowSession::open(&options(&store, "w1", &Recorder::default()))
+        .await
+        .unwrap();
+    let wf = session.context();
+    let tickets: Vec<_> = (0..50)
+        .map(|number| wf.step_begin(&format!("s{number}"), None).unwrap())
+        .collect();
+    assert_eq!(tickets.len(), 50);
+}
+
+#[tokio::test]
 async fn the_live_gate_is_asked_only_for_calls_that_run() {
     let fixture = scripted(vec![text_turn("a")]);
     let store = Arc::new(MemoryJournalStore::default());

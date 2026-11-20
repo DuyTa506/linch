@@ -98,7 +98,9 @@ từ chối lần nữa. Hãy đặt `pricing` hoặc giới hạn `max_tokens`.
 
 `parallel`, `settled` và `pipeline` chạy trong client. Mỗi nhánh đếm các lời gọi
 của riêng nó, dưới đường dẫn nhánh của nó, nên các nhánh đến lời gọi của mình
-theo thứ tự khác khi resume vẫn tìm thấy record của chính chúng.
+theo thứ tự khác khi resume vẫn tìm thấy record của chính chúng. `name`, `key`
+của một lời gọi (`key` của step được băm nên không bị chặn) và `branch` dài tối
+đa 256 byte, như id của workflow (`-32602` nếu vượt).
 
 ## Replay hoạt động thế nào
 
@@ -224,7 +226,7 @@ lên và đặt các mức trần:
 | Mức trần | Mặc định | Nó giới hạn gì |
 |---|---|---|
 | `max_workflows` | 4 | Số workflow tenant drive cùng lúc, qua mọi kết nối của nó (`-32005`, `kind: workflows`) |
-| `max_records` | 10000 | Số record journal của một workflow, tính cả replay (`-32005`, `kind: journal_records`); được kiểm tra trước khi một lời gọi tiêu tiền |
+| `max_records` | 10000 | Số record journal của một workflow, tính cả replay, cộng các step đã begin mà chưa complete và các lời gọi khác key mà kết nối đã dùng (`-32005`, `kind: journal_records`); được kiểm tra trước khi một lời gọi tiêu tiền, nên lượng server giữ cho một workflow bị chặn bởi nó |
 | `max_fan_out` | 8 | Số lời gọi agent của một workflow đang chạy cùng lúc (`-32005`, `kind: agent_calls_in_flight`); client hạ `max_concurrency` của nó xuống mức này |
 | `max_record_bytes` | 1 MiB | Giá trị JSON của một record |
 | `max_tokens`, `max_cost_usd` | không có | Một mức trần cho `budget` của workflow; workflow không có budget sẽ nhận nó, và workflow xin nhiều hơn bị từ chối (`-32004`, `kind: workflow_budget`) |

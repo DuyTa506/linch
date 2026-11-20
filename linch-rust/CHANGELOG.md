@@ -6,6 +6,10 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ## Unreleased
 
+### Fixed
+
+- **Workflow memory per connection.** `workflow.step.begin`, `workflow.agent` and `workflow.interrupt` refuse a `name`, `key` or `branch` over 256 bytes (`-32602`), like the workflow id; with `max_records` set, steps begun and not completed and the distinct calls a run has keyed count against it (`-32005`, `kind: journal_records`), so what the server keeps for a tenant's workflow is bounded by the cap that bounds its records. A workflow with no `max_records` is unchanged.
+
 ## 0.2.0 - 2026-11-19
 
 0.1.1 was uploaded to PyPI from commit `e102d938` and never tagged; this is the first tagged release. The Python client of this build refuses a server without `server.info` (`IncompatibleServer`), so ship the client and the `linch-server` binary together.

@@ -68,7 +68,10 @@ pub struct WorkflowOptions {
     pub budget: Option<WorkflowBudget>,
     /// Most records the journal may hold for this workflow, replayed ones
     /// included; a call that would add one past it fails with
-    /// [`WorkflowError::LimitExceeded`]. `None` is no cap.
+    /// [`WorkflowError::LimitExceeded`]. Steps begun and not completed, and
+    /// the distinct calls the run has keyed, count against it too, so what
+    /// the context keeps in memory is bounded by the same number. `None` is
+    /// no cap.
     pub max_records: Option<u64>,
     /// Most bytes one record's JSON value may take; a call whose value is
     /// larger fails with [`WorkflowError::LimitExceeded`] and journals

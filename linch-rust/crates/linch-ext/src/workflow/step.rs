@@ -2,6 +2,8 @@
 //! again.
 
 use std::future::Future;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use linch_core::JsonValue;
@@ -84,7 +86,7 @@ impl WorkflowContext {
         let label = format!("step {name}");
         let content_key = step_key(name, options.key.as_ref())
             .map_err(|error| encode_error(&label, format!("its key does not encode: {error}")))?;
-        let (call_key, occurrence, cached) = self.next_occurrence(&content_key);
+        let (call_key, occurrence, cached) = self.next_occurrence(&content_key)?;
         let emit = |kind, result_text: Option<&JsonValue>| {
             let mut event = event(kind, name.to_owned(), call_key.clone(), occurrence);
             event.result_text = result_text.map(JsonValue::to_string);
@@ -123,6 +125,27 @@ pub struct StepTicket {
     name: String,
     call_key: String,
     occurrence: u64,
+    /// The place the step holds under `max_records` until it completes or
+    /// the ticket is dropped.
+    _pending: PendingStep,
+}
+
+/// One begun step among the context's pending ones.
+#[derive(Debug)]
+struct PendingStep(Arc<AtomicU64>);
+
+impl PendingStep {
+    /// Take a place; also the steps pending before this one.
+    fn reserve(pending: &Arc<AtomicU64>) -> (Self, u64) {
+        let before = pending.fetch_add(1, Ordering::SeqCst);
+        (Self(Arc::clone(pending)), before)
+    }
+}
+
+impl Drop for PendingStep {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// What [`WorkflowContext::step_begin`] found in the journal.
@@ -150,7 +173,9 @@ impl WorkflowContext {
     ///
     /// Raises:
     ///     WorkflowError: `Encode` when `key` does not encode, `Aborted`
-    ///         when the cancel token fired first.
+    ///         when the cancel token fired first, `LimitExceeded` when
+    ///         the pending steps and the journal's records fill
+    ///         `max_records`.
     pub fn step_begin(
         &self,
         name: &str,
@@ -159,7 +184,7 @@ impl WorkflowContext {
         let label = format!("step {name}");
         let content_key = step_key(name, key)
             .map_err(|error| encode_error(&label, format!("its key does not encode: {error}")))?;
-        let (call_key, occurrence, cached) = self.next_occurrence(&content_key);
+        let (call_key, occurrence, cached) = self.next_occurrence(&content_key)?;
         let mut event = event(
             WorkflowKind::StepReplayed,
             name.to_owned(),
@@ -172,13 +197,15 @@ impl WorkflowContext {
             return Ok(StepSlot::Replayed(value));
         }
         self.check_cancel(&label)?;
-        self.check_room()?;
+        let (pending, before) = PendingStep::reserve(&self.inner.pending_steps);
+        self.check_room_with(before)?;
         event.kind = WorkflowKind::StepStart;
         self.emit(event);
         Ok(StepSlot::Run(StepTicket {
             name: name.to_owned(),
             call_key,
             occurrence,
+            _pending: pending,
         }))
     }
 
@@ -193,7 +220,10 @@ impl WorkflowContext {
         ticket: StepTicket,
         value: JsonValue,
     ) -> Result<(), WorkflowError> {
-        self.record(&ticket.call_key, ticket.occurrence, &value)
+        // The ticket's own place is the record's.
+        let others = self.pending().saturating_sub(1);
+        let (call_key, occurrence) = (&ticket.call_key, ticket.occurrence);
+        self.record_with(call_key, occurrence, &value, others)
             .await?;
         let mut event = event(
             WorkflowKind::StepEnd,
