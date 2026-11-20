@@ -150,9 +150,10 @@ pub fn has_unparsed_construct(command: &str) -> bool {
         } else if quote == Some(b'"') {
             if c == b'"' {
                 quote = None;
-            } else if c == b'`' || (c == b'$' && next == Some(b'(')) {
-                return true;
-            } else if c == b'$' && next == Some(b'{') && quotes_in_expansion(&b[i + 2..]) {
+            } else if c == b'`'
+                || (c == b'$' && next == Some(b'('))
+                || (c == b'$' && next == Some(b'{') && quotes_in_expansion(&b[i + 2..]))
+            {
                 return true;
             }
         } else {
