@@ -258,7 +258,9 @@ async fn a_heartbeat_after_another_workers_dequeue_changes_nothing() {
     // fenced by `attempts`.
     assert!(matches!(second.fail(&db.pool, "bad").await, Ok(true)));
     let after_fail = second.heartbeat(&line, Duration::from_secs(300)).await;
-    let stale_release = first.release(&db.pool, Duration::ZERO, "stale", false).await;
+    let stale_release = first
+        .release(&db.pool, Duration::ZERO, "stale", false)
+        .await;
     let stale_ack = first.ack(&db.pool, "done").await;
     db.finish().await;
     assert!(matches!(late, Ok(false)), "{late:?}");
