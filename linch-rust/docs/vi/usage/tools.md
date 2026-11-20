@@ -323,10 +323,15 @@ status: final
   mọi vị trí, nên với tệp rỗng thì văn bản mới được chèn vào, với tệp không rỗng
   thì bị từ chối vì mơ hồ trừ khi đặt `replace_all` (chèn ở mọi vị trí và cần
   đã đọc toàn bộ tệp), và dòng đầu tiên phải đã được đọc.
-- **Giới hạn phạm vi.** Đường dẫn là tương đối so với workspace. `..`, đường dẫn
-  tuyệt đối nằm ngoài nó và symlink dẫn ra ngoài đều bị từ chối, kể cả khi một
-  process khác hoán đổi một thư mục thành symlink trong lúc lệnh gọi chạy. Hard
-  link tới tệp ngoài workspace không được che
+- **Giới hạn phạm vi.** Đường dẫn là tương đối so với workspace. Đường dẫn trèo
+  lên trên nó bằng `..` (kể cả khi quay lại vào trong), đường dẫn tuyệt đối nằm
+  ngoài nó (được kiểm tra mà không nhìn xem ở đó có gì) và symlink dẫn ra ngoài đều
+  bị từ chối, kể cả khi một process khác hoán đổi một thư mục thành symlink trong
+  lúc lệnh gọi chạy. Một đường dẫn đi xuống tối đa 128 thư mục, và mỗi thư mục trên
+  đó, kể cả thư mục gốc của workspace, phải đọc được. `Grep` và `Glob` kết thúc
+  bằng một dòng cho biết có bao nhiêu mục chúng không đọc được và đã bỏ ra (không
+  bao giờ nêu tên). Hard link tới tệp ngoài workspace không được che, tên trong
+  một thư mục mà một lệnh đang chạy đã hoán đổi cũng vậy
   ([Giới hạn truy cập](../architecture/tools.md#giới-hạn-truy-cập)).
 - **`Bash` mặc định không bị giới hạn phạm vi.** Với backend `local` mặc định, nó
   bắt đầu trong workspace nhưng có thể chạm tới mọi thứ mà user của server chạm

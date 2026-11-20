@@ -6,7 +6,9 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ## Unreleased
 
-- The file tools (`Read`, `Write`, `Edit`, `Grep`, `Glob`) and `DiskBackend` open every path name by name from a directory descriptor of the root with `O_NOFOLLOW` (`openat`, `mkdirat`, `renameat`), so a directory or file swapped for a symlink while a call runs is refused instead of followed out of the workspace.
+- The file tools (`Read`, `Write`, `Edit`, `Grep`, `Glob`) and `DiskBackend` open every path name by name from a directory descriptor of the root with `O_NOFOLLOW` (`openat`, `mkdirat`, `renameat`), so a directory or file swapped for a symlink while a call runs is refused instead of followed out of the workspace. Four behaviours differ from before: a path goes down at most 128 directories (deeper is an error; searches have no such limit); each directory on a path, the root included, must be readable, not only searchable; an absolute path must start with the canonical root or the root as given to `LocalFs::new`, and an absolute symlink target with the canonical root, so another spelling of it, such as `/var` for `/private/var`, is refused; and a path that climbs above the root with `..` is refused even if it comes back in (`../root/top.txt`), while `..` that stays inside is accepted.
+- `Grep` and `Glob` name no entry they cannot read from the workspace root: they end with a line giving how many entries were left out (unreadable or not searchable directories, names swapped for a symlink, names gone), `GrepHits` has a `left_out` count, and `ExecutionFs::glob` returns `GlobHits` (`hits` and `left_out`). Running out of descriptors is an error, not an empty answer.
+- An absolute path outside the workspace is refused with `Escape` whether or not anything exists there.
 
 ## 0.2.0 - 2026-11-19
 
