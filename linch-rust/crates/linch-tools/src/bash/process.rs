@@ -1,12 +1,23 @@
 //! One shell command in its own process group, with its output pumped
 //! into bounded captures while it runs.
+//!
+//! On Linux a command also runs under a helper (found by
+//! [`super::supervisor`], see [`crate::reaper`]), which holds everything the
+//! command starts, including what leaves its process group, and ends it with
+//! the command. The helper tells the server the shell's pid, so the server
+//! signals the shell and its group itself, whether or not the helper still
+//! runs. Without a helper, and elsewhere, the process group is all that holds
+//! a command.
 
 use std::collections::BTreeMap;
-use std::io;
+use std::io::{self, ErrorKind, Read};
+use std::os::fd::OwnedFd;
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::pin::pin;
 use std::process::Stdio;
+use std::sync::Once;
 use std::time::Duration;
 
 use rustix::process::{Pid, Signal, kill_process_group};
@@ -16,23 +27,31 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::capture::Capture;
+use super::supervisor;
 use crate::exec::{Cleanup, Exit, RemoteRun};
+use crate::reaper::ReaperCommand;
 
-/// How long to keep reading after the group is killed. Only a process that
-/// left the group (`setsid`) can hold a pipe open past this.
+/// How long to keep reading after the command is stopped. Without the
+/// helper, only a process that left the group (`setsid`) can hold a pipe
+/// open past this.
 const DRAIN: Duration = Duration::from_secs(1);
 
-/// How long to wait for the killed shell to be reaped.
+/// How long to wait for the stopped command (its helper, or its killed
+/// shell) to be reaped.
 const REAP: Duration = Duration::from_secs(2);
 
-/// The shell a background command starts under. Its stdin is a pipe whose
-/// write end only this process holds: the shell moves it to fd 3 for a
-/// watchdog in the command's group and gives the command `/dev/null`. When
-/// this process dies, even by `SIGKILL`, the pipe reaches end of file and
-/// the watchdog kills the whole group, so a background command never
-/// outlives the server. `exec` keeps the shell's pid, the group leader's.
-/// The watchdog uses only builtins (nothing ever writes the pipe, so
-/// `read` returns at end of file), so it works whatever the `PATH`.
+/// How long to wait for a helper to say which shell it started.
+const HANDSHAKE: Duration = Duration::from_secs(5);
+
+/// The shell a background command starts under. Its stdin is a pipe (or,
+/// under the helper, a socket) whose other end only this process holds: the
+/// shell moves it to fd 3 for a watchdog in the command's group and gives
+/// the command `/dev/null`. When this process dies, even by `SIGKILL`, the
+/// pipe reaches end of file and the watchdog kills the whole group, so a
+/// background command never outlives the server. `exec` keeps the shell's
+/// pid, the group leader's. The watchdog uses only builtins (nothing ever
+/// writes the pipe, so `read` returns at end of file), so it works whatever
+/// the `PATH`.
 pub(crate) const LIFELINE: &str = "exec 3<&0 </dev/null; (read -r _ <&3; kill -KILL 0) >/dev/null 2>&1 & \
                         exec 3<&-; exec /bin/sh -c \"$1\"";
 
@@ -73,9 +92,10 @@ pub(super) struct Finished {
 /// Supervise a foreground command an execution backend started, keeping
 /// the captured output.
 ///
-/// The command leads a new process group. When the shell exits, times out or
-/// is cancelled, the whole group gets `SIGKILL`, so nothing it started
-/// outlives the call. Dropping the returned future kills the group too.
+/// The shell leads a new process group. When it exits, times out or is
+/// cancelled, its group is killed and, under a helper, everything else it
+/// started too, so nothing it started outlives the call. Dropping the
+/// returned future stops the command too.
 pub(super) async fn run(
     spawned: Started,
     timeout: Duration,
@@ -102,8 +122,21 @@ pub(super) async fn run(
 /// run once its group is killed before it exited (a container to remove).
 #[derive(Debug)]
 pub(crate) struct Spawned {
+    /// The shell, or the helper that runs it.
     pub child: Child,
     pub cleanup: Option<Cleanup>,
+    /// Set when `child` is a helper.
+    pub helper: Option<Helper>,
+}
+
+/// What the server holds of a helper that runs a command.
+#[derive(Debug)]
+pub(crate) struct Helper {
+    /// The server's end of the helper's stdin, a socket: closing it stops
+    /// the command and everything under it.
+    pub link: UnixStream,
+    /// The shell's pid, which leads the command's process group.
+    pub shell: u32,
 }
 
 /// A command an execution backend started: a child of this process, or
@@ -125,10 +158,13 @@ impl From<Spawned> for Started {
 }
 
 impl Started {
-    /// The command's process id on this machine; `None` for a remote one.
+    /// The command's process id on this machine (the shell's, not the
+    /// helper's); `None` for a remote one.
     pub(super) fn pid(&self) -> Option<u32> {
         match self {
-            Self::Process(spawned) => spawned.child.id(),
+            Self::Process(spawned) => (spawned.helper.as_ref())
+                .map(|helper| helper.shell)
+                .or_else(|| spawned.child.id()),
             Self::Remote(_) => None,
         }
     }
@@ -153,30 +189,160 @@ pub(crate) fn shell_args(command: &str, lifeline: bool) -> Vec<&str> {
 }
 
 /// Start `command` under `/bin/sh` in `cwd` with exactly `env`, as the
-/// leader of a new process group, stdout and stderr piped. With `lifeline`
-/// the command runs under [`LIFELINE`], so it dies with this process;
-/// otherwise its stdin is closed.
+/// leader of a new process group, stdout and stderr piped. See
+/// [`start_shell`] for `lifeline`.
+///
+/// Blocks until a helper has started the shell, so call it from a blocking
+/// task.
 pub(crate) fn spawn(
     command: &str,
     cwd: &Path,
     env: &BTreeMap<String, String>,
     lifeline: bool,
-) -> io::Result<Child> {
+) -> io::Result<Spawned> {
     let mut shell = Command::new("/bin/sh");
     shell.args(shell_args(command, lifeline));
-    start(shell, cwd, env, lifeline)
+    start_shell(shell, cwd, env, lifeline)
+}
+
+/// Whether [`spawn`] blocks: a helper has to say which shell it started.
+pub(crate) fn blocks() -> bool {
+    supervisor::program().is_some()
+}
+
+/// Start the shell `program` runs in `cwd` with exactly `env`, as the
+/// leader of a new process group, stdout and stderr piped.
+///
+/// Where a helper is found, the child is the helper, which runs `program`
+/// and tells this process its pid. Its stdin is a socket this process holds
+/// the other end of: closing it (the caller stopping the command, or dying)
+/// ends the command and everything it started. With `lifeline` the
+/// shell gets the socket too (see [`LIFELINE`]), so it dies with this
+/// process even if its helper was killed. A helper that cannot start, or
+/// does not run the command, is passed over: the command then runs as it
+/// does without one.
+///
+/// Without a helper, `lifeline` gives the shell a pipe on stdin whose write
+/// end this process holds; otherwise its stdin is closed.
+///
+/// Blocks until a helper has started the shell, so call it from a blocking
+/// task.
+pub(crate) fn start_shell(
+    program: Command,
+    cwd: &Path,
+    env: &BTreeMap<String, String>,
+    lifeline: bool,
+) -> io::Result<Spawned> {
+    start_shell_under(supervisor::program(), program, cwd, env, lifeline)
+}
+
+fn start_shell_under(
+    helper: Option<&ReaperCommand>,
+    program: Command,
+    cwd: &Path,
+    env: &BTreeMap<String, String>,
+    lifeline: bool,
+) -> io::Result<Spawned> {
+    if let Some(helper) = helper {
+        match start_helped(helper, &program, cwd, env, lifeline) {
+            Ok(spawned) => return Ok(spawned),
+            // The helper may be running the command: do not run it twice.
+            Err(error) if error.kind() == ErrorKind::TimedOut => return Err(error),
+            Err(error) => warn_once(helper, &error),
+        }
+    }
+    let child = start(program, cwd, env, lifeline)?;
+    Ok(Spawned {
+        child,
+        cleanup: None,
+        helper: None,
+    })
+}
+
+/// Start `program` under `helper` and wait for its first line, the shell's
+/// pid. Fails with [`ErrorKind::UnexpectedEof`] when the helper ended
+/// without starting the shell (it does not know its arguments, say), and
+/// with [`ErrorKind::TimedOut`] when it did not answer: a helper that
+/// might be running the command.
+fn start_helped(
+    helper: &ReaperCommand,
+    program: &Command,
+    cwd: &Path,
+    env: &BTreeMap<String, String>,
+    lifeline: bool,
+) -> io::Result<Spawned> {
+    let inner = program.as_std();
+    let (link, theirs) = UnixStream::pair()?;
+    let mut wrapped = Command::new(&helper.program);
+    wrapped.args(&helper.args);
+    if lifeline {
+        wrapped.arg("--stdin");
+    }
+    wrapped
+        .arg("--")
+        .arg(inner.get_program())
+        .args(inner.get_args());
+    // A helper is stopped by its stdin closing, not killed outright.
+    let child = launch(wrapped, cwd, env, Stdio::from(OwnedFd::from(theirs)), false)?;
+    link.set_read_timeout(Some(HANDSHAKE))?;
+    match read_pid(&link) {
+        Ok(shell) => Ok(Spawned {
+            child,
+            cleanup: None,
+            helper: Some(Helper { link, shell }),
+        }),
+        Err(error) => {
+            // Whatever answered, and did not end, is not the helper.
+            if error.kind() != ErrorKind::UnexpectedEof {
+                Group::of(child.id(), None).kill();
+            }
+            Err(error)
+        }
+    }
+}
+
+/// The pid on the helper's first line.
+fn read_pid(mut link: &UnixStream) -> io::Result<u32> {
+    let mut line = [0u8; 16];
+    let read = match link.read(&mut line) {
+        Ok(0) => return Err(ErrorKind::UnexpectedEof.into()),
+        Ok(read) => read,
+        Err(error) if error.kind() == ErrorKind::WouldBlock => {
+            return Err(ErrorKind::TimedOut.into());
+        }
+        Err(error) => return Err(error),
+    };
+    let pid = std::str::from_utf8(&line[..read])
+        .ok()
+        .and_then(|text| text.trim().parse::<u32>().ok());
+    pid.filter(|&pid| pid > 1)
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "the helper sent no pid"))
+}
+
+/// Say once per process that commands run without their helper.
+fn warn_once(helper: &ReaperCommand, error: &io::Error) {
+    static WARNED: Once = Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            helper = %helper.program.display(),
+            %error,
+            "the helper that ends a command's processes did not start; commands run without it"
+        );
+    });
 }
 
 /// Start `program` in `cwd` with exactly `env`, as the leader of a new
 /// process group, stdout and stderr piped, stdin a pipe with `lifeline`
-/// (the caller holds its write end) and closed without.
+/// (the caller holds its write end) and closed without. Dropping the child
+/// kills it. For a program that is not a shell the helper holds (the
+/// `docker` client).
 ///
 /// Every descriptor above stderr is first marked close-on-exec, so one
 /// this process holds without it (inherited from its parent, or opened by
 /// a library) does not pass to the command; Landlock checks only opens,
 /// so a passed descriptor would reach past a sandbox.
 pub(crate) fn start(
-    mut program: Command,
+    program: Command,
     cwd: &Path,
     env: &BTreeMap<String, String>,
     lifeline: bool,
@@ -185,6 +351,18 @@ pub(crate) fn start(
         true => Stdio::piped(),
         false => Stdio::null(),
     };
+    launch(program, cwd, env, stdin, true)
+}
+
+/// [`start`] and [`start_helped`]: `kill_on_drop` is whether dropping the
+/// child kills it.
+fn launch(
+    mut program: Command,
+    cwd: &Path,
+    env: &BTreeMap<String, String>,
+    stdin: Stdio,
+    kill_on_drop: bool,
+) -> io::Result<Child> {
     close_fds::set_fds_cloexec_threadsafe(3, &[]);
     program
         .stdin(stdin)
@@ -194,8 +372,18 @@ pub(crate) fn start(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0)
-        .kill_on_drop(true)
+        .kill_on_drop(kill_on_drop)
         .spawn()
+}
+
+/// Stop a command that was started and not supervised: its group is
+/// killed, and a helper ends the rest when its socket closes with `spawned`.
+pub(crate) fn abandon(spawned: Spawned) {
+    let leader = (spawned.helper.as_ref())
+        .map(|helper| helper.shell)
+        .or_else(|| spawned.child.id());
+    Group::of(leader, None).kill();
+    drop(spawned);
 }
 
 /// Pump the command's output into `on_out` and `on_err` until it exits,
@@ -217,9 +405,10 @@ pub(super) async fn supervise(
 }
 
 /// Pump `child`'s output into `on_out` and `on_err` until it exits, times
-/// out or `cancel` fires; then kill its whole group, drain what is left,
-/// reap the shell and, unless it exited, run the cleanup. Dropping the
-/// future kills the group too and starts the cleanup.
+/// out or `cancel` fires; then kill the shell's group and, under a helper,
+/// close its socket so it ends what left the group, drain what is left,
+/// reap the child and, unless it exited, run the cleanup. Dropping the
+/// future stops the command too and starts the cleanup.
 async fn supervise_process(
     spawned: Spawned,
     timeout: Duration,
@@ -227,16 +416,25 @@ async fn supervise_process(
     mut on_out: impl FnMut(&[u8]),
     mut on_err: impl FnMut(&[u8]),
 ) -> io::Result<End> {
-    let Spawned { mut child, cleanup } = spawned;
-    // Declared after `child`, so on drop it kills the group before the
-    // child handle goes.
-    let mut group = Group::of(child.id(), cleanup);
+    let Spawned {
+        mut child,
+        cleanup,
+        helper,
+    } = spawned;
+    let leader = child.id();
+    // The shell's group: the shell leads it under a helper, the child does
+    // without. Declared after `child`, so on drop it kills the group before
+    // the child handle goes.
+    let shell = (helper.as_ref()).map_or(leader, |helper| Some(helper.shell));
+    let mut group = Group::of(shell, cleanup);
     let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
         unreachable!("both streams are piped");
     };
-    // A lifeline's write end, held out of `child`: `Child::wait` closes the
-    // stdin it holds, which would fire the watchdog at once.
-    let _lifeline = child.stdin.take();
+    // The write ends the caller holds, out of `child`: `Child::wait` closes
+    // the stdin it holds, which would stop the command at once. Closing them
+    // stops it for the helper or the watchdog.
+    let mut lifeline = child.stdin.take();
+    let mut link = helper.map(|helper| helper.link);
     let deadline = Instant::now() + timeout;
     let end = {
         let mut pumps = pin!(async {
@@ -252,19 +450,26 @@ async fn supervise_process(
                 () = &mut pumps, if !pumped => pumped = true,
             }
         };
-        // On timeout or cancel this stops the command; after an exit it
-        // stops whatever the command left running in the background.
+        // The shell's group at once, as without a helper (and it covers a
+        // helper that was killed), then the helper, which ends what had
+        // left the group.
         group.kill();
+        drop((lifeline.take(), link.take()));
         if !pumped {
             let _ = tokio::time::timeout(DRAIN, &mut pumps).await;
         }
         end
     };
     if !matches!(end, End::Exited(_)) {
-        let _ = tokio::time::timeout(REAP, child.wait()).await;
+        if tokio::time::timeout(REAP, child.wait()).await.is_err() {
+            // The helper did not end (a process stuck in the kernel): fall
+            // back to its group, which holds at least the helper.
+            Group::of(leader, None).kill();
+            let _ = tokio::time::timeout(REAP, child.wait()).await;
+        }
         group.clean().await;
     }
-    // The shell is reaped (or left to tokio's reaper), so its id may be
+    // The child is reaped (or left to tokio's reaper), so its id may be
     // reused: never signal the group again.
     group.disarm();
     Ok(end)
@@ -328,25 +533,73 @@ mod tests {
 
     use super::*;
 
-    /// The server dying closes the lifeline's write end; the watchdog then
-    /// kills the whole group, with nobody signalling it. It needs nothing
-    /// on the `PATH`.
+    /// The server dying closes the lifeline's write end; the command and
+    /// everything it started then end, with nobody signalling it. It needs
+    /// nothing on the `PATH`.
     #[tokio::test]
     async fn closing_the_lifeline_kills_the_group() {
         let dir = tempfile::tempdir().unwrap();
         let env = BTreeMap::from([("PATH".to_owned(), "/nonexistent".to_owned())]);
-        let mut child = spawn("/bin/sleep 30", dir.path(), &env, true).unwrap();
-        let mut held = child.stdin.take();
+        let Spawned {
+            mut child, helper, ..
+        } = spawn("/bin/sleep 30", dir.path(), &env, true).unwrap();
+        let held = (child.stdin.take(), helper);
         let alive = tokio::time::timeout(Duration::from_millis(300), child.wait()).await;
         assert!(
             alive.is_err(),
             "the command runs while the lifeline is held"
         );
-        held.take();
+        drop(held);
         let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
             .await
             .expect("the watchdog killed the group")
             .unwrap();
         assert_eq!(status.signal(), Some(9));
+    }
+
+    fn sh(command: &str) -> Command {
+        let mut shell = Command::new("/bin/sh");
+        shell.args(["-c", command]);
+        shell
+    }
+
+    fn command(program: &str) -> ReaperCommand {
+        ReaperCommand {
+            program: program.into(),
+            args: Vec::new(),
+        }
+    }
+
+    /// A helper that is not there, or that exits without starting the
+    /// shell (an executable that does not know how it is called), is passed
+    /// over: the command runs, as without a helper.
+    #[tokio::test]
+    async fn a_helper_that_does_not_run_the_command_is_passed_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = BTreeMap::from([("PATH".to_owned(), "/usr/bin:/bin".to_owned())]);
+        for helper in ["/nonexistent/linch-reaper", "/bin/true", "/bin/false"] {
+            let helper = command(helper);
+            let command = sh("echo ran");
+            let spawned =
+                start_shell_under(Some(&helper), command, dir.path(), &env, false).unwrap();
+            assert!(spawned.helper.is_none(), "{helper:?}");
+            let output = spawned.child.wait_with_output().await.unwrap();
+            assert_eq!(output.stdout, b"ran\n", "{helper:?}");
+        }
+    }
+
+    /// The helper's first line must be a pid that can lead a group.
+    #[test]
+    fn a_pid_the_helper_sends_is_checked() {
+        for (sent, ok) in [
+            ("1234\n", true),
+            ("0\n", false),
+            ("x\n", false),
+            ("1\n", false),
+        ] {
+            let (ours, mut theirs) = UnixStream::pair().unwrap();
+            std::io::Write::write_all(&mut theirs, sent.as_bytes()).unwrap();
+            assert_eq!(read_pid(&ours).is_ok(), ok, "{sent:?}");
+        }
     }
 }

@@ -4,6 +4,7 @@ mod background;
 mod capture;
 mod control;
 pub(crate) mod process;
+pub(crate) mod supervisor;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

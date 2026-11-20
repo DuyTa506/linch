@@ -6,6 +6,10 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ## Unreleased
 
+### Fixed
+
+- **Processes a command leaves behind.** A `local` or `sandbox` `Bash` command is held by its process group, so a process that leaves it (`setsid`, `setpgid`) or is handed to `init` (a daemon) outlived the call, a timeout, `close_session` and the server. New and **off by default**: on Linux a helper program runs each command as a child subreaper and ends everything it started, on the same events and when the server dies even by `SIGKILL`. `LINCH_REAPER=1` turns it on for `linch-server`, which runs itself as the helper (`linch-server --linch-reaper -- ...`), so the wheel and the release archive need no second program; `LINCH_REAPER=/path/to/linch-reaper` names the small `linch-reaper` program built with `linch-tools`; a Rust host calls `linch_tools::reaper::register`; `LINCH_REAPER=` turns it off. It is off because it costs a process per command: a `local` `true` goes from 0.6 to 0.8 ms to 1.9 to 2.7 ms with `linch-reaper` and 3.5 to 4.2 ms with `linch-server` as the helper. The reported `pid` of a background command is still the shell's, and a helper that is killed leaves the shell's group to the server, as without it. The docs say per platform and backend what ends with a command and what does not.
+
 ## 0.2.0 - 2026-11-19
 
 0.1.1 was uploaded to PyPI from commit `e102d938` and never tagged; this is the first tagged release. The Python client of this build refuses a server without `server.info` (`IncompatibleServer`), so ship the client and the `linch-server` binary together.

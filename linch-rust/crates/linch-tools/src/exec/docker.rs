@@ -396,6 +396,7 @@ impl Shell for DockerShell {
         Ok(Started::Process(Spawned {
             child,
             cleanup: Some(cleanup),
+            helper: None,
         }))
     }
 

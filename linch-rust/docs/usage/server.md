@@ -688,6 +688,18 @@ server = Server(env={"DEEPSEEK_API_KEY": "<read from your secret store>"})
 
 `env` is the server's whole environment; nothing else is passed on.
 
+## Ending what a command starts
+
+By default a local `Bash` command is held by its process group, so a process
+it starts with `setsid` or double-forks outlives the call. Set
+`LINCH_REAPER=1` in the server's environment (on Linux) and the server runs
+each command under a helper, itself started as `linch-server --linch-reaper`,
+that ends everything the command started, when it exits, times out, is
+cancelled or killed, and when the server dies. It costs a process per command
+(about 3.5 to 4 ms against 0.6 to 0.8 ms for a `local` `true`), which is why it
+is off. See [Sandbox](./sandbox.md#what-ends-with-a-command) for what is and is
+not held.
+
 ---
 
 ## Related pages

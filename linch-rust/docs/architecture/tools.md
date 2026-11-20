@@ -288,10 +288,11 @@ reach anything the process user can. Use the permission engine (it asks for
 What it guarantees under every backend:
 
 - stdin is closed and the command leads a new process group
-  (`crates/linch-tools/src/bash/process.rs:159-195`);
-- the whole group gets `SIGKILL` on timeout, on cancel, when the call's future
-  is dropped, and when the shell exits, so background jobs never outlive the
-  call (`process.rs:199-271`);
+  (`crates/linch-tools/src/bash/process.rs`);
+- what the command started ends with it, on timeout, on cancel, when the
+  call's future is dropped, and when the shell exits, so background jobs do
+  not outlive the call. How far that reaches depends on the platform (see
+  [What ends with a command](#what-ends-with-a-command));
 - only nine host variables pass through (`PATH`, `HOME`, `TERM`, `LANG`,
   `LC_ALL`, `LC_CTYPE`, `USER`, `SHELL`, `TMPDIR`), so host credentials stay
   out of the environment (`bash.rs:51`); `with_env` adds more (`bash.rs:153`);
@@ -303,6 +304,118 @@ What it guarantees under every backend:
   (`bash/capture.rs:5-8`);
 - any exit status but 0 is an error result carrying the same text, with code
   `exit_status`, `timeout` or `aborted` (`bash.rs:309-326`).
+
+#### What ends with a command
+
+A process group does not hold a command: a descendant that calls `setsid` or
+`setpgid` leaves it, and one that double-forks is handed to `init` when its
+parent exits. What `local` and `sandbox` guarantee depends on the platform and
+on a helper program that is **off by default**, so the shipped configuration
+(`linch-server` from the wheel or the release archive, with nothing set) holds
+a command by its process group:
+
+| Where | What ends with the command |
+|---|---|
+| Default: the helper is off (Linux, macOS) | The shell's process group, killed on timeout, cancel, a dropped call, the shell's exit, `BashKill`, `close_session` and a dropped registry. A process that calls `setsid` or `setpgid`, or double-forks, outlives the call. A background command's group is also killed when the server dies, even by `SIGKILL` (the `LIFELINE` wrapper); a foreground command is not |
+| Linux with the helper on (`LINCH_REAPER=1` for `linch-server`, or a host that registers one) | Every descendant: those in the group, those that left it and those handed to `init`, whether or not they ignore `SIGTERM`. On the same events, and when the server dies, even by `SIGKILL` (foreground commands too) |
+| `docker` | The container, removed with `docker rm -f` (and the client's group); nothing of the command runs on the host |
+| `remote` | Whatever the host does; see [Remote execution](../usage/remote-execution.md) |
+
+**The helper.** It runs one program as `HELPER [--stdin] -- PROGRAM ARG...`
+(`crates/linch-tools/src/reaper.rs`, safe code) and is what a local command is
+started as when it is on. It is a *child subreaper*
+(`PR_SET_CHILD_SUBREAPER`): it starts the program (the shell) as the leader of
+its own process group, so every orphaned descendant is handed to the helper
+instead of to `init`, and it can list its children in
+`/proc/<pid>/task/<tid>/children`. Its stdin is a socket the server holds the
+other end of. The helper writes the shell's pid there as one line, right after
+starting it; the server reports that pid (so `kill <pid>` stops the command as
+it does without a helper) and signals the shell's group itself. When the shell
+exits, or the socket reaches end of file, the helper kills the shell's group,
+then its own children round after round, reaping as it goes, until none is
+left, and ends with the shell's exit code or signal. A timeout, a cancel, a
+dropped call, `BashKill` and `close_session` kill the shell's group at once and
+close the socket, and so does the server dying. `$PPID` inside a command is the
+helper. For a background command the shell also gets the socket, under the
+`LIFELINE` wrapper, so it dies with the server even if its helper was killed.
+
+If the helper is killed (by the command: `kill -9 $PPID`, which a `local` or
+`sandbox` command can do, since it runs as the same user and in the same
+Landlock domain, and the seccomp filter does not deny `kill`; or from outside),
+the server sees it end, kills the shell's group and ends the call, so the floor
+is the default's: what had already left the group survives, nothing else does.
+
+Where the helper comes from:
+
+- `linch-server` is its own helper, so the wheel and the release archive need
+  no second program. `main` calls `linch_tools::reaper::enter()` first, before
+  logging, arguments or the runtime: started as `linch-server --linch-reaper
+  -- PROGRAM ARG...` it runs the helper and exits; otherwise it offers its own
+  executable as the helper for the commands it starts. `LINCH_REAPER=1` turns
+  that on.
+- `LINCH_REAPER=/path/to/linch-reaper` turns on that program instead (the
+  `linch-reaper` binary built with `linch-tools`; it is not in the wheel).
+  Empty turns it off.
+- A Rust host calls `linch_tools::reaper::register(ReaperCommand { program,
+  args })` before its first command, which turns on its own helper, or
+  `enter()` to use its own executable as `linch-server` does. The choice is
+  process-wide because it names the host's executable, not anything one agent
+  owns. The Python extension (`linch-python`) does not run commands.
+- A helper that cannot start, or that exits without starting the shell (an
+  executable that does not know `--linch-reaper`, say), is passed over with one
+  warning in the log: the command runs as it does without one. A helper that
+  does not answer in 5 s fails the call, since it may be running the command.
+
+Starting a command under the helper waits for its first line, so
+`LocalShell::spawn` does it on a blocking thread, and the sandbox's own thread
+already is one. In the `sandbox` the helper runs inside the Landlock domain and
+the filter like the command, so its executable gets a read-and-execute rule;
+for `linch-server` that is the server binary itself, which a sandboxed command
+can therefore read and run (inside the same restrictions, with the command's
+environment).
+
+**Cost.** One more process per command. A `local` `true` (median of 200 spawns,
+release build, three interleaved rounds, the CPU between 0.8 and 2.5 GHz on a
+shared host with other builds running):
+
+| Helper | `local` `true` | `sandbox` `true` |
+|---|---|---|
+| off | 0.57 to 0.77 ms | 21.5 to 22.9 ms |
+| `linch-reaper` (350 KB) | 1.92 to 2.71 ms | 24.1 to 26.0 ms |
+| `linch-server --linch-reaper` (30 MB) | 3.48 to 4.15 ms | 25.3 to 28.2 ms |
+
+The server running itself costs 2.7 to 3.6 ms more per `local` command than no
+helper (the 350 KB program 1.2 to 2.1 ms), most of it the dynamic loading of a 30 MB executable (`linch-server
+--help` alone takes 2.0 to 3.2 ms), so it is off by default. A host that wants
+the cost lower ships the 350 KB program and names it in `LINCH_REAPER`.
+
+What the helper does not hold:
+
+- a process that is not a descendant: one started through another service
+  (`systemd-run --user`, `at`, `cron`, a D-Bus activation, `ssh localhost`);
+- what had left the group before the helper was killed (see above);
+- a kernel without `/proc/<pid>/task/<tid>/children`
+  (`CONFIG_PROC_CHILDREN`) or without `pidfd_open` (before 5.3): only the
+  shell's group is killed there;
+- a tree that forks faster than it can be killed for about two seconds, or a
+  process stuck in the kernel (uninterruptible sleep): the helper gives up and
+  the call ends after the reap timeout (2 s), with the shell's group killed.
+
+Mechanisms evaluated and not used: a subreaper on the server process itself (a
+process-wide attribute on the host, every orphan of every command and of other
+children is handed to it with nothing to tell which command it belongs to, and
+reaping them with `waitpid(-1)` would take the exit statuses of Tokio's own
+children); a hook between `fork` and `exec` that makes the command's parent a
+subreaper without a helper program (it needs `unsafe`, which this crate
+forbids, and forks the whole server: 0.5 ms to 1 ms more at a small heap and
+about 30 ms at 300 MiB, measured, so a server holding thousands of sessions
+would pay tens of milliseconds per command); a cgroup v2 leaf per command with
+`cgroup.kill` (it needs a delegated, writable cgroup, a `Delegate=yes` service
+unit, which a login session, a CI runner or a container does not give, and a
+command of the same user can move itself out of the leaf under `local`); a PID
+namespace (it needs a user namespace, refused where
+`kernel.apparmor_restrict_unprivileged_userns` is set, and the sandbox's
+filter refuses `CLONE_NEWPID` and `unshare`).
 
 ### Background Bash
 
@@ -322,12 +435,15 @@ never names a new process.
   to `Agent::close_session`), `Processes::close` and the registry's `Drop`
   (the agent closing). Each kills the whole group and waits for the reap.
 - **The lifeline.** A background command runs under a small `/bin/sh` wrapper
-  (`process.rs:36`) whose stdin is a pipe the server holds. A watchdog in the
-  command's group blocks on that pipe with the `read` builtin and kills the
-  group when it closes, which the kernel does when the server dies, even by
-  `SIGKILL`. It needs nothing on the command's `PATH`. A foreground command
-  has no lifeline: it dies with its call, but a server killed mid-call leaves
-  it running.
+  (`process.rs`, `LIFELINE`) whose stdin is a pipe the server holds. A watchdog
+  in the command's group blocks on that pipe with the `read` builtin and kills
+  the group when it closes, which the kernel does when the server dies, even
+  by `SIGKILL`. It needs nothing on the command's `PATH`. With the helper on,
+  its stdin is a socket instead and the helper also watches it, so every
+  command, foreground ones too, ends with the server (see
+  [What ends with a command](#what-ends-with-a-command)). A foreground command
+  with no helper has no lifeline: it dies with its call, but a server killed
+  mid-call leaves it running.
 - `BashOutput` (read scope, parallel) waits up to `wait_ms` (at most
   600 000, cut to the call's deadline) for the end, then returns the unread
   output; a running process is a success ending in `still running`, an ended
@@ -363,8 +479,9 @@ The shell seam is the crate-private `Shell` trait (`exec.rs:308`): `spawn`
 starts a `Launch` (command, root, `Bash`'s environment, session, whether it
 needs the lifeline) as the leader of a new process group with stdout and
 stderr piped, and returns the `Child` with an optional `Cleanup` to run after
-a kill. Everything after the spawn, `supervise` with its group kill, drain,
-reap, caps and lifeline pipe, is shared, so every backend keeps the
+a kill. Everything after the spawn, `supervise` with its group kill (and the
+helper's socket closed when there is one), drain, reap, caps and lifeline
+pipe, is shared, so every backend keeps the
 guarantees above and `Processes::start` (`bash/background.rs:139`) runs
 background commands through the same shell.
 
@@ -389,10 +506,11 @@ counts the user's tasks in `/proc` (`user_tasks`, `shell.rs:288`), restricts
 itself (`Rules::confine`, `shell.rs:61`), enters the Tokio runtime and
 spawns `prlimit --as --cpu --fsize --nproc -- /bin/sh ...`
 (`limits`, `shell.rs:179`); `prlimit` sets the limits and execs the shell,
-so the pid, the group and the lifeline's stdin stay. The server's own threads
+so the pid, the group and the helper's stdin stay. The server's own threads
 are never restricted, and no code runs between fork and exec, so the crate
-keeps `forbid(unsafe_code)`. If the call went away meanwhile, the thread
-kills the new group.
+keeps `forbid(unsafe_code)`. The command's helper, when on, is a separate
+program run inside the restricted thread's domain, not code in the server. If the call went
+away meanwhile, the thread stops the new command.
 
 - Landlock ABI 6 with `CompatLevel::HardRequirement`: handled file access,
   TCP bind and connect when the network is off, and the signal and abstract

@@ -18,13 +18,17 @@ grep-regex = "0.1.14"
 grep-searcher = "0.1.17"
 ignore = "0.4.34"
 linch-core = { path = "../linch-core" }
-rustix = { version = "1.1.6", features = ["process"] }
+# `event` is `poll`, for the `linch-reaper` helper, which also uses the
+# `process` calls (`pidfd_open`, subreaper, kill, wait).
+rustix = { version = "1.1.6", features = ["event", "process"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tempfile = "3.27.0"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["io-util", "macros", "process", "rt", "sync", "time"] }
 tokio-util = "0.7.20"
+# One warning when the helper cannot start.
+tracing = "0.1.44"
 
 # The sandbox backend: Landlock and a seccomp filter on the spawning thread.
 [target.'cfg(target_os = "linux")'.dependencies]

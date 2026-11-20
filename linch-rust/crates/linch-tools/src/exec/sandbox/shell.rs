@@ -5,7 +5,9 @@
 //! thread that first restricts itself; the server's other threads stay
 //! unrestricted, and no code runs between fork and exec. Rlimits are
 //! per process, so `prlimit` sets them and then execs the shell, keeping
-//! its pid, its process group and the lifeline's stdin.
+//! its pid, its process group and the helper's stdin. The helper that
+//! ends what a command started (see `crate::reaper`) is a separate program
+//! run inside the same restrictions.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::DirBuilder;
@@ -21,14 +23,14 @@ use landlock::{
     RulesetCreatedAttr, RulesetStatus, Scope, path_beneath_rules,
 };
 use linch_core::SessionId;
-use rustix::process::{Pid, Signal, kill_process_group};
 use tempfile::TempDir;
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 
 use super::{ETC_READ_PATHS, SYSTEM_READ_PATHS, SandboxPolicy, seccomp};
 use crate::bash::process::{self, Spawned, Started};
+use crate::bash::supervisor;
 use crate::exec::{ExecutionError, Launch, Shell};
 
 /// Devices a command may read and write.
@@ -53,6 +55,9 @@ struct Rules {
     network: bool,
     root: PathBuf,
     read: Vec<PathBuf>,
+    /// The `linch-reaper` helper every command runs under, if found: it
+    /// must be executable inside the sandbox.
+    reaper: Option<PathBuf>,
 }
 
 impl Rules {
@@ -80,6 +85,11 @@ impl Rules {
             ))
             .map_err(error)?
             .add_rules(path_beneath_rules(DEVICES, AccessFs::from_file(LANDLOCK)))
+            .map_err(error)?
+            .add_rules(path_beneath_rules(
+                &self.reaper,
+                AccessFs::Execute | AccessFs::ReadFile,
+            ))
             .map_err(error)?
             .add_rules(path_beneath_rules(
                 [self.root.as_path(), home],
@@ -144,6 +154,7 @@ impl SandboxShell {
             network: policy.network,
             root: root.to_path_buf(),
             read,
+            reaper: supervisor::program().map(|helper| helper.program.clone()),
         });
         let scratch = tempfile::Builder::new()
             .prefix("linch-sandbox-")
@@ -250,18 +261,15 @@ impl Shell for SandboxShell {
         std::thread::Builder::new()
             .name("linch-sandbox".into())
             .spawn(move || {
-                if let Err(Ok(child)) = sent.send(job.run(&handle)) {
+                if let Err(Ok(spawned)) = sent.send(job.run(&handle)) {
                     // The call went away while the command started.
-                    kill(&child);
+                    process::abandon(spawned);
                 }
             })?;
-        let child = received
+        let spawned = received
             .await
             .map_err(|_| io::Error::other("the sandbox spawner thread ended early"))??;
-        Ok(Started::Process(Spawned {
-            child,
-            cleanup: None,
-        }))
+        Ok(Started::Process(spawned))
     }
 
     fn close_session(&self, session: &SessionId) {
@@ -298,17 +306,20 @@ struct Job {
 impl Job {
     /// On a fresh thread: make the home, count the user's tasks, restrict
     /// this thread, and start `prlimit` (which execs the shell).
-    fn run(self, handle: &Handle) -> io::Result<Child> {
+    fn run(self, handle: &Handle) -> io::Result<Spawned> {
         DirBuilder::new()
             .recursive(true)
             .mode(0o700)
             .create(&self.home)?;
-        let limits = limits(&self.policy, user_tasks());
+        // The helper the command runs under is a process too, but not the
+        // command's.
+        let helper = u64::from(supervisor::program().is_some());
+        let limits = limits(&self.policy, user_tasks().saturating_add(helper));
         self.rules.confine(&self.home).map_err(io::Error::other)?;
         let _runtime = handle.enter();
         let mut command = Command::new(&self.prlimit);
         command.args(&limits).args(&self.shell);
-        process::start(command, &self.cwd, &self.env, self.lifeline)
+        process::start_shell(command, &self.cwd, &self.env, self.lifeline)
     }
 }
 
@@ -381,17 +392,6 @@ fn unprivileged(status: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Kill the group a started command leads.
-fn kill(child: &Child) {
-    let pid = (child.id())
-        .and_then(|id| i32::try_from(id).ok())
-        .filter(|&id| id > 1)
-        .and_then(Pid::from_raw);
-    if let Some(pid) = pid {
-        let _ = kill_process_group(pid, Signal::KILL);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::os::unix::process::ExitStatusExt;
@@ -420,14 +420,16 @@ mod tests {
             idempotency_key: None,
             lifeline: true,
         };
-        let Spawned { mut child, .. } = shell.spawn(launch).await.unwrap().into_process();
-        let mut held = child.stdin.take();
+        let Spawned {
+            mut child, helper, ..
+        } = shell.spawn(launch).await.unwrap().into_process();
+        let held = (child.stdin.take(), helper);
         let alive = tokio::time::timeout(Duration::from_millis(300), child.wait()).await;
         assert!(
             alive.is_err(),
             "the command runs while the lifeline is held"
         );
-        held.take();
+        drop(held);
         let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
             .await
             .expect("the watchdog killed the group")
@@ -448,7 +450,12 @@ mod tests {
             idempotency_key: None,
             lifeline: false,
         };
-        let child = shell.spawn(launch).await.unwrap().into_process().child;
+        let Spawned {
+            mut child, helper, ..
+        } = shell.spawn(launch).await.unwrap().into_process();
+        // Closing the helper's socket (or `wait_with_output` closing stdin)
+        // stops a supervised command.
+        let _held = (child.stdin.take(), helper);
         let out = child.wait_with_output().await.unwrap();
         let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
         text.push_str(&String::from_utf8_lossy(&out.stderr));

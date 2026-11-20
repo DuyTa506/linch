@@ -54,7 +54,10 @@ nó vẫn luôn có.
 Mỗi lệnh được fork từ một thread tồn tại ngắn, thread này trước tiên tự giới hạn mình
 bằng Landlock và một bộ lọc seccomp; process con kế thừa cả hai, còn các thread khác
 của server không bị giới hạn. Sau đó `prlimit` đặt các giới hạn và exec `/bin/sh`, giữ
-nguyên process group và lifeline của lệnh nền.
+nguyên process group. Khi chương trình phụ trợ `linch-reaper` tùy chọn bật (xem
+[Những gì kết thúc cùng một lệnh](#những-gì-kết-thúc-cùng-một-lệnh)), lệnh chạy dưới nó, và
+chương trình phụ trợ cũng nằm trong cả hai giới hạn; với `linch-server` tự làm chương trình
+phụ trợ, điều đó đưa tệp thực thi của server vào danh sách đọc và thực thi của lệnh.
 
 | Trường | Mặc định | Đặt gì |
 |---|---|---|
@@ -156,6 +159,43 @@ giữ chúng.
   UDP, kể cả các dịch vụ trên `localhost`.
 - Các tool tệp, MCP stdio server và backend đĩa của hệ thống tệp ảo vẫn chạy trong
   hoặc từ server như trước; sandbox dành cho `Bash`.
+
+### Những gì kết thúc cùng một lệnh
+
+Process group của một lệnh không giữ được nó: một process gọi `setsid` hoặc `setpgid` sẽ rời
+group, và một process double-fork được giao cho `init`. Những gì kết thúc khi một lệnh
+thoát, hết timeout, bị hủy hay bị kill, hoặc session của nó đóng, phụ thuộc vào nền tảng và
+vào một chương trình phụ trợ **tắt theo mặc định**:
+
+| | `local` và `sandbox`, mặc định (chương trình phụ trợ tắt) | `local` và `sandbox` trên Linux, chương trình phụ trợ bật | `docker` |
+|---|---|---|---|
+| Process group của lệnh | có | có | có (của client) |
+| Một descendant đã rời group (`setsid`, `setpgid`) | không | có | có (container bị xóa) |
+| Một daemon double-fork, một process bỏ qua `SIGTERM` | không | có | có (container bị xóa) |
+| Một process không do lệnh khởi động (`systemd-run --user`, `at`, `cron`, một D-Bus activation) | không | không | có (không có gì chạy trên host) |
+| Server chết, kể cả bằng `SIGKILL` | group của lệnh nền | mọi lệnh | có |
+
+Khi mặc định giữ một lệnh bằng process group của nó, một process rời group sống lâu hơn lời
+gọi, và trong sandbox nó được tính vào khoảng dư `max_processes` của lệnh kế tiếp.
+
+Chương trình phụ trợ, `linch-reaper`, là một chương trình nhỏ chạy mỗi lệnh cục bộ, giữ những
+gì lệnh để lại (một child subreaper, với danh sách con trong `/proc`) và kill chúng; nó chạy
+không cần đặc quyền và không cần cgroup hay namespace. Bật nó bằng `LINCH_REAPER=1` với
+`linch-server`, vốn tự chạy chính mình làm chương trình phụ trợ (không cần phân phối thêm
+gì), hoặc `LINCH_REAPER=/path/to/linch-reaper` để chỉ tới một chương trình; `LINCH_REAPER=`
+(rỗng) tắt nó, và một host Rust có thể bật chương trình phụ trợ của riêng mình bằng
+`linch_tools::reaper::register`. Nó tắt theo mặc định vì mỗi lệnh tốn thêm một process: một
+`true` `local` mất trung vị 0,6 đến 0,8 ms khi không có nó, 1,9 đến 2,7 ms với `linch-reaper`
+350 KB và 3,5 đến 4,2 ms với `linch-server` làm chương trình phụ trợ của chính nó (một tệp
+thực thi 30 MB phải nạp); sandbox đi từ 21,5 đến 22,9 ms lên 24 đến 26 ms và 25 đến 28 ms (bản
+release, 200 lần spawn mỗi vòng, CPU 0,8 đến 2,5 GHz trên một host dùng chung).
+
+Khi chương trình phụ trợ bật, `$PPID` trong một lệnh là chương trình phụ trợ, và một lệnh có
+thể kill nó (nó chạy cùng user, trong cùng domain Landlock, và bộ lọc seccomp không chặn
+`kill`): khi đó server vẫn kill process group của shell và kết thúc lời gọi, nhưng những gì
+đã rời group trước đó sống sót. Trên một kernel không có `/proc/<pid>/task/<tid>/children`
+hoặc `pidfd_open` (trước 5.3) chỉ process group bị kill. Thiết kế và các cơ chế không dùng
+nằm ở [Bash](../architecture/tools.md#những-gì-kết-thúc-cùng-một-lệnh).
 
 ## Backend `docker`
 
@@ -272,10 +312,11 @@ cập được docker), nên CI không có docker vẫn xanh.
 | Giới hạn bộ nhớ, thời gian CPU, cỡ tệp lỗi bên trong lệnh | n/a | có | chỉ bộ nhớ |
 | Fork bomb bị chặn và run sống sót | n/a | có | có |
 | Mạng tắt theo mặc định | n/a | có | có |
-| Timeout giết cả cây tiến trình, không mồ côi | có | có | có |
+| Timeout kill process group của lệnh (với `docker` là container) | có | có | có |
+| Timeout cũng kết thúc process đã rời group (`setsid`, một daemon) | chỉ khi chương trình phụ trợ bật | chỉ khi chương trình phụ trợ bật | có |
 | Luồng 100 MB bị cắt và bộ nhớ server vẫn nhỏ | có | có | có |
-| Hủy run không để lại tiến trình hay container | có | có | có |
-| `kill -9` server không để lại tiến trình (lệnh nền với `local` và `sandbox`) hay container | có | có | có |
+| Hủy run không để lại tiến trình của group lệnh hay container | có | có | có |
+| `kill -9` server không để lại tiến trình (lệnh nền; mọi lệnh khi chương trình phụ trợ bật) hay container | có | có | có |
 | `docker inspect` cho thấy user, capability bị bỏ, giới hạn, root chỉ đọc, mạng và một mount duy nhất | n/a | n/a | có |
 
 Các case `sandbox` và `local` chạy khi đặt `LINCH_SERVER_BIN`:

@@ -1876,6 +1876,7 @@ dependencies = [
  "hyper-util",
  "linch",
  "linch-rpc",
+ "linch-tools",
  "linch-worker",
  "rustix",
  "serde",
@@ -1911,6 +1912,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+ "tracing",
 ]
 
 [[package]]

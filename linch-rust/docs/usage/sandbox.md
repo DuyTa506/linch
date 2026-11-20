@@ -56,7 +56,11 @@ backend adds nothing, so its contract is the one it always had.
 Each command is forked from a short-lived thread that first restricts
 itself with Landlock and a seccomp filter; the child inherits both, and the
 server's other threads stay unrestricted. `prlimit` then sets the limits and
-execs `/bin/sh`, keeping the process group and the background lifeline.
+execs `/bin/sh`, keeping the process group. With the optional `linch-reaper`
+helper on (see [What ends with a command](#what-ends-with-a-command)) the
+command runs under it, and the helper is inside both restrictions too; for
+`linch-server` as its own helper that puts the server executable on the
+command's read-and-execute list.
 
 | Field | Default | What it sets |
 |---|---|---|
@@ -171,6 +175,47 @@ ambient set, since a command would keep them.
   UDP, including services on `localhost`.
 - The file tools, MCP stdio servers and the virtual filesystem's disk
   backend run in or from the server as before; the sandbox is for `Bash`.
+
+### What ends with a command
+
+A command's own process group does not hold it: a process that calls `setsid`
+or `setpgid` leaves the group, and one that double-forks is handed to `init`.
+What ends when a command exits, times out, is cancelled or killed, or its
+session closes, depends on the platform and on a helper that is **off by
+default**:
+
+| | `local` and `sandbox`, default (helper off) | `local` and `sandbox` on Linux, helper on | `docker` |
+|---|---|---|---|
+| The command's process group | yes | yes | yes (the client's) |
+| A descendant that left the group (`setsid`, `setpgid`) | no | yes | yes (the container is removed) |
+| A double-forked daemon, a process that ignores `SIGTERM` | no | yes | yes (the container is removed) |
+| A process not started by the command (`systemd-run --user`, `at`, `cron`, a D-Bus activation) | no | no | yes (nothing runs on the host) |
+| The server dying, even by `SIGKILL` | a background command's group | every command | yes |
+
+Where the default holds a command by its process group, a process that leaves
+the group outlives the call, and in the sandbox it counts against the next
+command's `max_processes` headroom.
+
+The helper, `linch-reaper`, is a small program that runs each local command,
+holds what it leaves behind (a child subreaper, with the children list in
+`/proc`) and kills it; it works unprivileged and needs no cgroup or namespace.
+Turn it on with `LINCH_REAPER=1` for `linch-server`, which runs itself as the
+helper (nothing extra to ship), or `LINCH_REAPER=/path/to/linch-reaper` to name
+a program; `LINCH_REAPER=` (empty) turns it off, and a Rust host can turn on its
+own helper with `linch_tools::reaper::register`. It is off by default because
+it costs a process per command: a `local` `true` takes a median of 0.6 to
+0.8 ms without it, 1.9 to 2.7 ms with the 350 KB `linch-reaper` and 3.5 to
+4.2 ms with `linch-server` as its own helper (a 30 MB executable to load); the
+sandbox goes from 21.5 to 22.9 ms to 24 to 26 ms and 25 to 28 ms (release
+build, 200 spawns a round, CPU at 0.8 to 2.5 GHz on a shared host).
+
+With the helper on, `$PPID` inside a command is the helper, and a command can
+kill it (it runs as the same user, in the same Landlock domain, and the seccomp
+filter does not deny `kill`): the server then still kills the shell's process
+group and ends the call, but what had already left the group survives. On a
+kernel without `/proc/<pid>/task/<tid>/children` or `pidfd_open` (before 5.3)
+only the process group is killed. The design and the mechanisms not used are
+in [Bash](../architecture/tools.md#what-ends-with-a-command).
 
 ## The `docker` backend
 
@@ -296,10 +341,11 @@ docker stays green.
 | Memory, CPU time and file size limits fail inside the command | n/a | yes | memory only |
 | A fork bomb stays bounded and the run survives | n/a | yes | yes |
 | The network is off by default | n/a | yes | yes |
-| A timeout kills the whole process tree, no orphan | yes | yes | yes |
+| A timeout kills the command's process group (the container for `docker`) | yes | yes | yes |
+| A timeout also ends a process that left the group (`setsid`, a daemon) | only with the helper on | only with the helper on | yes |
 | A 100 MB stream is capped and the server's memory stays small | yes | yes | yes |
-| Cancelling a run leaves no process and no container | yes | yes | yes |
-| `kill -9` of the server leaves no process (background command for `local` and `sandbox`) and no container | yes | yes | yes |
+| Cancelling a run leaves no process of the command's group and no container | yes | yes | yes |
+| `kill -9` of the server leaves no process (a background command; any command with the helper on) and no container | yes | yes | yes |
 | `docker inspect` shows the user, dropped capabilities, limits, read-only root, network and the one mount | n/a | n/a | yes |
 
 The `sandbox` and `local` cases run with `LINCH_SERVER_BIN` set:

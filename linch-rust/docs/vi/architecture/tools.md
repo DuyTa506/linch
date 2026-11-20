@@ -285,10 +285,11 @@ thứ mà user của process truy cập được. Hãy dùng permission engine (
 Những gì nó bảo đảm dưới mọi backend:
 
 - stdin bị đóng và lệnh dẫn đầu một process group mới
-  (`crates/linch-tools/src/bash/process.rs:159-195`);
-- cả group nhận `SIGKILL` khi timeout, khi hủy, khi future của lời gọi
-  bị drop, và khi shell thoát, nên các job nền không bao giờ sống lâu hơn
-  lời gọi (`process.rs:199-271`);
+  (`crates/linch-tools/src/bash/process.rs`);
+- những gì lệnh đã khởi động kết thúc cùng nó, khi timeout, khi hủy, khi future của
+  lời gọi bị drop, và khi shell thoát, nên các job nền không sống lâu hơn lời gọi.
+  Phạm vi của việc đó phụ thuộc vào nền tảng (xem
+  [Những gì kết thúc cùng một lệnh](#những-gì-kết-thúc-cùng-một-lệnh));
 - chỉ chín biến của host được truyền qua (`PATH`, `HOME`, `TERM`, `LANG`,
   `LC_ALL`, `LC_CTYPE`, `USER`, `SHELL`, `TMPDIR`), nên thông tin xác thực của host
   nằm ngoài môi trường (`bash.rs:51`); `with_env` thêm các biến khác (`bash.rs:153`);
@@ -300,6 +301,108 @@ Những gì nó bảo đảm dưới mọi backend:
   (`bash/capture.rs:5-8`);
 - mọi exit status khác 0 là một kết quả lỗi mang cùng văn bản, với mã
   `exit_status`, `timeout` hoặc `aborted` (`bash.rs:309-326`).
+
+#### Những gì kết thúc cùng một lệnh
+
+Một process group không giữ được một lệnh: một descendant gọi `setsid` hoặc `setpgid` sẽ
+rời khỏi nó, và một process double-fork được giao cho `init` khi cha của nó thoát. Vì vậy
+những gì `local` và `sandbox` bảo đảm phụ thuộc vào nền tảng và vào một chương trình phụ
+trợ **tắt theo mặc định**, nên cấu hình được phân phối (`linch-server` từ wheel hoặc từ
+archive release, không đặt gì) giữ một lệnh bằng process group của nó:
+
+| Ở đâu | Những gì kết thúc cùng lệnh |
+|---|---|
+| Mặc định: chương trình phụ trợ tắt (Linux, macOS) | Process group của shell, bị kill khi hết timeout, hủy, lời gọi bị drop, shell thoát, `BashKill`, `close_session` và registry bị drop. Một process gọi `setsid` hoặc `setpgid`, hay double-fork, sống lâu hơn lời gọi. Group của lệnh nền cũng bị kill khi server chết, kể cả bằng `SIGKILL` (wrapper `LIFELINE`); lệnh foreground thì không |
+| Linux, chương trình phụ trợ bật (`LINCH_REAPER=1` cho `linch-server`, hoặc một host đăng ký một chương trình) | Mọi descendant: những process trong group, những process đã rời nó, và những process đã được giao cho `init`, có bỏ qua `SIGTERM` hay không. Trong cùng các tình huống đó, và khi server chết, kể cả bằng `SIGKILL` (cả lệnh foreground) |
+| `docker` | Container, bị xóa bằng `docker rm -f` (và group của client); không có gì của lệnh chạy trên host |
+| `remote` | Những gì host làm; xem [Remote execution](../usage/remote-execution.md) |
+
+**Chương trình phụ trợ.** Nó chạy một chương trình dưới dạng
+`HELPER [--stdin] -- PROGRAM ARG...` (`crates/linch-tools/src/reaper.rs`, code an toàn) và
+là thứ một lệnh cục bộ được khởi động như thế khi nó bật. Nó là một *child subreaper*
+(`PR_SET_CHILD_SUBREAPER`): nó khởi động chương trình (shell) làm leader của process group
+riêng, nên mọi descendant mồ côi được giao cho nó thay vì `init`, và nó liệt kê được các con
+của mình trong `/proc/<pid>/task/<tid>/children`. Stdin của nó là một socket mà server giữ
+đầu kia. Chương trình phụ trợ ghi pid của shell vào đó thành một dòng, ngay sau khi khởi
+động shell; server báo pid đó (nên `kill <pid>` dừng lệnh như khi không có chương trình phụ
+trợ) và tự gửi signal tới group của shell. Khi shell thoát, hoặc socket tới cuối tệp, chương
+trình phụ trợ kill group của shell, rồi kill các con của mình hết vòng này đến vòng khác, vừa
+kill vừa reap, cho tới khi không còn con nào, rồi kết thúc với exit code hoặc signal của
+shell. Hết timeout, hủy, lời gọi bị drop, `BashKill` và `close_session` kill group của shell
+ngay và đóng socket, server chết cũng vậy. `$PPID` trong một lệnh là chương trình phụ trợ.
+Với lệnh nền, shell cũng nhận socket đó, dưới wrapper `LIFELINE`, nên nó chết cùng server
+ngay cả khi chương trình phụ trợ của nó đã bị kill.
+
+Nếu chương trình phụ trợ bị kill (bởi lệnh: `kill -9 $PPID`, việc mà một lệnh `local` hay
+`sandbox` làm được, vì nó chạy cùng user và trong cùng domain Landlock, và bộ lọc seccomp
+không chặn `kill`; hoặc từ bên ngoài), server thấy nó kết thúc, kill group của shell và kết
+thúc lời gọi, nên mức sàn là mức mặc định: những gì đã rời group trước đó sống sót, không gì
+khác.
+
+Chương trình phụ trợ đến từ đâu:
+
+- `linch-server` tự là chương trình phụ trợ của mình, nên wheel và archive release không cần
+  chương trình thứ hai. `main` gọi `linch_tools::reaper::enter()` đầu tiên, trước logging,
+  tham số và runtime: được khởi động dưới dạng `linch-server --linch-reaper -- PROGRAM ARG...`
+  thì nó chạy chương trình phụ trợ rồi thoát; nếu không thì nó đề xuất chính tệp thực thi của
+  mình làm chương trình phụ trợ cho các lệnh nó khởi động. `LINCH_REAPER=1` bật việc đó.
+- `LINCH_REAPER=/path/to/linch-reaper` bật chương trình đó thay thế (binary `linch-reaper`
+  được build cùng `linch-tools`; nó không có trong wheel). Rỗng thì tắt.
+- Một host Rust gọi `linch_tools::reaper::register(ReaperCommand { program, args })` trước
+  lệnh đầu tiên, việc này bật chương trình phụ trợ của chính host, hoặc gọi `enter()` để dùng
+  tệp thực thi của mình như `linch-server`. Lựa chọn này áp dụng cho cả process vì nó chỉ tới
+  tệp thực thi của host, không phải thứ thuộc về một agent. Extension Python
+  (`linch-python`) không chạy lệnh.
+- Một chương trình phụ trợ không khởi động được, hoặc thoát mà không khởi động shell (một tệp
+  thực thi không biết `--linch-reaper`, chẳng hạn), bị bỏ qua với một cảnh báo trong log: lệnh
+  chạy như khi không có nó. Một chương trình phụ trợ không trả lời trong 5 s làm lời gọi thất
+  bại, vì nó có thể đang chạy lệnh.
+
+Khởi động một lệnh dưới chương trình phụ trợ phải chờ dòng đầu của nó, nên
+`LocalShell::spawn` làm việc đó trên một thread blocking, còn thread của sandbox vốn đã là
+một thread như vậy. Trong `sandbox`, chương trình phụ trợ chạy bên trong domain Landlock và bộ
+lọc như lệnh, nên tệp thực thi của nó có một rule đọc và thực thi; với `linch-server` đó là
+chính binary của server, nên một lệnh trong sandbox đọc và chạy được nó (bên trong cùng các
+hạn chế, với môi trường của lệnh).
+
+**Chi phí.** Thêm một process cho mỗi lệnh. Một `true` `local` (trung vị của 200 lần spawn,
+bản release, ba vòng xen kẽ, CPU từ 0,8 đến 2,5 GHz trên một host dùng chung có các build khác
+đang chạy):
+
+| Chương trình phụ trợ | `true` `local` | `true` `sandbox` |
+|---|---|---|
+| tắt | 0,57 đến 0,77 ms | 21,5 đến 22,9 ms |
+| `linch-reaper` (350 KB) | 1,92 đến 2,71 ms | 24,1 đến 26,0 ms |
+| `linch-server --linch-reaper` (30 MB) | 3,48 đến 4,15 ms | 25,3 đến 28,2 ms |
+
+Server tự chạy chính mình tốn thêm 2,7 đến 3,6 ms mỗi lệnh `local` so với không có chương
+trình phụ trợ (chương trình 350 KB là 1,2 đến 2,1 ms), phần lớn là do nạp động một tệp thực
+thi 30 MB (riêng `linch-server --help` mất 2,0 đến 3,2 ms), nên nó tắt theo mặc định. Một
+host muốn chi phí thấp hơn phân phối chương trình 350 KB và chỉ tới nó trong `LINCH_REAPER`.
+
+Những gì chương trình phụ trợ không giữ được:
+
+- một process không phải descendant: process được khởi động qua một dịch vụ khác
+  (`systemd-run --user`, `at`, `cron`, một D-Bus activation, `ssh localhost`);
+- những gì đã rời group trước khi chương trình phụ trợ bị kill (xem trên);
+- một kernel không có `/proc/<pid>/task/<tid>/children` (`CONFIG_PROC_CHILDREN`) hoặc không
+  có `pidfd_open` (trước 5.3): ở đó chỉ group của shell bị kill;
+- một cây fork nhanh hơn khả năng kill trong khoảng hai giây, hoặc một process kẹt trong
+  kernel (uninterruptible sleep): nó bỏ cuộc và lời gọi kết thúc sau timeout reap (2 s), với
+  group của shell bị kill.
+
+Các cơ chế đã được đánh giá và không dùng: subreaper trên chính process server (một thuộc
+tính toàn process của host, mọi process mồ côi của mọi lệnh và của các con khác được giao cho
+nó mà không có gì cho biết nó thuộc lệnh nào, và reap chúng bằng `waitpid(-1)` sẽ lấy mất
+exit status của các con của Tokio); một hook giữa `fork` và `exec` biến cha của lệnh thành
+subreaper mà không cần chương trình phụ trợ (cần `unsafe`, mà crate này cấm, và fork cả
+server: thêm 0,5 ms đến 1 ms với heap nhỏ và khoảng 30 ms ở 300 MiB, đã đo, nên một server
+giữ hàng nghìn session sẽ trả hàng chục mili giây cho mỗi lệnh); một cgroup v2 leaf cho mỗi
+lệnh với `cgroup.kill` (cần một cgroup được ủy quyền và ghi được, một service unit có
+`Delegate=yes`, mà một login session, một CI runner hay một container không có, và một lệnh
+của cùng user có thể tự chuyển ra khỏi leaf dưới `local`); một PID namespace (cần user
+namespace, bị từ chối ở nơi đặt `kernel.apparmor_restrict_unprivileged_userns`, và bộ lọc của
+sandbox từ chối `CLONE_NEWPID` và `unshare`).
 
 ### Bash chạy nền
 
@@ -318,12 +421,15 @@ tới một process mới.
 - Nó kết thúc khi thoát, khi hết timeout, bởi `BashKill`, `Processes::close_session`
   (nối với `Agent::close_session`), `Processes::close` và `Drop` của registry
   (agent đóng). Mỗi cách đều kill cả group và chờ reap.
-- **Lifeline.** Một lệnh chạy nền chạy dưới một wrapper `/bin/sh` nhỏ
-  (`process.rs:36`) có stdin là một pipe do server giữ. Một watchdog trong group của
-  lệnh chặn trên pipe đó bằng builtin `read` và kill group khi nó đóng, việc kernel làm
-  khi server chết, kể cả bằng `SIGKILL`. Nó không cần gì trên `PATH` của lệnh. Một lệnh
-  foreground không có lifeline: nó chết cùng lời gọi của nó, nhưng một server bị kill
-  giữa lời gọi để lệnh đó chạy tiếp.
+- **Lifeline.** Một lệnh chạy nền chạy dưới một wrapper `/bin/sh` nhỏ (`process.rs`,
+  `LIFELINE`) mà stdin là một pipe do server giữ. Một watchdog trong group của lệnh chặn trên
+  pipe đó bằng builtin `read` và kill group khi nó đóng, việc kernel làm khi server chết, kể
+  cả bằng `SIGKILL`. Nó không cần gì trên `PATH` của lệnh. Khi chương trình phụ trợ bật, stdin
+  của nó là một socket và chương trình phụ trợ cũng theo dõi socket đó, nên mọi lệnh, cả lệnh
+  foreground, kết thúc cùng server (xem
+  [Những gì kết thúc cùng một lệnh](#những-gì-kết-thúc-cùng-một-lệnh)). Một lệnh foreground
+  không có chương trình phụ trợ không có lifeline: nó chết cùng lời gọi, nhưng một server bị
+  kill giữa lời gọi để lệnh đó chạy tiếp.
 - `BashOutput` (scope read, chạy song song) chờ tối đa `wait_ms` (nhiều nhất
   600 000, bị cắt theo deadline của lời gọi) cho tới khi kết thúc, rồi trả về đầu ra
   chưa đọc; một process đang chạy là một kết quả thành công kết thúc bằng
@@ -359,7 +465,8 @@ Seam của shell là trait `Shell` riêng của crate (`exec.rs:308`): `spawn` k
 `Launch` (lệnh, root, môi trường của `Bash`, session, có cần lifeline hay không) làm
 leader của một process group mới với stdout và stderr được pipe, và trả về `Child`
 cùng một `Cleanup` tùy chọn để chạy sau khi kill. Mọi thứ sau spawn, `supervise` với
-việc kill group, drain, reap, mức trần và pipe lifeline, đều dùng chung, nên mọi
+việc kill group (và đóng socket của chương trình phụ trợ khi có), drain, reap, mức trần
+và pipe lifeline, đều dùng chung, nên mọi
 backend giữ các bảo đảm ở trên và `Processes::start` (`bash/background.rs:139`) chạy
 các lệnh nền qua cùng shell đó.
 
@@ -382,9 +489,10 @@ thừa cả hai. `SandboxShell::spawn` (`sandbox/shell.rs:198`) giao mỗi lện
 (`user_tasks`, `shell.rs:288`), tự giới hạn mình (`Rules::confine`, `shell.rs:61`),
 vào runtime Tokio và spawn `prlimit --as --cpu --fsize --nproc -- /bin/sh ...`
 (`limits`, `shell.rs:179`); `prlimit` đặt các giới hạn rồi exec shell, nên pid,
-group và stdin của lifeline được giữ nguyên. Các thread của chính server không bao giờ
+group và stdin của chương trình phụ trợ được giữ nguyên. Các thread của chính server không bao giờ
 bị giới hạn, và không có code nào chạy giữa fork và exec, nên crate giữ
-`forbid(unsafe_code)`. Nếu lời gọi đã biến mất trong lúc đó, thread kill group mới.
+`forbid(unsafe_code)`. Chương trình phụ trợ của lệnh, khi bật, là một chương trình riêng chạy
+bên trong domain của thread bị giới hạn, không phải code trong server. Nếu lời gọi đã biến mất trong lúc đó, thread dừng lệnh mới.
 
 - Landlock ABI 6 với `CompatLevel::HardRequirement`: truy cập tệp được xử lý, TCP bind
   và connect khi mạng tắt, cùng các scope signal và abstract Unix socket. `open` chạy
