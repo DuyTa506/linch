@@ -253,7 +253,7 @@ shell for `Bash`; see [Execution backends](#execution-backends)), sharing one
 
 Grep and Glob skip ignored files and do not follow symlinks; Grep also skips
 hidden and binary files, and Glob lists hidden files only when the pattern
-names a dot segment (`crates/linch-tools/src/fs.rs:232-248`).
+names a dot segment (`crates/linch-tools/src/fs.rs:239-255`).
 
 ### Read before write
 
@@ -267,17 +267,42 @@ session ends (`tracker.rs:65`).
 
 ### Confinement
 
-Every file tool goes through the `ExecutionFs` trait (`fs.rs:209`), so a
+Every file tool goes through the `ExecutionFs` trait (`fs.rs:216`), so a
 remote execution world can replace `LocalFs` without changing the tools.
-`LocalFs` (`crates/linch-tools/src/fs/local.rs:26`) canonicalizes the root
-once; `new` is blocking, so call it before the runtime starts or from a
-blocking task. Each path is resolved by canonicalizing its longest existing
-prefix; the rest may only hold plain names (`local.rs:68-72`). `..`, absolute
-paths outside the root and symlinks that lead out are refused with
-`FsError::Escape`. Paths returned are workspace paths: relative, `/`-separated,
-symlinks resolved, so one file has one name. The check guards path arguments;
-it does not stop a concurrent process from swapping a symlink between check
-and use. Blocking file work runs on Tokio's blocking pool.
+`LocalFs` (`crates/linch-tools/src/fs/local.rs`) canonicalizes the root once
+and keeps a directory descriptor of it; `new` is blocking, so call it before
+the runtime starts or from a blocking task. A path is never handed to the
+kernel whole. `fs/beneath.rs` walks it one name at a time from that
+descriptor with `openat(O_NOFOLLOW)`: a symlink is read and its target is
+spliced into the names still to walk (an absolute target must start with the
+canonical root, at most 40 links), and `..` pops a directory the walk holds
+open, never the kernel's `..`. `Read` opens the file through its parent's
+descriptor and stats the open file; `Write` makes missing directories with
+`mkdirat`, creates the temporary file in the target's directory with
+`O_EXCL` and moves it with `renameat`. `..`, absolute paths outside the
+root and symlinks that lead out are refused with `FsError::Escape`, and so
+is a dangling symlink, because writing there would create its target. Paths
+returned are workspace paths: relative, `/`-separated, symlinks resolved, so
+one file has one name. A path goes down at most 128 directories, and each
+directory on it must be readable, not only searchable. Blocking
+file work runs on Tokio's blocking pool.
+
+What this guarantees: a process that shares the workspace (a `Bash` command
+under `sandbox` or `docker`) and swaps a directory or a file for a symlink,
+or renames a directory, between any two steps of a call cannot make the call
+leave the root. The directory in hand is always one the walk opened beneath
+the root, and a swapped name is refused by `O_NOFOLLOW` where it is next
+opened. `Grep`, `Glob` and `DiskBackend::ls` list names with `ignore`'s walk
+(gitignore, types and globs need it), which reads directories by name, so a
+listing may come from a directory swapped in meanwhile; a name is searched or
+returned only after it is opened again from the root descriptor with no
+symlink allowed, so nothing from outside the root is read or reported. Not
+covered: hard links (a second name inside the root for a file outside it
+reads as that file; a write replaces the name and leaves the other file's
+content alone), mounts inside the root, and the root directory itself being
+moved or replaced (the descriptor stays on the directory `new` opened). The
+walk uses only POSIX `*at` calls through `rustix`, so there is no
+Linux-only fallback to keep; it has not been built or tested on macOS.
 
 ### Bash
 

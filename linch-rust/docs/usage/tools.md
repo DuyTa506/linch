@@ -325,7 +325,10 @@ status: final
   at every position and needs the whole file read), and the first line must
   have been read.
 - **Confinement.** Paths are relative to the workspace. `..`, absolute paths
-  outside it and symlinks that lead out are refused.
+  outside it and symlinks that lead out are refused, also when another
+  process swaps a directory for a symlink while the call runs. Hard links to
+  files outside the workspace are not covered
+  ([Confinement](../architecture/tools.md#confinement)).
 - **`Bash` is not confined by default.** With the default `local` backend it
   starts in the workspace but can reach anything the server's user can;
   `execution` runs it in a sandbox or a container instead

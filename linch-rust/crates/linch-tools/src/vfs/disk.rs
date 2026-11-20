@@ -138,7 +138,7 @@ impl FileBackend for DiskBackend {
 
     async fn ls(&self, prefix: &str) -> Result<Vec<String>, VfsError> {
         let prefix = normalize_path(prefix)?;
-        let mut found = self.blocking(|fs| Ok(walk(fs.root()))).await?;
+        let mut found = self.blocking(|fs| Ok(walk(&fs))).await?;
         found.retain(|path| is_under(path, &prefix));
         found.sort();
         Ok(found)
@@ -158,42 +158,30 @@ impl FileBackend for DiskBackend {
     async fn delete(&self, path: &str) -> Result<(), VfsError> {
         let (normal, relative) = paths(path)?;
         let _writing = self.writes.lock().await;
-        self.blocking(move |fs| {
-            let real = match fs.resolve(&relative) {
-                Ok(real) => real,
-                Err(error) => {
-                    return match fs_error(&normal, error) {
-                        VfsError::NotFound { .. } => Ok(()),
-                        other => Err(other),
-                    };
-                }
-            };
-            match fs::metadata(&real) {
-                Ok(meta) if meta.is_file() => {}
-                Ok(_) => return Ok(()),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-                Err(error) => return Err(VfsError::Backend(error.into())),
-            }
-            match fs::remove_file(&real) {
-                Err(error) if error.kind() != io::ErrorKind::NotFound => {
-                    Err(VfsError::Backend(error.into()))
-                }
-                _ => Ok(()),
-            }
-        })
-        .await
+        match self.fs.remove_file(&relative).await {
+            Ok(()) => Ok(()),
+            Err(error) => match fs_error(&normal, error) {
+                VfsError::NotFound { .. } => Ok(()),
+                other => Err(other),
+            },
+        }
     }
 }
 
-/// Virtual paths of the regular files under `root`. Symlinks are not
+/// Virtual paths of the regular files under the root. Symlinks are not
 /// followed, and names that are not UTF-8 are left out (no virtual path can
-/// name them).
-fn walk(root: &Path) -> Vec<String> {
+/// name them). The walk only proposes names: each file is looked at again
+/// from the root descriptor, so a directory swapped for a symlink since it
+/// was listed adds nothing from outside the root.
+fn walk(fs: &LocalFs) -> Vec<String> {
+    let root = fs.root();
+    let mut opener = fs.opener();
     let mut walk = ignore::WalkBuilder::new(root);
     walk.standard_filters(false).follow_links(false);
     walk.build()
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+        .filter(|entry| opener.stat(entry.path()).is_some())
         .filter_map(|entry| virtual_path(root, entry.path()))
         .collect()
 }

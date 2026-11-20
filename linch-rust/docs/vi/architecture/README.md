@@ -73,8 +73,8 @@ Các điều này đúng trên mọi trang ở trên, giống như
 [các bất biến chính](../../../../docs/architecture/invariants.md) của Linch bản Python:
 
 - **Chỉ async trên đường nóng.** Công việc tệp chặn chạy trên blocking pool của
-  Tokio (`crates/linch-tools/src/fs/local.rs:228`,
-  `crates/linch-tools/src/vfs/disk.rs:57`); một run chỉ tiến lên khi bên gọi
+  Tokio (`crates/linch-tools/src/fs/local.rs:278`,
+  `crates/linch-tools/src/vfs/disk.rs:52`); một run chỉ tiến lên khi bên gọi
   poll stream của nó (`crates/linch-core/src/runner.rs:37-39`). Lõi chỉ spawn một
   loại task, trên Tokio runtime của bên gọi: task điều khiển các subagent chạy nền
   của một run đang suspend để chờ phê duyệt, cho đến khi một lần approve hoặc resume

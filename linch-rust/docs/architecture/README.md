@@ -73,8 +73,8 @@ These hold across the pages above, as in Python Linch's
 [key invariants](../../../docs/architecture/invariants.md):
 
 - **Async only on the hot path.** Blocking file work runs on Tokio's blocking
-  pool (`crates/linch-tools/src/fs/local.rs:228`,
-  `crates/linch-tools/src/vfs/disk.rs:57`); a run advances only while the
+  pool (`crates/linch-tools/src/fs/local.rs:278`,
+  `crates/linch-tools/src/vfs/disk.rs:52`); a run advances only while the
   caller polls its stream (`crates/linch-core/src/runner.rs:37-39`). The core
   spawns one kind of task, on the caller's Tokio runtime: the one that drives
   the background subagents of a run suspended for approval until an approve

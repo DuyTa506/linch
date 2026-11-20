@@ -2,7 +2,6 @@
 //! walks (gitignore, hidden files, type table, `--glob` overrides) and
 //! `grep-searcher` searches, so no process is spawned.
 
-use std::fs::File;
 use std::io;
 use std::path::{Component, Path};
 
@@ -13,6 +12,7 @@ use ignore::types::TypesBuilder;
 use ignore::{DirEntry, WalkBuilder};
 use tokio_util::sync::CancellationToken;
 
+use super::beneath::stamp_of_stat;
 use super::local::is_hidden;
 use super::{FsError, GlobHit, GlobQuery, GrepFile, GrepHits, GrepLine, GrepMode, GrepQuery};
 use crate::fs::LocalFs;
@@ -26,7 +26,9 @@ pub(super) fn grep(
     query: &GrepQuery,
     stop: &CancellationToken,
 ) -> Result<GrepHits, FsError> {
-    let target = fs.resolve(query.path.as_deref().unwrap_or("."))?;
+    let target = fs
+        .locate(query.path.as_deref().unwrap_or("."))?
+        .real_path(fs.root());
     let matcher = matcher(query)?;
     let limit = fs.search_limit();
     let mut searcher = searcher(query, limit);
@@ -48,6 +50,7 @@ pub(super) fn grep(
     }
     let mut hits = GrepHits::default();
     let mut lines = 0;
+    let mut opener = fs.opener();
     for entry in walk.build() {
         if stop.is_cancelled() {
             return Err(FsError::Cancelled);
@@ -55,11 +58,22 @@ pub(super) fn grep(
         let Some(path) = regular_file(entry) else {
             continue;
         };
+        // The walk only proposes names: every file is opened again from the
+        // root, so a directory swapped for a symlink since it was listed
+        // cannot lead the search out of the root.
+        let opened = match opener.open(&path) {
+            Ok(Some(file)) => Ok(file),
+            // Gone, or not a regular file beneath the root: not reported,
+            // not even as skipped, since the name may be from outside.
+            Ok(None) => continue,
+            Err(error) => Err(error),
+        };
         // A pattern that can match a newline makes the searcher read the
         // whole file; skip one over the cap without reading it. Other
         // searches stream, so any size is fine.
         if searcher.multi_line_with_matcher(&matcher)
-            && path.metadata().is_ok_and(|meta| meta.len() > limit)
+            && let Ok(file) = &opened
+            && file.metadata().is_ok_and(|meta| meta.len() > limit)
         {
             hits.skipped.push(fs.workspace_path(&path));
             continue;
@@ -69,8 +83,8 @@ pub(super) fn grep(
             _ => usize::MAX,
         };
         let mut sink = Collect::new(query.mode, budget);
-        let searched = File::open(&path)
-            .and_then(|file| search(&mut searcher, &matcher, file, stop, &mut sink));
+        let searched =
+            opened.and_then(|file| search(&mut searcher, &matcher, file, stop, &mut sink));
         if stop.is_cancelled() {
             return Err(FsError::Cancelled);
         }
@@ -121,12 +135,13 @@ pub(super) fn glob(
             "glob pattern must be relative and must not contain '..'".to_owned(),
         ));
     }
-    let dir = fs.resolve(query.path.as_deref().unwrap_or("."))?;
-    if !dir.is_dir() {
+    let at = fs.locate(query.path.as_deref().unwrap_or("."))?;
+    if !at.tail.is_empty() {
         return Err(FsError::NotADirectory {
-            path: fs.workspace_path(&dir),
+            path: at.workspace_path(),
         });
     }
+    let dir = at.real_path(fs.root());
     let dotted = pattern.components().any(|part| match part {
         Component::Normal(name) => is_hidden(name),
         _ => false,
@@ -138,6 +153,7 @@ pub(super) fn glob(
     let mut walk = walker(&dir, dotted);
     walk.overrides(overrides);
     let mut hits = Vec::new();
+    let mut opener = fs.opener();
     for entry in walk.build() {
         if stop.is_cancelled() {
             return Err(FsError::Cancelled);
@@ -145,10 +161,14 @@ pub(super) fn glob(
         let Some(path) = regular_file(entry) else {
             continue;
         };
-        let modified = path.metadata().and_then(|meta| meta.modified()).ok();
+        // A name is listed only if it is a regular file under the root when
+        // looked at again from the root descriptor.
+        let Some(stat) = opener.stat(&path) else {
+            continue;
+        };
         hits.push(GlobHit {
             path: fs.workspace_path(&path),
-            modified,
+            modified: Some(stamp_of_stat(&stat).modified),
         });
     }
     Ok(hits)

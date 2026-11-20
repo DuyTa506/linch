@@ -7,6 +7,7 @@
 //! the root, `/`-separated, with every symlink resolved, so one file always
 //! has one name. The read-before-write policy keys on these names.
 
+mod beneath;
 mod local;
 mod search;
 #[cfg(test)]

@@ -18,7 +18,9 @@ grep-regex = "0.1.14"
 grep-searcher = "0.1.17"
 ignore = "0.4.34"
 linch-core = { path = "../linch-core" }
-rustix = { version = "1.1.6", features = ["process"] }
+# Process control, and descriptor-relative file access so the file tools stay
+# in the workspace root (`openat`, `mkdirat`, `renameat`).
+rustix = { version = "1.1.6", features = ["fs", "process"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tempfile = "3.27.0"

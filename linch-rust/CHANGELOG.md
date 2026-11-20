@@ -6,6 +6,8 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ## Unreleased
 
+- The file tools (`Read`, `Write`, `Edit`, `Grep`, `Glob`) and `DiskBackend` open every path name by name from a directory descriptor of the root with `O_NOFOLLOW` (`openat`, `mkdirat`, `renameat`), so a directory or file swapped for a symlink while a call runs is refused instead of followed out of the workspace.
+
 ## 0.2.0 - 2026-11-19
 
 0.1.1 was uploaded to PyPI from commit `e102d938` and never tagged; this is the first tagged release. The Python client of this build refuses a server without `server.info` (`IncompatibleServer`), so ship the client and the `linch-server` binary together.

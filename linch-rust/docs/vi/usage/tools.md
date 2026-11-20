@@ -324,7 +324,10 @@ status: final
   thì bị từ chối vì mơ hồ trừ khi đặt `replace_all` (chèn ở mọi vị trí và cần
   đã đọc toàn bộ tệp), và dòng đầu tiên phải đã được đọc.
 - **Giới hạn phạm vi.** Đường dẫn là tương đối so với workspace. `..`, đường dẫn
-  tuyệt đối nằm ngoài nó và symlink dẫn ra ngoài đều bị từ chối.
+  tuyệt đối nằm ngoài nó và symlink dẫn ra ngoài đều bị từ chối, kể cả khi một
+  process khác hoán đổi một thư mục thành symlink trong lúc lệnh gọi chạy. Hard
+  link tới tệp ngoài workspace không được che
+  ([Giới hạn truy cập](../architecture/tools.md#giới-hạn-truy-cập)).
 - **`Bash` mặc định không bị giới hạn phạm vi.** Với backend `local` mặc định, nó
   bắt đầu trong workspace nhưng có thể chạm tới mọi thứ mà user của server chạm
   được; `execution` chạy nó trong một sandbox hoặc container thay vào đó

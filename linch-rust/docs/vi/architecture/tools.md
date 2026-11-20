@@ -250,7 +250,7 @@ nó cho `Bash`; xem [Execution backend](#execution-backend)), dùng chung một
 
 Grep và Glob bỏ qua các tệp bị ignore và không đi theo symlink; Grep cũng bỏ qua
 các tệp ẩn và nhị phân, và Glob chỉ liệt kê tệp ẩn khi mẫu
-nêu tên một đoạn bắt đầu bằng dấu chấm (`crates/linch-tools/src/fs.rs:232-248`).
+nêu tên một đoạn bắt đầu bằng dấu chấm (`crates/linch-tools/src/fs.rs:239-255`).
 
 ### Đọc trước khi ghi
 
@@ -264,17 +264,40 @@ session kết thúc (`tracker.rs:65`).
 
 ### Giới hạn truy cập
 
-Mọi tool tệp đều đi qua trait `ExecutionFs` (`fs.rs:209`), nên một
+Mọi tool tệp đều đi qua trait `ExecutionFs` (`fs.rs:216`), nên một
 thế giới thực thi từ xa có thể thay `LocalFs` mà không đổi các tool.
-`LocalFs` (`crates/linch-tools/src/fs/local.rs:26`) canonicalize thư mục gốc
-một lần; `new` là blocking, nên hãy gọi nó trước khi runtime khởi động hoặc từ một
-blocking task. Mỗi đường dẫn được phân giải bằng cách canonicalize tiền tố dài nhất đã
-tồn tại của nó; phần còn lại chỉ được chứa các tên thuần (`local.rs:68-72`). `..`, đường
-dẫn tuyệt đối nằm ngoài thư mục gốc và symlink dẫn ra ngoài đều bị từ chối với
-`FsError::Escape`. Các đường dẫn trả về là đường dẫn workspace: tương đối, phân tách bằng `/`,
-symlink đã được phân giải, để một tệp có một tên. Phép kiểm tra bảo vệ các đối số đường
-dẫn; nó không ngăn một process đồng thời hoán đổi một symlink giữa lúc kiểm tra
-và lúc dùng. Công việc tệp chặn chạy trên blocking pool của Tokio.
+`LocalFs` (`crates/linch-tools/src/fs/local.rs`) canonicalize thư mục gốc một
+lần và giữ một directory descriptor của nó; `new` là blocking, nên hãy gọi nó
+trước khi runtime khởi động hoặc từ một blocking task. Một đường dẫn không bao
+giờ được đưa nguyên cho kernel. `fs/beneath.rs` đi từng tên một từ descriptor
+đó bằng `openat(O_NOFOLLOW)`: symlink được đọc và đích của nó được nối vào các
+tên còn phải đi (đích tuyệt đối phải bắt đầu bằng thư mục gốc canonical, tối đa
+40 symlink), còn `..` bỏ một thư mục mà lượt đi đang giữ mở, không bao giờ là `..`
+của kernel. `Read` mở tệp qua descriptor của thư mục cha và stat tệp đang mở;
+`Write` tạo thư mục còn thiếu bằng `mkdirat`, tạo tệp tạm trong thư mục của đích
+với `O_EXCL` và chuyển nó bằng `renameat`. `..`, đường dẫn tuyệt đối nằm ngoài
+thư mục gốc và symlink dẫn ra ngoài đều bị từ chối với `FsError::Escape`, symlink
+treo cũng vậy, vì ghi vào đó sẽ tạo ra đích của nó. Các đường dẫn trả về là
+đường dẫn workspace: tương đối, phân tách bằng `/`, symlink đã được phân giải,
+để một tệp có một tên. Một đường dẫn đi xuống tối đa 128 thư mục, và mỗi thư mục
+trên đó phải đọc được, không chỉ tìm kiếm được. Công việc tệp chặn chạy trên
+blocking pool của Tokio.
+
+Điều được đảm bảo: một process dùng chung workspace (một lệnh `Bash` dưới
+`sandbox` hoặc `docker`) hoán đổi một thư mục hay một tệp thành symlink, hoặc đổi
+tên một thư mục, giữa hai bước bất kỳ của một lệnh gọi thì không thể làm lệnh
+gọi đó ra khỏi thư mục gốc. Thư mục đang cầm luôn là thư mục mà lượt đi đã mở
+bên dưới thư mục gốc, và một tên bị hoán đổi bị `O_NOFOLLOW` từ chối ở nơi nó được
+mở tiếp theo. `Grep`, `Glob` và `DiskBackend::ls` liệt kê tên bằng lượt đi của
+`ignore` (gitignore, type và glob cần nó), vốn đọc thư mục theo tên, nên một danh
+sách có thể đến từ thư mục vừa bị hoán đổi; một tên chỉ được tìm hoặc trả về sau
+khi được mở lại từ descriptor gốc mà không cho phép symlink nào, nên không có gì
+từ ngoài thư mục gốc được đọc hay báo cáo. Không được che: hard link (một tên thứ
+hai trong thư mục gốc cho tệp nằm ngoài sẽ đọc ra tệp đó; một lần ghi thay tên và
+để nguyên nội dung của tệp kia), mount nằm trong thư mục gốc, và việc chính thư
+mục gốc bị di chuyển hay thay thế (descriptor vẫn ở thư mục mà `new` đã mở). Lượt
+đi chỉ dùng các lời gọi POSIX `*at` qua `rustix`, nên không có nhánh dự phòng chỉ
+dành cho Linux để duy trì; nó chưa được build hay kiểm thử trên macOS.
 
 ### Bash
 

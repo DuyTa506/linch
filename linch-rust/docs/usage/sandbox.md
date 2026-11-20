@@ -20,7 +20,11 @@ The choice applies to `Bash` in the foreground and in the background, so to
 `BashOutput` and `BashKill` too. The file tools (`Read`, `Write`, `Edit`,
 `Grep`, `Glob`) always run in the server, confined to the workspace; every
 backend sees the same workspace directory, so a file `Bash` writes is the
-file `Read` reads.
+file `Read` reads. A command that shares the workspace cannot move the file
+tools out of it by swapping a directory or file for a symlink while a call
+runs: every path is walked name by name from an open descriptor of the root
+and a symlink that leads out is refused (what is and is not covered:
+[Confinement](../architecture/tools.md#confinement)).
 
 ```python
 from linch_rust import AgentConfig, SandboxExecution
@@ -171,6 +175,12 @@ ambient set, since a command would keep them.
   UDP, including services on `localhost`.
 - The file tools, MCP stdio servers and the virtual filesystem's disk
   backend run in or from the server as before; the sandbox is for `Bash`.
+  The file tools stay inside the workspace by their own walk, not by
+  Landlock: a symlink a sandboxed command leaves in the workspace is followed
+  only while its target stays inside the root. The file tools do not
+  cover hard links, but under `sandbox` a command cannot make one to a host
+  file: Landlock refuses `ln` across the workspace boundary (`Invalid
+  cross-device link`, tested).
 
 ## The `docker` backend
 
@@ -288,8 +298,8 @@ docker stays green.
 | A command starts in the workspace and its files are the file tools' files | yes | yes | yes |
 | No server secret reaches the command's environment | yes | yes | yes |
 | The server's own `environ` is unreadable from the command | n/a | yes | yes |
-| A write outside the workspace does not reach the host | n/a | yes | yes |
-| A host file beside the workspace cannot be read | n/a | yes | yes |
+| A write outside the workspace does not reach the host (the file tools included, while a command swaps directories for symlinks) | n/a | yes | yes |
+| A host file beside the workspace cannot be read (the file tools included, same swap) | n/a | yes | yes |
 | A forbidden syscall is an error result, not a crash | n/a | yes | n/a |
 | A command cannot `ptrace` a process outside the sandbox | n/a | yes | n/a |
 | No capabilities, `no-new-privileges`, `mount` refused | n/a | n/a | yes |
