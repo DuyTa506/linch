@@ -361,3 +361,37 @@ def test_a_deny_rule_covers_a_command_behind_an_env_assignment_that_is_not_an_id
 def test_only_env_reads_any_word_with_an_equals_sign_as_an_assignment() -> None:
     assert _deny_touch("time a.b=1 touch M") == "allow"
     assert _deny_touch("command a.b=1 touch M") == "allow"
+
+
+# Source: `a_glob_deny_rule_covers_words_separated_by_other_blanks_or_a_redirect`.
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git push origin",
+        "git  push origin",
+        "git\tpush origin",
+        "git \t push\t origin",
+        "git  'push' origin",
+        "git 2>&1 push origin",
+        "git >/dev/null push origin",
+        "git > /dev/null push origin",
+        "git push 2>&1 origin",
+        "X=1  git\tpush origin",
+    ],
+)
+def test_a_glob_deny_rule_covers_words_separated_by_other_blanks_or_a_redirect(
+    command: str,
+) -> None:
+    assert _bash([BashRule("git push *", "deny")], command, "skip-dangerous") == "deny"
+
+
+@pytest.mark.parametrize("command", ["git  status", "git\tlog origin", "git 2>&1 pull origin"])
+def test_a_glob_deny_rule_does_not_cover_other_subcommands_behind_blanks_or_a_redirect(
+    command: str,
+) -> None:
+    assert _bash([BashRule("git push *", "deny")], command, "skip-dangerous") == "allow"
+
+
+@pytest.mark.parametrize("command", ["touch\tM", "touch\t'M'", "touch  M"])
+def test_a_deny_rule_covers_a_tab_or_repeated_blanks_after_the_command(command: str) -> None:
+    assert _deny_touch(command) == "deny"

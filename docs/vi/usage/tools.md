@@ -694,41 +694,46 @@ Cách Bash rule đọc một lệnh:
   trong dấu nháy kép, dấu `\` chỉ bị bỏ trước `$`, dấu backtick, `"`, `\` và
   xuống dòng, như trong bash.
 - Một lệnh mà bộ tách không mô hình hóa được có thể bị rule từ chối hoặc hỏi,
-  nhưng không bao giờ được rule cho phép. Gồm `$(...)` và backtick, `&` chạy nền
-  hoặc `&>`, `|&`, `>&file`, chú thích `#`, here-document (`<<`, `<<-`), `>|`,
-  xuống dòng, `${` theo sau bởi dấu cách, tab hoặc `|`, `${...}` trong dấu nháy kép có chứa dấu nháy,
-  `\`, `${` lồng nhau hoặc `$[`, `env -S`,
-  và vị trí lệnh là một khai triển `$`, khai triển ngoặc (`{rm,-rf}`),
-  `function`, `coproc`, phép gán phần tử mảng (`a[0]=1`) hoặc chuyển hướng
-  `{fd}>file`. Here-string (`<<<`) và nhân đôi descriptor (`2>&1`, `>&2`, `<&3`,
-  `>&-`) được mô hình hóa.
-- Rule allow không bao phủ một đoạn lệnh chuyển hướng đầu ra vào tệp
-  (`echo x > file`, `>>`, `2>file`, `>|`, `<>`, có hoặc không có số
-  descriptor): lệnh đó bị hỏi (hoặc rơi về mặc định của mode khi không rule nào
-  quyết định). `>&` theo sau đúng bởi chữ số hoặc `-` (`2>&1`, `>&2`, `>&-`) và `<&3`
-  nhân đôi descriptor; mọi từ khác sau `>&` (`>&2file`, `>&2-`) là tệp. Dấu
-  cách sau `>&` là cú pháp chưa phân tích được. Đúng
-  `/dev/null`, `/dev/stdout`, `/dev/stderr` không phải là tệp. Rule allow-all
-  (đúng pattern `*`) được miễn: nó vốn đã cho phép mọi lệnh nên
-  `BashRule("*", "allow")` bao phủ `cmd > file`. Rule khớp đầu tiên của một đoạn
-  lệnh quyết định đoạn đó có phải allow-all hay không; một rule allow-all đứng sau
-  vẫn bao phủ chuyển hướng mà rule allow hẹp đứng trước không bao phủ. Rule deny
-  và ask không đổi, và cú pháp chưa phân tích được không bao giờ được cho phép, kể cả bởi allow-all.
-- Rule deny hoặc ask khớp từng đoạn lệnh như được viết, và khớp lại sau khi
-  từng từ được bỏ dấu nháy (`\rm`, `r""m`, `git 'push'`; đối số có dấu nháy vẫn
-  là một từ, nên `* --force` không khớp bên trong một commit message) và các từ
-  đứng trước lệnh bị loại bỏ:
-  phép gán `NAME=value`, chuyển hướng (`>f`, `2>&1`), các từ dành riêng `if`,
-  `then`, `else`, `elif`, `do`, `while`, `until`, `!` và `{`, cùng `time`,
-  `exec`, `command`, `builtin` và `env` (có hoặc không có dấu nháy) với các tùy
-  chọn của chúng, được đọc sau khi bỏ dấu nháy: tùy chọn ngắn gộp (`env -iu
-  NAME`, `exec -la NAME`), tiền tố duy nhất của tùy chọn dài (`env --uns NAME`)
-  và đối số của `env -u`/`-C`/`-a`, `time -f`/`-o` và `exec -a`. `env -S` là cú
-  pháp chưa phân tích được.
-  `command -v NAME` không phải là lệnh tên `NAME`. Rule allow luôn khớp đoạn lệnh như được viết: `X=1 echo` không phải
-  `echo`. Các cách viết và wrapper khác, như `/bin/rm`, `sudo rm`, `nice`,
-  `nohup`, `setsid`, `timeout`, `xargs`, `eval rm x` và `sh -c 'rm x'`, không
-  được bao phủ: chúng là những lệnh khác đối với rule. Ranh giới là sandbox.
+  nhưng không bao giờ được rule cho phép, kể cả `*`. Gồm `$(...)` và backtick,
+  `&` chạy nền hoặc `&>`, `|&`, chú thích `#`, here-document (`<<`, `<<-`),
+  `>|`, xuống dòng, `>&` theo sau bởi một tên hoặc dấu cách (`>&file`, `>& 2`),
+  `${` theo sau bởi dấu cách, tab hoặc `|`, `${...}` trong dấu nháy kép có
+  chứa dấu nháy, `\`, `${` lồng nhau hoặc `$[`, `env -S`, và vị trí lệnh là
+  một khai triển `$`, khai triển ngoặc (`{rm,-rf}`), `function`, `coproc`, phép
+  gán phần tử mảng (`a[0]=1`) hoặc chuyển hướng `{fd}>file`. Here-string
+  (`<<<`) và nhân đôi descriptor (`2>&1`, `>&2`, `<&3`, `>&-`) được mô hình
+  hóa.
+- Rule allow hẹp (pattern không phải đúng `*`) không bao phủ một đoạn lệnh
+  chuyển hướng đầu ra vào tệp (`echo x > file`, `>>`, `2>file`, `<>`, có hoặc
+  không có số descriptor): lệnh đó bị hỏi (hoặc rơi về mặc định của mode khi
+  không rule nào quyết định). Vì vậy rule allow cho `echo` hoặc `git *` không
+  cho `echo x > file` hay `git log > file` đi qua, còn rule allow-all `*` cho
+  phép `pytest -q > test.log`, như nó cho phép mọi lệnh. `>&` theo sau đúng bởi
+  chữ số hoặc `-` (`2>&1`, `>&2`, `>&-`) nhân đôi descriptor, và `/dev/null`,
+  `/dev/stdout`, `/dev/stderr` không phải là tệp; không cái nào được tính là
+  chuyển hướng vào tệp. Mọi từ khác sau `>&` mà bộ tách mô hình hóa được
+  (`>&2file`, `>&2-`) là tệp, và `*` cho phép như mọi chuyển hướng vào tệp khác.
+  Rule khớp đầu tiên của một đoạn lệnh quyết định đoạn đó có phải allow-all hay
+  không; một rule allow-all đứng sau vẫn bao phủ chuyển hướng mà rule allow hẹp
+  đứng trước không bao phủ. Rule deny và ask không đổi.
+- Rule deny và ask dựa trên tên chỉ là nỗ lực tốt nhất đối với một shell mà
+  engine không chạy, và ranh giới là sandbox. Một rule khớp từng đoạn lệnh như
+  được viết, và khớp lại trên các từ của nó, luôn được dựng lại: bỏ dấu nháy
+  từng từ (`\rm`, `r""m`, `git 'push'`), gộp khoảng trắng thành một dấu cách,
+  bỏ các chuyển hướng ở bất kỳ đâu, và đối số có dấu nháy vẫn là một từ (nên
+  `* --force` không khớp bên trong một commit message). Các từ đứng trước lệnh
+  cũng bị loại bỏ: phép gán `NAME=value`, các từ dành riêng `if`, `then`,
+  `else`, `elif`, `do`, `while`, `until`, `!` và `{`, cùng `time`, `exec`,
+  `command`, `builtin` và `env` (có hoặc không có dấu nháy) với các tùy chọn
+  của chúng, được đọc sau khi bỏ dấu nháy: tùy chọn ngắn gộp (`env -iu NAME`,
+  `exec -la NAME`), tiền tố duy nhất của tùy chọn dài (`env --uns NAME`) và đối
+  số của `env -u`/`-C`/`-a`, `time -f`/`-o` và `exec -a`; sau `env` mọi từ có
+  `=` là phép gán. `command -v NAME` không phải là lệnh tên `NAME`. Rule allow
+  không bao giờ khớp các dạng được dựng lại này: `X=1 echo` không phải `echo`.
+  Không được bao phủ: các cách viết và wrapper khác (`/bin/rm`, `sudo`, `nice`,
+  `nohup`, `setsid`, `timeout`, `xargs`, `eval`, `sh -c`), lệnh do một phép thế
+  hoặc một biến tạo ra, và các ngữ cảnh số học như `x='a[$(cmd)]'; echo $[x]`,
+  không được báo là chưa phân tích được.
 
 Khi không rule nào khớp, tool scope read và bốn task tool được cho phép ở mọi
 mode. Các mặc định còn lại là:

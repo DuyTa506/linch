@@ -552,27 +552,35 @@ def redirects_to_file(segment: str) -> bool:
 
 
 def unquote_words(command: str) -> str:
-    """Return ``command`` with the quotes and backslashes of every word removed.
+    """Return the words of ``command`` as the shell passes them, for matching deny and ask rules.
 
-    The words stay apart: a word that is empty or holds a blank, a quote or a
-    backslash is written back in single quotes, so ``git 'push' "a b"`` becomes
-    ``git push 'a b'`` and a quoted argument stays one word.
+    Quotes and backslashes are removed, blanks collapse to one space, and redirections
+    (and the target of a bare operator) are dropped wherever they appear. A word that is
+    empty or holds a blank, a quote or a backslash is written back in single quotes, so
+    ``git 'push' "a b"`` becomes ``git push 'a b'`` and a quoted argument stays one word.
 
     Args:
         command: Command text starting at its command word.
 
     Returns:
-        The text with unquoted words.
+        The normalised words joined by single spaces.
     """
-    if not any(c in "'\"\\" for c in command):
-        return command
     words: list[str] = []
     rest = trim_blanks(command)
+    target = False
     while rest:
         end = _word_end(rest)
-        word = _unquote(rest[:end])
+        raw = rest[:end]
+        rest = trim_blanks(rest[end:])
+        if target:
+            target = False
+            continue
+        redirection = _redirection_len(raw)
+        if redirection:
+            target = redirection > 1
+            continue
+        word = _unquote(raw)
         if word == "" or any(c in word for c in " \t'\"\\"):
             word = "'" + word.replace("'", "'\\''") + "'"
         words.append(word)
-        rest = trim_blanks(rest[end:])
     return " ".join(words)
