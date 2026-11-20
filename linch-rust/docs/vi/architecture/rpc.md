@@ -76,12 +76,12 @@ tới handler của nó. Các kiểu params từ chối trường không biết;
 | `run.answer` | `AnswerParams` (`protocol.rs:256`) `{agent, run_id, answers, principal?}`, `answers` được khóa theo `request_id` | `run.rs:61-67`, qua `claim` | như trên |
 | `run.steer` | `SteerParams` `{agent, run_id, text, id?, principal?}` | `Server::steer_run` (`run.rs`): `Agent::steer`. Một run mà process này điều khiển nhận nó qua inbox và trả lời sau lần flush của bước kế tiếp; một run bị tạm dừng được claim, ghi vào rồi đặt lại trong trạng thái tạm dừng; một run mà process khác giữ lease là `-32033` | `Steered` `{queued: true, id}` |
 | `run.cancel` | `CancelParams` `{run_id, agent?}` | `Server::cancel` (`run.rs`): hủy một run mà kết nối này điều khiển bằng token của nó; nếu không, khi có `agent`, kết thúc một run bị tạm dừng bằng `Agent::cancel`, run được tính là đang được điều khiển trong lúc đó nên một approve ở đây nhận `-32002` | `{cancelled}` |
-| `run.events` | `EventsParams` | `agents.rs:93-100`: `Agent::events` | `{events, next_after_seq?}`: một trang các envelope bền vững sau `after_seq`, tối đa `limit` (mặc định 1000, tối đa 10000) và `max_bytes` (mặc định 4 MiB, tối đa 8 MiB) đã mã hóa; envelope đầu luôn được lấy, envelope vượt 16 MiB của một message bị từ chối (`-32603`); `next_after_seq` có mặt khi còn envelope phía sau |
+| `run.events` | `EventsParams` | `server/agents.rs`: `Server::events`, `page` trên `Agent::events` | `{events, next_after_seq?}`: khi không có `limit` lẫn `max_bytes`, mọi envelope vừa một message (`max_message_bytes` trừ 128 byte khung), nếu không thì một trang đầu cỡ đó; khi có một trong hai, tối đa `limit` (mặc định 1000, tối đa 10000) và `max_bytes` (mặc định và tối đa 8 MiB) đã mã hóa, giá trị lớn hơn bị hạ xuống. Envelope đầu luôn được lấy; envelope không vừa một message cùng khung của nó là `-32051` (`data.seq`). `next_after_seq` có mặt khi còn envelope phía sau |
 | `provider.capabilities` | `ProviderModelParams` `{provider, model}`: một `provider` như trong cấu hình agent (`protocol.rs`) | `server/provider.rs`: `ProviderConfig::build_keyless`, `Provider::prepare`, `Provider::capabilities`; không cần key | `ProviderCapabilities` |
 | `provider.models` | `ProviderParams` `{provider}` | `server/provider.rs`: `ProviderConfig::build`, `Provider::list_models`; cần key | `{models}`, một `ModelInfo` cho mỗi model |
 | `provider.model` | `ProviderModelParams` | `server/provider.rs`: `Provider::model_info` | `ModelInfo`; `-32036` khi danh sách không có nó |
 | `eval.run` | `EvalRunParams` `{agent, cases, scorers?, include_events?}` (`protocol/monitor.rs`) | `server/monitor.rs`: `run_eval` trên agent; chiếm một chỗ run của tenant và đánh dấu agent bận (`agent.close` trả `-32002`) cho đến khi xong; dừng cùng kết nối | kết quả eval dạng JSON (`total`, `passed`, `pass_rate`, `total_cost_usd`, `usage`, `duration_ms`, `cases`) và `markdown`; case hoặc scorer sai là `-32602` |
-| `run.report` | `ReportParams` `{agent, run_id, timeline?}` | `server/monitor.rs`: `build_run_report` trên `Agent::run_record` và `Agent::events` | `{report, markdown}`; run không tồn tại là `-32021` |
+| `run.report` | `ReportParams` `{agent, run_id, timeline?}` | `server/monitor.rs`: `build_run_report` trên `Agent::run_record` và `Agent::events` | `{report, markdown, truncated?}`; chuỗi dài hơn 64 KiB bị cắt kèm dấu (đếm trong `truncated.strings`) và timeline mất các event cuối khi vượt 8 MiB (`truncated.timeline_omitted`); run không tồn tại là `-32021` |
 | `workflow.start` | `WorkflowStartParams` `{agent, run_id, budget?, resume?, principal?}` (`protocol/workflow.rs`) | `Server::start_workflow` (`server/workflow.rs`): `admit_principal`, các mức trần của tenant, rồi `WorkflowSession::open_held`; `-32045` khi một client khác đang drive nó | `WorkflowStarted` `{records, resumed, previous?, limits?}` |
 | `workflow.agent` | `WorkflowAgentParams` `{run_id, prompt, name?, subagent?, label?, key?, output_schema?, fork?, timeout_ms?, retry?, branch?, call_id?}` | `workflow_agent`: `WorkflowContext::agent_with` trên nhánh; bị bỏ cùng kết nối như một run | `WorkflowAgentResult` `{text, structured?, session_id, tokens, cost_usd, replayed}` |
 | `workflow.step.begin`, `workflow.step.complete` | `{run_id, name, key?, branch?}`, `{run_id, ticket, value}` | `step_begin`, `step_complete`; ticket do server giữ | `{replayed, value?, ticket?}`, `{}` |
@@ -163,6 +163,7 @@ docs (`lib.rs:518-569`) và các mã nằm trong `crates/linch-rpc/src/error.rs:
 | -32048 | `WORKFLOW_NOT_FOUND` | `WorkflowNotFound` | Connection này không điều khiển workflow nào có id đó: chưa gửi `workflow.start` cho nó, hoặc đã finish nó |
 | -32049 | `WORKFLOW_NO_JOURNAL` | `WorkflowNoJournal` | `workflow.start` với câu trả lời `resume` cho một workflow mà journal trống (nó chưa chạy ở đây, hoặc journal của agent memory-store nằm ở connection khác). Chưa claim gì |
 | -32050 | `RUN_PRUNED` | `RunPruned` (một `RunNotFound`) | Một run mà đợt retention đã xóa (bản ghi và event của nó): `run.events`, resume, approve, answer, steer, cancel hoặc report của nó. `data.run_id`. Server nhớ run đã bị xóa trong thời hạn tombstone (mặc định 30 ngày); sau đó cùng lần đọc ấy là `-32021`. Một id sai luôn là `-32021` |
+| -32051 | `EVENT_TOO_LARGE` | `EventTooLarge` (một `RunError`) | `run.events` gặp một envelope không vừa một message cùng khung của nó; `data.seq` là seq của nó. Hỏi lại với `after_seq` bằng giá trị đó để đi tiếp sau nó; bản thân envelope nằm trong các kho lưu trữ |
 
 `RunError::ContractMismatch {expected, found}` nêu tên các contract từ phía của agent:
 `expected` là contract của agent đã cố tiếp tục run, `found` là contract được lưu cùng
@@ -242,10 +243,13 @@ request từ server; và tenant của nó, là `None` đối với client cục 
    đã đọc kết thúc, drop mọi run tại chỗ nó đang đứng (một run bền vững vẫn
    resume được), làm các request đang chờ của server thất bại, rồi đóng các MCP server
    của mọi agent. Writer xả hết hàng đợi và kết nối trả về.
-   Việc chờ không vô hạn: một writer không đưa thêm được gì tới transport trong
-   `WRITE_STALL_TIMEOUT` (5 s; `connection.rs`, đếm theo byte trên byte stream và theo
-   message trên message transport) bị abort và hàng đợi của nó bị bỏ, nên một client
-   không bao giờ đọc không giữ được chỗ tenant của kết nối.
+   Toàn bộ việc tắt có một hạn chót, `SHUTDOWN_GRACE` (15 s; `connection.rs`), tính từ lúc dừng
+   hoặc hết input (một task khởi động cùng kết nối chờ token shutdown của server rồi ngủ). Các lời
+   gọi chạy dưới hạn đó (`server.rs`, `receive`), vòng đọc chạy đua với lệnh dừng khi nó trao một
+   lời từ chối cho hàng đợi đầy, và writer được chờ đến hạn đó. Tới hạn, các lời gọi đang chạy bị
+   bỏ, writer bị abort và hàng đợi cùng transport của nó bị bỏ: một client không nhận hết hàng
+   đợi trong thời gian đó bị cắt dù nó đọc chậm đến đâu. Khung close của WebSocket chỉ chờ phần
+   còn lại của chính 15 s đó (`linch-server/src/http.rs`).
 
 ### Thứ tự
 

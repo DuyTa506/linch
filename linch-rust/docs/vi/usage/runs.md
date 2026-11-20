@@ -132,6 +132,7 @@ hoặc gọi `result()` sẽ raise một subclass của `RunError`.
 | Exception | Code | Khi nào |
 |---|---|---|
 | `RunNotFound` | -32021 | Không có run đó trong các kho lưu trữ của agent (với kho memory: không có trong handle này) |
+| `EventTooLarge` | -32051 | `agent.events` gặp một envelope quá dài cho một message; `error.events` giữ những gì đã đọc trước nó và `error.seq` nêu tên nó ([bên dưới](#run-dài-được-đọc-từng-trang)). `EventsIncomplete` là lớp cơ sở của nó: nó cũng kết thúc một lần đọc có con trỏ trang không tiến lên |
 | `RunPruned` | -32050 | Run từng tồn tại và [retention](./stores.md#retention) của server đã xóa nó; lớp con của `RunNotFound`, `run_id` nêu tên nó. Hết thời hạn tombstone thì nó đọc ra là `RunNotFound` |
 | `RunExists` | -32023 | `run_id` đã được lưu; `run_or_resume` xử lý nó ([Workflows](./workflows.md#run_or_resume)) |
 | `ContractMismatch` | -32025 | Run đã bắt đầu dưới một contract khác ([Config của agent](./agent.md#hợp-đồng-của-run)); `data["expected"]` là contract của run và `data["found"]` là của agent này, như thông báo nêu |
@@ -758,16 +759,38 @@ server. Một lượt tốn bao nhiêu lần ghi và chúng được gom nhóm r
 
 ### Run dài được đọc từng trang
 
-`agent.events` trả về cả run: nó tự đi theo các trang của server. Trên wire,
-`run.events` trả lời một trang: tối đa `limit` envelope (1000 khi không có, tối đa
-10000) và `max_bytes` byte đã mã hóa (4 MiB khi không có, tối đa 8 MiB), nên một
-câu trả lời luôn nhỏ hơn nhiều so với 16 MiB mà một message được mang
-(`limits.max_message_bytes` trong `server.info`). Khi còn envelope phía sau, câu
-trả lời có `next_after_seq`, seq của envelope cuối cùng của nó: hỏi lại với giá trị
-đó làm `after_seq`. Trang cuối không có `next_after_seq`. Một envelope dài hơn
-`max_bytes` vẫn được trả về, riêng một mình, nên người đọc luôn tiến lên được; một
-envelope dài hơn mức một message được mang (khoảng 16 MiB) bị từ chối với `-32603`
-kèm seq của nó. `limit` hoặc `max_bytes` bằng 0 là `-32602`.
+`agent.events` trả về cả run: nó tự đi theo các trang của server. Trên wire, `run.events` trả lời
+từng message, và một message chứa tối đa `limits.max_message_bytes` của `server.info` (16 MiB)
+tính cả khung. Một request nhận được:
+
+- **Không có `limit` lẫn `max_bytes`** (những gì một client cũ gửi): mọi envelope vừa một message
+  (16 MiB trừ 128 byte khung), như trước đây; và chỉ khi phần còn lại không vừa thì là một trang
+  đầu cỡ đó cùng `next_after_seq`, chỗ mà server cũ trả lời bằng một lỗi. Vì vậy một client bỏ qua
+  `next_after_seq` chỉ có thể bỏ sót event ở chỗ trước đây nó nhận một lỗi.
+- **`limit`, `max_bytes` hoặc cả hai**: tối đa `limit` envelope (1000 khi không có) và
+  `max_bytes` byte đã mã hóa (8 MiB khi không có). Giá trị vượt mức tối đa (10000 envelope,
+  8 MiB) bị hạ xuống mức đó, dù lớn đến đâu; 0 là `-32602`. Envelope đầu của một trang luôn được
+  trả về, nên người đọc luôn tiến lên được kể cả khi một envelope dài hơn `max_bytes`.
+
+Khi còn envelope phía sau, câu trả lời có `next_after_seq`, seq của envelope cuối cùng của nó:
+hỏi lại với giá trị đó làm `after_seq`. Trang cuối không có `next_after_seq`. Client Python dừng
+bằng `EventsIncomplete` nếu `next_after_seq` của một trang không tiến lên.
+
+Một envelope không vừa một message cùng khung của nó (16 MiB trừ khoảng 130 byte) bị từ chối với
+`-32051` (`EventTooLarge`, một `RunError`); `data.seq` nêu tên nó, và thông báo nói cách làm:
+hỏi lại với `after_seq` bằng seq đó để đi tiếp sau nó. `agent.events` raise `EventTooLarge` kèm
+các envelope đã đọc trong `error.events` và seq trong `error.seq`:
+
+```python
+try:
+    events = await agent.events(run_id)
+except EventTooLarge as error:
+    events = error.events                       # mọi thứ trước envelope đó
+    events += await agent.events(run_id, after_seq=error.seq)   # và sau nó
+```
+
+Server vẫn đọc từ các kho lưu trữ phần event còn lại của run cho mỗi trang; trang giới hạn những
+gì được gửi và mã hóa, không giới hạn lần đọc đó.
 
 ## Các trang liên quan
 

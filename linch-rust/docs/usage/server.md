@@ -635,14 +635,22 @@ run over while the connection lives ([Run leases](./stores.md#run-leases)).
 A WebSocket that reads nothing cannot take a ping either: it is ended when a
 ping cannot be sent within `pong_timeout_ms`, and its runs are dropped as above.
 There is no write timeout on a Unix socket or stdio while the connection runs:
-a local client that never reads again holds its runs until it closes. Once the
-connection is ending (SIGTERM or SIGINT, or its input ended) the server waits
-for its queued output only while the client keeps reading: when nothing more
-reaches the transport for 5 s (`WRITE_STALL_TIMEOUT`, a constant, not a
-setting) it drops the queue and the transport, and the connection's tenant
-place and the server's shutdown no longer wait for that client. A client that
-reads slowly but steadily is not cut. On a WebSocket whose ping cannot be sent
-the same 5 s follows the end of the connection.
+a local client that never reads again holds its runs until it closes.
+
+**After a stop, queued output is written for up to 15 seconds; a client that
+cannot take it in that time is cut, however slowly it reads.** A stop is
+SIGTERM or SIGINT, or the end of the connection's input. From then the
+connection has one grace of 15 s (`SHUTDOWN_GRACE`, a constant of
+`linch-rpc`, not a setting) to finish the calls in flight and write what is
+queued. At its end the calls still running are dropped, the queue is
+dropped, the writer is aborted and the connection closes, so its tenant place
+and the server's shutdown no longer wait for that client. Every wait of the
+shutdown is inside that one deadline: calls handing their answers to a full
+queue, the read loop, the writer and a WebSocket's close frame. A client that
+reads everything promptly gets every queued answer and the connection ends
+as soon as it is written. On a WebSocket whose ping cannot be sent, the
+connection ends at `pong_timeout_ms` and then has the same 15 s, so its place
+is free at most `pong_timeout_ms` plus 15 s later.
 
 **A client that is busy but alive must keep its event loop running.** The
 pong comes from the client's WebSocket code, which runs on its event loop. A

@@ -264,6 +264,8 @@ Các trường của `RunReport`:
 | `long_run` | Tín hiệu về tăng trưởng context, chất lượng và resume |
 | `timeline` | Mọi event; rỗng trừ khi `timeline=True` |
 
+Một report được dựng để vừa một message. Một chuỗi dài hơn 64 KiB (một câu trả lời hay kết quả tool dài) bị cắt và kết thúc bằng `... [truncated: N more bytes]`; vượt 8 MiB thì timeline mất các event cuối. Khi có gì bị cắt, câu trả lời có `truncated` (`{"strings": n, "timeline_omitted": m}`, phần sau chỉ khi có event bị bỏ); đọc toàn văn bằng `agent.events`.
+
 Một báo cáo không bao giờ lỗi vì một stream lạ: một run không có event `result`
 thì có `final: None` và giữ trạng thái nó đang có. Một run không tồn tại gây ra
 `RunNotFound`.

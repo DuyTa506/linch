@@ -6,8 +6,9 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ## Unreleased
 
-- A connection that is ending (SIGTERM, SIGINT or end of input) gives up its writer after 5 s without output reaching the client and drops the queue, so a client that does not read no longer holds its tenant place or the server's shutdown; a client that reads slowly but steadily is not cut.
-- `run.events` answers one page (`limit`, `max_bytes`, default 1000 envelopes and 4 MiB) and names `next_after_seq` while more follow, so a long run no longer exceeds the message size; `Agent.events` in the Python client follows the pages.
+- After a stop or the end of input a connection has one 15 s grace (`SHUTDOWN_GRACE`) to finish its calls and write its queued output; at its end the calls, the queue and the writer are dropped, however slowly the client reads. The calls, the read loop, the writer and a WebSocket's close frame all wait inside that one deadline, so `linch-server` exits on SIGTERM with a client that reads nothing.
+- `run.events` takes optional `limit` and `max_bytes` (values above 10000 envelopes and 8 MiB are lowered) and names `next_after_seq` while more follow; a request with neither still gets every envelope that fits one message, where it used to get an error when the run did not fit. An envelope too long for a message is `-32051` (`EventTooLarge`, `data.seq`). `Agent.events` follows the pages, raises `EventTooLarge` with the envelopes read so far, and stops with `EventsIncomplete` when a page's cursor does not advance.
+- `run.report` cuts strings over 64 KiB with a marker and trims the timeline past 8 MiB, naming both in `truncated`, so the report of a run with a long answer fits one message.
 
 ## 0.2.0 - 2026-11-19
 

@@ -128,6 +128,7 @@ the stream: iterating, or `result()`, raises a `RunError` subclass.
 | Exception | Code | When |
 |---|---|---|
 | `RunNotFound` | -32021 | No such run in the agent's stores (with memory stores: not in this handle) |
+| `EventTooLarge` | -32051 | `agent.events` met one envelope too long for a message; `error.events` holds what was read before it and `error.seq` names it ([below](#long-runs-are-read-in-pages)). `EventsIncomplete` is its base: it also ends a read whose page cursor does not advance |
 | `RunPruned` | -32050 | The run existed and the server's [retention](./stores.md#retention) deleted it; a `RunNotFound` subclass, `run_id` names it. After the tombstone period it reads as `RunNotFound` |
 | `RunExists` | -32023 | `run_id` is already stored; `run_or_resume` handles it ([Workflows](./workflows.md#run_or_resume)) |
 | `ContractMismatch` | -32025 | The run started under another contract ([Agent config](./agent.md#the-run-contract)); `data["expected"]` is the run's contract and `data["found"]` this agent's, as the message names them |
@@ -754,15 +755,43 @@ process. How many writes a turn costs and how they are grouped is in the
 ### Long runs are read in pages
 
 `agent.events` returns the whole run: it follows the server's pages for you.
-On the wire, `run.events` answers one page: at most `limit` envelopes (1000
-when absent, at most 10000) and `max_bytes` encoded bytes (4 MiB when absent,
-at most 8 MiB), so one answer stays far below the 16 MiB a message may carry
-(`limits.max_message_bytes` in `server.info`). When more follow, the answer
-carries `next_after_seq`, the seq of its last envelope: ask again with it as
-`after_seq`. The last page has no `next_after_seq`. An envelope longer than
-`max_bytes` is returned alone, so a reader always advances; one longer than a
-message may carry (about 16 MiB) is refused with `-32603` naming its seq. A
-`limit` or `max_bytes` of 0 is `-32602`.
+On the wire, `run.events` answers one message at a time, and a message holds
+at most `limits.max_message_bytes` of `server.info` (16 MiB) in all. What
+a request gets:
+
+- **Neither `limit` nor `max_bytes`** (what an older client sends): every
+  envelope that fits one message (16 MiB less 128 bytes of framing), as
+  before; and only when the rest would not fit, a first page of that size
+  plus `next_after_seq`, where an older server answered with an error. A
+  client that ignores `next_after_seq` can therefore miss events only where
+  it used to get an error.
+- **`limit`, `max_bytes` or both**: at most `limit` envelopes (1000 when
+  absent) and `max_bytes` encoded bytes (8 MiB when absent). A value above
+  the most (10000 envelopes, 8 MiB) is lowered to it, whatever its size; 0 is
+  `-32602`. The first envelope of a page is always returned, so a reader
+  advances even when one envelope is longer than `max_bytes`.
+
+When more follow, the answer carries `next_after_seq`, the seq of its last
+envelope: ask again with it as `after_seq`. The last page has no
+`next_after_seq`. The Python client stops with `EventsIncomplete` if a page's
+`next_after_seq` does not advance.
+
+An envelope that cannot fit a message with its framing (16 MiB less about 130
+bytes) is refused with `-32051` (`EventTooLarge`, a `RunError`); `data.seq`
+names it, and the message says what to do: ask again with `after_seq` set to
+that seq to continue after it. `agent.events` raises `EventTooLarge` with
+the envelopes it had read in `error.events` and the seq in `error.seq`:
+
+```python
+try:
+    events = await agent.events(run_id)
+except EventTooLarge as error:
+    events = error.events                       # everything before the envelope
+    events += await agent.events(run_id, after_seq=error.seq)   # and after it
+```
+
+The server still loads the run's remaining events from the stores for each
+page; the page bounds what is sent and encoded, not that read.
 
 ## Related pages
 

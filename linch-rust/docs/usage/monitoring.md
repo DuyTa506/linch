@@ -261,6 +261,8 @@ The `RunReport` fields:
 | `long_run` | Context growth, quality and resume signals |
 | `timeline` | Every event; empty unless `timeline=True` |
 
+A report is built to fit one message. A string longer than 64 KiB (a long answer or tool result) is cut and ends in `... [truncated: N more bytes]`; past 8 MiB the timeline loses its last events. When anything was cut, the answer has `truncated` (`{"strings": n, "timeline_omitted": m}`, the second only if events were dropped); read the full text with `agent.events`.
+
 A report never fails on a strange stream: a run with no `result` event has
 `final: None` and the status it had. An unknown run is `RunNotFound`.
 
