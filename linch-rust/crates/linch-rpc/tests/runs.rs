@@ -241,6 +241,121 @@ async fn run_events_with_a_byte_bound_below_one_event_returns_one_event_per_page
     assert_eq!(pages.len(), durable);
 }
 
+/// A request with neither `limit` nor `max_bytes` gets everything that fits
+/// in one message, as it did before the members existed: 12 MiB of events
+/// is not cut at the 4 MiB an explicit page defaults to.
+#[tokio::test]
+async fn run_events_without_limits_answers_everything_that_fits_in_a_message() {
+    let mut rpc = Rpc::new();
+    let text = "x".repeat(6 * 1024 * 1024);
+    let agent = rpc.open(scripted(vec![text_turn(&text)], None, "")).await;
+    let run_id = rpc.start(&agent, "s1", "Go.").await;
+    let ended = rpc.until_end(&run_id).await;
+    let durable = (ended.envelopes.iter())
+        .filter(|e| e.event.persistence() == Persistence::Both)
+        .count();
+    let pages = read_pages(&rpc, &agent, &run_id, json!({})).await;
+    let sizes: Vec<usize> = pages.iter().map(Vec::len).collect();
+    assert_eq!(sizes, vec![durable], "pages of {sizes:?} envelopes");
+}
+
+/// The same for the count: 1000 envelopes is not a bound without `limit`.
+#[tokio::test]
+async fn run_events_without_limits_answers_more_than_a_thousand_envelopes() {
+    let mut rpc = Rpc::new();
+    let turns = (0..300)
+        .map(|n| tool_turn(&format!("c{n}"), &format!("Missing{n}"), json!({"n": n})))
+        .chain([text_turn("Done.")])
+        .collect();
+    let mut config = scripted(turns, None, "");
+    config["spec"]["max_turns"] = json!(400);
+    config["spec"]["loop_guard"] = json!({"max_consecutive_failures": 0});
+    let agent = rpc.open(config).await;
+    let run_id = rpc.start(&agent, "s1", "Go.").await;
+    let ended = rpc.until_end(&run_id).await;
+    let durable = (ended.envelopes.iter())
+        .filter(|e| e.event.persistence() == Persistence::Both)
+        .count();
+    assert!(
+        durable > 1000,
+        "{durable} durable envelopes, ending {:?}",
+        ended.last()
+    );
+    let pages = read_pages(&rpc, &agent, &run_id, json!({})).await;
+    let sizes: Vec<usize> = pages.iter().map(Vec::len).collect();
+    assert_eq!(sizes, vec![durable], "pages of {sizes:?} envelopes");
+}
+
+/// A prompt 32 KiB under the 16 MiB a message may carry streams live in a
+/// `run.event` that fits; `run.events` must answer the same envelope.
+#[tokio::test]
+async fn a_run_whose_envelopes_streamed_live_can_be_replayed() {
+    let mut rpc = Rpc::new();
+    let agent = rpc.open(scripted(vec![text_turn("Hi.")], None, "")).await;
+    let prompt = "x".repeat(16 * 1024 * 1024 - 32 * 1024);
+    let run_id = rpc.start(&agent, "s1", &prompt).await;
+    let ended = rpc.until_end(&run_id).await;
+    assert!(ended.error.is_none(), "the run itself streams fine");
+    let durable = (ended.envelopes.iter())
+        .filter(|e| e.event.persistence() == Persistence::Both)
+        .count();
+    let pages = read_pages(&rpc, &agent, &run_id, json!({})).await;
+    assert_eq!(pages.iter().map(Vec::len).sum::<usize>(), durable);
+}
+
+/// A `limit` or `max_bytes` above the most is lowered to it, whatever its
+/// size; a value that is not a count is `-32602`.
+#[tokio::test]
+async fn run_events_lowers_any_large_limit_and_refuses_what_is_not_a_count() {
+    let mut rpc = Rpc::new();
+    let agent = rpc.open(scripted(vec![text_turn("Hi.")], None, "")).await;
+    let run_id = rpc.start(&agent, "s1", "Go.").await;
+    rpc.until_end(&run_id).await;
+    let mut refused = Vec::new();
+    for (field, value) in [
+        ("limit", json!(10_001)),
+        ("limit", json!(u32::MAX)),
+        ("limit", json!(u64::from(u32::MAX) + 1)),
+        ("limit", json!(u64::MAX)),
+        ("max_bytes", json!(u64::MAX)),
+    ] {
+        let params = json!({"agent": agent, "run_id": run_id, field: value});
+        if let Err(error) = rpc.call(method::RUN_EVENTS, params).await {
+            refused.push(format!("{field}={value}: {error}"));
+        }
+    }
+    assert!(refused.is_empty(), "not lowered but refused: {refused:#?}");
+    for field in ["limit", "max_bytes"] {
+        for value in [json!(-1), json!(1.5), json!("5"), json!([1]), json!(true)] {
+            let params = json!({"agent": agent, "run_id": run_id, field: value.clone()});
+            let error = rpc.call(method::RUN_EVENTS, params).await.unwrap_err();
+            assert_eq!(code_of(error), code::INVALID_PARAMS, "{field}={value}");
+        }
+    }
+}
+
+/// The report of a run with one 9 MiB answer is readable: long text in it
+/// is cut with a marker and counted, so the answer stays under a message.
+#[tokio::test]
+async fn run_report_of_a_large_run_can_be_read() {
+    let mut rpc = Rpc::new();
+    let text = "x".repeat(9 * 1024 * 1024);
+    let agent = rpc.open(scripted(vec![text_turn(&text)], None, "")).await;
+    let run_id = rpc.start(&agent, "s1", "Go.").await;
+    let ended = rpc.until_end(&run_id).await;
+    assert!(ended.error.is_none(), "the run itself streams fine");
+    for timeline in [false, true] {
+        let params = json!({"agent": agent, "run_id": run_id, "timeline": timeline});
+        let report = rpc.call("run.report", params).await;
+        let report = report.unwrap_or_else(|error| panic!("timeline {timeline}: {error}"));
+        assert!(
+            report["truncated"]["strings"].as_u64().unwrap() >= 1,
+            "{timeline}"
+        );
+        assert!(report.to_string().len() < 4 * 1024 * 1024, "{timeline}");
+    }
+}
+
 /// The members added for paging stay off the wire while unset.
 #[test]
 fn unset_run_events_paging_members_are_not_on_the_wire() {

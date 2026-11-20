@@ -187,11 +187,33 @@ class RunReport(TypedDict):
     timeline: list[dict[str, Any]]
 
 
+class ReportTruncated(TypedDict):
+    """What the server cut from a report to keep it under a message.
+
+    Attributes:
+        strings: How many strings were cut to 64 KiB, each ending in a
+            `... [truncated: N more bytes]` marker.
+        timeline_omitted: How many timeline events were dropped from its end;
+            absent when none was.
+    """
+
+    strings: int
+    timeline_omitted: NotRequired[int]
+
+
 class RunReportResult(TypedDict):
-    """The answer of `Agent.report`: the report and its Markdown form."""
+    """The answer of `Agent.report`: the report and its Markdown form.
+
+    Attributes:
+        report: The report.
+        markdown: Its Markdown form.
+        truncated: Present only when the server cut long text or the
+            timeline of a report too long for a message.
+    """
 
     report: RunReport
     markdown: str
+    truncated: NotRequired[ReportTruncated]
 
 
 CustomScorer = Callable[[CaseResult], "bool | None | Awaitable[bool | None]"]

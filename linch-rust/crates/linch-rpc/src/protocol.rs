@@ -407,12 +407,14 @@ pub struct EventsParams {
     #[serde(default)]
     pub after_seq: u64,
     /// The most envelopes in the answer: 1000 when absent, at most 10000
-    /// (a larger value is lowered to it), never 0.
+    /// (a larger value is lowered to it), never 0. With neither `limit` nor
+    /// `max_bytes` the answer holds every envelope that fits in one message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limit: Option<u32>,
-    /// The most encoded bytes of envelopes in the answer: 4 MiB when
+    pub limit: Option<u64>,
+    /// The most encoded bytes of envelopes in the answer: 8 MiB when
     /// absent, at most 8 MiB (a larger value is lowered to it), never 0. An
-    /// envelope that alone is longer is still returned, alone.
+    /// envelope that alone is longer is still returned, alone, unless it
+    /// cannot fit in a message (`-32051`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_bytes: Option<u64>,
 }

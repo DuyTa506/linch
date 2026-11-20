@@ -16,18 +16,23 @@ use crate::protocol::{
 };
 use crate::schedule_tools::{Binding, Bound};
 
-/// Envelopes in a `run.events` answer when the request has no `limit`.
+/// Envelopes in a `run.events` answer when the request names a `max_bytes`
+/// but no `limit`.
 const EVENTS_LIMIT_DEFAULT: usize = 1000;
 /// The most envelopes one `run.events` answer carries, whatever `limit` says.
 const EVENTS_LIMIT_MAX: usize = 10_000;
-/// Encoded bytes of envelopes in a `run.events` answer when the request has
-/// no `max_bytes`.
-const EVENTS_BYTES_DEFAULT: usize = 4 * 1024 * 1024;
-/// The most encoded bytes one `run.events` answer carries beyond its first
-/// envelope; half of [`MAX_LINE_BYTES`], so the message stays under it.
+/// The most encoded bytes of envelopes one `run.events` answer carries
+/// beyond its first, whatever `max_bytes` says, and what it carries when the
+/// request names a `limit` but no `max_bytes`: half of [`MAX_LINE_BYTES`].
 const EVENTS_BYTES_MAX: usize = MAX_LINE_BYTES / 2;
-/// Room the answer's other members take in a message.
-const EVENTS_MESSAGE_OVERHEAD: usize = 64 * 1024;
+/// Bytes the answer's framing takes in a message, at most: the JSON-RPC
+/// envelope with a 20 digit id, `events` and a 20 digit `next_after_seq`
+/// come to 105 bytes.
+const EVENTS_FRAMING_BYTES: usize = 128;
+/// The encoded bytes of envelopes (each followed by its comma) that one
+/// answer may carry so that the whole message fits [`MAX_LINE_BYTES`]: what a
+/// request with neither `limit` nor `max_bytes` gets.
+const EVENTS_MESSAGE_BYTES: usize = MAX_LINE_BYTES - EVENTS_FRAMING_BYTES;
 
 impl Server {
     /// Open an agent whose host tools and callbacks call back over this
@@ -146,20 +151,24 @@ impl Server {
         Ok(JsonValue::Object(JsonObject::new()))
     }
 
-    /// One page of a run's durable envelopes: at most `limit` of them and
-    /// `max_bytes` encoded, with the seq to continue from when more follow.
+    /// One page of a run's durable envelopes. A request with neither
+    /// `limit` nor `max_bytes` gets every envelope that fits in one message;
+    /// otherwise at most `limit` envelopes and `max_bytes` encoded bytes
+    /// (each lowered to its most). When more follow, the answer names the
+    /// seq to continue from.
     pub(super) async fn events(&self, params: EventsParams) -> Result<JsonValue, ErrorObject> {
-        let limit = match params.limit {
-            None => EVENTS_LIMIT_DEFAULT,
-            Some(0) => return Err(invalid_params("limit is at least 1")),
-            Some(limit) => (limit as usize).min(EVENTS_LIMIT_MAX),
-        };
-        let max_bytes = match params.max_bytes {
-            None => EVENTS_BYTES_DEFAULT,
-            Some(0) => return Err(invalid_params("max_bytes is at least 1")),
-            Some(bytes) => {
-                usize::try_from(bytes).map_or(EVENTS_BYTES_MAX, |b| b.min(EVENTS_BYTES_MAX))
-            }
+        if params.limit == Some(0) {
+            return Err(invalid_params("limit is at least 1"));
+        }
+        if params.max_bytes == Some(0) {
+            return Err(invalid_params("max_bytes is at least 1"));
+        }
+        let (limit, max_bytes) = match (params.limit, params.max_bytes) {
+            (None, None) => (usize::MAX, EVENTS_MESSAGE_BYTES),
+            (limit, bytes) => (
+                lowered(limit, EVENTS_LIMIT_DEFAULT, EVENTS_LIMIT_MAX),
+                lowered(bytes, EVENTS_BYTES_MAX, EVENTS_BYTES_MAX),
+            ),
         };
         let agent = lock(&self.0.tables).agent(&params.agent)?;
         let events = agent
@@ -174,10 +183,18 @@ impl Server {
     }
 }
 
-/// The first `limit` envelopes of `events` that fit in `max_bytes` encoded,
-/// and the seq of the last one when more follow. The first envelope is
-/// always taken, so a reader makes progress; one too long for any message
-/// is refused.
+/// `value`, or `default` when absent, lowered to `most`.
+fn lowered(value: Option<u64>, default: usize, most: usize) -> usize {
+    value.map_or(default, |value| {
+        usize::try_from(value).map_or(most, |value| value.min(most))
+    })
+}
+
+/// The first `limit` envelopes of `events` that fit in `max_bytes` encoded
+/// (a comma counts with each), and the seq of the last one when more
+/// follow. The first envelope is always taken, so a reader makes progress;
+/// one that cannot fit in a message with its answer's framing is refused,
+/// naming its seq.
 fn page(
     mut events: Vec<Envelope>,
     limit: usize,
@@ -189,13 +206,16 @@ fn page(
         if taken == limit {
             break;
         }
-        let size = encoded_len(envelope);
-        if taken == 0 && size > MAX_LINE_BYTES - EVENTS_MESSAGE_OVERHEAD {
+        let size = encoded_len(envelope) + 1;
+        if taken == 0 && size > EVENTS_MESSAGE_BYTES {
             let message = format!(
-                "event {} is {size} bytes, more than the {MAX_LINE_BYTES} a message may carry",
-                envelope.seq
+                "event {seq} is {size} bytes; with the answer's framing it is longer than the \
+                 {MAX_LINE_BYTES} bytes a message may carry, so run.events cannot return it; \
+                 ask again with after_seq {seq} to continue after it",
+                seq = envelope.seq
             );
-            return Err(ErrorObject::new(code::INTERNAL_ERROR, message));
+            return Err(ErrorObject::new(code::EVENT_TOO_LARGE, message)
+                .with_data(json!({ "seq": envelope.seq })));
         }
         if taken > 0 && bytes + size > max_bytes {
             break;
@@ -291,13 +311,38 @@ mod tests {
         assert_eq!((seqs(&taken), next), (vec![1], Some(1)));
     }
 
+    /// An envelope whose encoding, with its comma, is `size` bytes.
+    fn envelope_of(seq: u64, size: usize) -> Envelope {
+        let empty = encoded_len(&envelope(seq, 0)) + 1;
+        envelope(seq, size - empty)
+    }
+
+    /// The answer with one envelope is its framing and the envelope: an
+    /// envelope that fits with the framing (as one that streamed live in a
+    /// `run.event` does) is returned; one byte past it is refused.
+    #[test]
+    fn an_envelope_that_fits_a_message_with_its_framing_is_returned_alone() {
+        let live = envelope_of(2, MAX_LINE_BYTES - 100_000);
+        let (taken, next) = page(vec![envelope(1, 10), live], 100, EVENTS_BYTES_MAX).unwrap();
+        assert_eq!((seqs(&taken), next), (vec![1], Some(1)));
+        let edge = envelope_of(2, EVENTS_MESSAGE_BYTES);
+        let (taken, next) = page(vec![edge], usize::MAX, EVENTS_MESSAGE_BYTES).unwrap();
+        assert_eq!((seqs(&taken), next), (vec![2], None));
+        let the_answer = json!({"jsonrpc": "2.0", "id": u64::MAX, "result": Events {
+            events: taken, next_after_seq: Some(u64::MAX)}});
+        assert!(the_answer.to_string().len() < MAX_LINE_BYTES);
+    }
+
     #[test]
     fn an_envelope_too_long_for_one_message_is_refused_with_its_seq() {
-        let events = vec![envelope(1, 10), envelope(2, MAX_LINE_BYTES)];
-        let (taken, next) = page(events.clone(), 100, EVENTS_BYTES_MAX).unwrap();
+        let too_long = envelope_of(7, EVENTS_MESSAGE_BYTES + 1);
+        let error = page(vec![too_long], usize::MAX, EVENTS_MESSAGE_BYTES).unwrap_err();
+        assert_eq!(error.code, code::EVENT_TOO_LARGE);
+        assert_eq!(error.data, Some(json!({"seq": 7})));
+        assert!(error.message.contains("after_seq 7"), "{}", error.message);
+        // Earlier envelopes are still returned: the refusal waits for its turn.
+        let events = vec![envelope(1, 10), envelope_of(2, MAX_LINE_BYTES)];
+        let (taken, next) = page(events, 100, EVENTS_MESSAGE_BYTES).unwrap();
         assert_eq!((seqs(&taken), next), (vec![1], Some(1)));
-        let error = page(events[1..].to_vec(), 100, EVENTS_BYTES_MAX).unwrap_err();
-        assert_eq!(error.code, code::INTERNAL_ERROR);
-        assert!(error.message.contains("event 2 "), "{}", error.message);
     }
 }
