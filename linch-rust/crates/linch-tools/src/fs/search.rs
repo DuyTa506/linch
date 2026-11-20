@@ -2,6 +2,7 @@
 //! walks (gitignore, hidden files, type table, `--glob` overrides) and
 //! `grep-searcher` searches, so no process is spawned.
 
+use std::error::Error;
 use std::io;
 use std::path::{Component, Path};
 
@@ -12,7 +13,7 @@ use ignore::types::TypesBuilder;
 use ignore::{DirEntry, WalkBuilder};
 use tokio_util::sync::CancellationToken;
 
-use super::beneath::stamp_of_stat;
+use super::beneath::{exhausted, stamp_of_stat};
 use super::local::is_hidden;
 use super::{
     FsError, GlobHit, GlobHits, GlobQuery, GrepFile, GrepHits, GrepLine, GrepMode, GrepQuery,
@@ -28,9 +29,12 @@ pub(super) fn grep(
     query: &GrepQuery,
     stop: &CancellationToken,
 ) -> Result<GrepHits, FsError> {
-    let target = fs
-        .locate(query.path.as_deref().unwrap_or("."))?
-        .real_path(fs.root());
+    let at = fs.locate(query.path.as_deref().unwrap_or("."))?;
+    if !at.tail.is_empty() && at.leaf.is_none() {
+        // Nothing there to search.
+        return Ok(GrepHits::default());
+    }
+    let target = at.real_path(fs.root());
     let matcher = matcher(query)?;
     let limit = fs.search_limit();
     let mut searcher = searcher(query, limit);
@@ -185,19 +189,49 @@ fn walker(dir: &Path, hidden: bool) -> WalkBuilder {
     walk
 }
 
-/// The path of a walked regular file. Directories, symlinks and unreadable
-/// entries yield `None`, so a search never leaves the root through a link.
+/// The path of a walked regular file. Directories and symlinks yield `None`,
+/// so a search never leaves the root through a link. An entry the walk could
+/// not read is counted in `left_out`, unless the process is out of
+/// descriptors, which is an error: an empty answer would look like a tree
+/// with nothing in it.
 fn listed_file(
     entry: Result<DirEntry, ignore::Error>,
-    _left_out: &mut usize,
+    left_out: &mut usize,
 ) -> Result<Option<std::path::PathBuf>, FsError> {
-    let Ok(entry) = entry else {
-        return Ok(None);
-    };
-    Ok(entry
-        .file_type()
-        .is_some_and(|kind| kind.is_file())
-        .then(|| entry.into_path()))
+    match entry {
+        Ok(entry) => Ok(entry
+            .file_type()
+            .is_some_and(|kind| kind.is_file())
+            .then(|| entry.into_path())),
+        Err(error) => {
+            if let Some(source) = error.io_error() {
+                if exhausted_in(source) {
+                    return Err(super::local::io_error(
+                        ".",
+                        io::Error::from(rustix::io::Errno::MFILE),
+                    ));
+                }
+                *left_out += 1;
+            }
+            Ok(None)
+        }
+    }
+}
+
+/// Whether `error`, or an error it wraps (the walk wraps the system's), is
+/// the process running out of descriptors.
+fn exhausted_in(error: &io::Error) -> bool {
+    if exhausted(error) {
+        return true;
+    }
+    let mut next = error.get_ref().map(|inner| inner as &(dyn Error + 'static));
+    while let Some(inner) = next {
+        if inner.downcast_ref::<io::Error>().is_some_and(exhausted) {
+            return true;
+        }
+        next = inner.source();
+    }
+    false
 }
 
 /// The searcher for `query`. It holds at most `limit` bytes of a file: the

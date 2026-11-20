@@ -127,11 +127,6 @@ pub(super) fn read_flags() -> OFlags {
     OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC
 }
 
-/// The directories from the root to the one a walk is in, each held open so
-/// that `..` is a pop and never the kernel's `..`, which would follow a
-/// directory that was moved.
-type Trail = Vec<(OsString, Arc<OwnedFd>)>;
-
 /// What a name in a directory is.
 enum Found {
     Dir,
@@ -148,6 +143,12 @@ enum Found {
 /// error: it is the start of [`Located::tail`], unless a symlink led to it (a
 /// dangling link), which is [`FsError::Escape`] because writing there would
 /// create the link's target.
+///
+/// With [`Links::Follow`] the walk keeps the directories above the current
+/// one open, so that `..` is a pop and never the kernel's `..` (which would
+/// follow a directory that was moved), and goes down at most [`MAX_DEPTH`]
+/// levels. With [`Links::Refuse`] no `..` or symlink is allowed, so only the
+/// current directory is held and the depth is not limited.
 pub(super) fn locate(
     root_fd: &Arc<OwnedFd>,
     root: &Path,
@@ -164,19 +165,23 @@ pub(super) fn locate(
         return Err(escape());
     }
     let too_deep = || io(Errno::NAMETOOLONG);
-    let mut trail: Trail = Vec::new();
+    let follow = links == Links::Follow;
+    // `names[i]` is a directory inside `parents[i]` (Follow only).
+    let mut names: Vec<OsString> = Vec::new();
+    let mut parents: Vec<Arc<OwnedFd>> = Vec::new();
+    let mut dir = Arc::clone(root_fd);
     let mut followed = 0;
     while let Some(Step { part, linked }) = pending.pop() {
         let name = match part {
             Part::Up => {
-                if trail.pop().is_none() {
+                if !follow || names.pop().is_none() {
                     return Err(escape());
                 }
+                dir = parents.pop().ok_or_else(escape)?;
                 continue;
             }
             Part::Name(name) => name,
         };
-        let dir = Arc::clone(trail.last().map_or(root_fd, |(_, fd)| fd));
         // The last name is statted so a plain file costs one call; a
         // directory name is opened, and the open says when it is not one.
         let found = if pending.is_empty() {
@@ -192,8 +197,8 @@ pub(super) fn locate(
         } else {
             match open_dir(&dir, &name) {
                 Ok(next) => {
-                    trail.push((name, Arc::new(next)));
-                    if trail.len() > MAX_DEPTH {
+                    descend(&mut dir, next, name, &mut names, &mut parents, follow);
+                    if parents.len() > MAX_DEPTH {
                         return Err(too_deep());
                     }
                     continue;
@@ -219,14 +224,14 @@ pub(super) fn locate(
                     Errno::LOOP | Errno::NOTDIR => escape(),
                     other => io(other),
                 })?;
-                trail.push((name, Arc::new(next)));
-                if trail.len() > MAX_DEPTH {
+                descend(&mut dir, next, name, &mut names, &mut parents, follow);
+                if parents.len() > MAX_DEPTH {
                     return Err(too_deep());
                 }
             }
             Found::Link => {
                 followed += 1;
-                if links == Links::Refuse {
+                if !follow {
                     return Err(escape());
                 }
                 if followed > MAX_LINKS {
@@ -240,7 +245,9 @@ pub(super) fn locate(
                     let Ok(inside) = target.strip_prefix(root) else {
                         return Err(escape());
                     };
-                    trail.clear();
+                    names.clear();
+                    parents.clear();
+                    dir = Arc::clone(root_fd);
                     inside.to_owned()
                 } else {
                     target
@@ -250,7 +257,12 @@ pub(super) fn locate(
                 }
             }
             Found::File(stat) => {
-                return Ok(located(dir, &trail, vec![name], Some(stat)));
+                return Ok(Located {
+                    dir,
+                    names,
+                    tail: vec![name],
+                    leaf: Some(stat),
+                });
             }
             Found::Missing => {
                 if linked {
@@ -263,23 +275,39 @@ pub(super) fn locate(
                         Part::Up => return Err(escape()),
                     }
                 }
-                if trail.len() + tail.len() > MAX_DEPTH {
+                if follow && parents.len() + tail.len() > MAX_DEPTH {
                     return Err(too_deep());
                 }
-                return Ok(located(dir, &trail, tail, None));
+                return Ok(Located {
+                    dir,
+                    names,
+                    tail,
+                    leaf: None,
+                });
             }
         }
     }
-    let dir = Arc::clone(trail.last().map_or(root_fd, |(_, fd)| fd));
-    Ok(located(dir, &trail, Vec::new(), None))
+    Ok(Located {
+        dir,
+        names,
+        tail: Vec::new(),
+        leaf: None,
+    })
 }
 
-fn located(dir: Arc<OwnedFd>, trail: &Trail, tail: Vec<OsString>, leaf: Option<Stat>) -> Located {
-    Located {
-        dir,
-        names: trail.iter().map(|(name, _)| name.clone()).collect(),
-        tail,
-        leaf,
+/// Go into the directory `next`, named `name` in `dir`.
+fn descend(
+    dir: &mut Arc<OwnedFd>,
+    next: OwnedFd,
+    name: OsString,
+    names: &mut Vec<OsString>,
+    parents: &mut Vec<Arc<OwnedFd>>,
+    follow: bool,
+) {
+    names.push(name);
+    let above = std::mem::replace(dir, Arc::new(next));
+    if follow {
+        parents.push(above);
     }
 }
 

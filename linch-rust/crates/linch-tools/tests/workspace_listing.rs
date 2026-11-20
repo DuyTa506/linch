@@ -181,3 +181,21 @@ async fn entries_a_search_cannot_read_are_counted_and_not_named() {
         assert!(!text.contains("-name"), "{text}");
     }
 }
+
+/// A file below 128 directories is searched like any other: a search holds
+/// no descriptor per level, so it has no depth limit.
+#[tokio::test]
+async fn a_search_finds_a_file_below_128_directories() {
+    let ws = Workspace::new();
+    let deep = vec!["a"; 130].join("/");
+    ws.put(&format!("{deep}/f.txt"), "needle\n");
+    ws.put("top.txt", "needle\n");
+    let grep = any(call(&Grep::new(ws.fs.clone()), json!({"pattern": "needle"})).await);
+    assert!(
+        grep.lines().any(|line| line == format!("{deep}/f.txt")),
+        "{grep}"
+    );
+    assert!(!grep.contains("left out"), "{grep}");
+    let glob = any(call(&Glob::new(ws.fs.clone()), json!({"pattern": "**/f.txt"})).await);
+    assert_eq!(glob, format!("{deep}/f.txt"));
+}
