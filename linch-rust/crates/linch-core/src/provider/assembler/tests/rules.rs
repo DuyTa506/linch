@@ -403,3 +403,47 @@ fn completed_calls_require_the_tool_use_stop_reason() {
         } if got_usage == Some(usage)
     ));
 }
+
+/// Pushes `events` after a `message_start`, and returns the error the first
+/// refused one gave, if any.
+fn first_refusal(events: impl Iterator<Item = ProviderEvent>) -> Option<StreamError> {
+    let mut assembler = Assembler::new();
+    assembler.push(start("m")).unwrap();
+    events
+        .filter_map(|event| assembler.push(event).err())
+        .next()
+}
+
+#[test]
+fn a_response_of_endless_small_deltas_is_cut_off() {
+    // 256 MiB in 1 KiB deltas, eight times the cap.
+    let delta = || {
+        ProviderEvent::TextDelta(TextDeltaEvent {
+            text: "x".repeat(1024),
+        })
+    };
+    let refused = first_refusal((0..256 * 1024).map(|_| delta()));
+    assert!(
+        matches!(refused, Some(StreamError::ResponseTooLarge { limit }) if limit == MAX_RESPONSE_BYTES),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn a_response_of_endless_tool_calls_is_cut_off() {
+    let calls = (0..100_000).flat_map(|n| {
+        let id = format!("c{n}");
+        [
+            ProviderEvent::ToolUseStart(ToolUseStartEvent {
+                id: id.clone(),
+                name: "t".into(),
+            }),
+            ProviderEvent::ToolUseEnd(ToolUseEndEvent { id }),
+        ]
+    });
+    let refused = first_refusal(calls);
+    assert!(
+        matches!(refused, Some(StreamError::TooManyToolCalls { limit }) if limit == MAX_RESPONSE_TOOL_CALLS),
+        "{refused:?}"
+    );
+}

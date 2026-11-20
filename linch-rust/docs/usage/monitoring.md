@@ -172,7 +172,10 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-A case is `{prompt, expected?, metadata?}`; the prompt is not empty. A case
+A case is `{prompt, expected?, metadata?}`; the prompt is not empty. A tenant's
+`eval.run` takes at most 256 cases (`-32602` beyond that, before any runs); a
+local connection has no cap. The runs are claimed under the server's id like any
+run it drives. A case
 passes when its run records no error and no scorer returns `False`. A scorer
 returns `None` (unknown) when the run lacks the data it reads, and unknown does
 not fail a case.

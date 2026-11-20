@@ -78,7 +78,14 @@ của stream và thực thi các quy tắc ở mỗi lần push; `assemble`
   tên không rỗng;
 - một input delta hoặc `tool_use_end` nêu tên một lời gọi đang mở;
 - mọi lời gọi đã mở đều kết thúc trước `message_end`;
-- `stop_reason` là `tool_use` khi và chỉ khi có ít nhất một lời gọi hoàn tất.
+- `stop_reason` là `tool_use` khi và chỉ khi có ít nhất một lời gọi hoàn tất;
+- một response chứa tối đa 32 MiB (`MAX_RESPONSE_BYTES`: văn bản, thinking và
+  chữ ký của nó, dữ liệu bị ẩn, id, tên và input của lời gọi) và 4096 lời gọi tool (`MAX_RESPONSE_TOOL_CALLS`), nếu
+  không là `StreamError::ResponseTooLarge` hoặc `TooManyToolCalls`. Một response không thể
+  chứa nhiều token hơn cửa sổ ngữ cảnh của model, và cửa sổ lớn nhất trong bảng của các
+  adapter là 2.000.000 token (`gemini-1.5-pro`); ở tối đa 8 byte một token là 16 MiB, nên
+  một response hợp lệ không bao giờ chạm tới 32 MiB (một câu trả lời 128k token khoảng
+  1 MiB). 4096 lời gọi là một câu trả lời 128k token gồm các lời gọi 32 token.
 
 Một lời gọi mà input đã nối không phải đối tượng JSON (sai cú pháp, bị cắt, một mảng)
 không làm stream thất bại: block giữ `input` rỗng và văn bản của model trong

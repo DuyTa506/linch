@@ -140,7 +140,7 @@ impl AgentInner {
             .filter(|policy| !policy.prerequisites.is_empty());
         let gates = match &spec.policy {
             Some(policy) => Some(Arc::new(
-                Rules::new(policy.clone()).map_err(BuildError::Invalid)?,
+                Rules::new(policy.clone()).map_err(BuildError::Policy)?,
             )),
             None => None,
         };
@@ -157,6 +157,7 @@ impl AgentInner {
             tools: Arc::clone(&self.tools),
             filter: Some(filter),
             permissions: self.permissions.clone(),
+            path_base: self.path_base.clone(),
             hooks: Arc::clone(&self.hooks),
             runs: Arc::clone(&self.runs),
             sessions: Arc::clone(&self.sessions),

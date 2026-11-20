@@ -1,6 +1,6 @@
 //! [`plan`]: decide every call of a batch before anything runs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::hooks::{
@@ -144,6 +144,36 @@ pub enum PlannedAction {
     AwaitingInput,
 }
 
+/// Where the file tools of an agent resolve a relative path, when that is not
+/// the permission policy's project root.
+///
+/// Permission judges a relative path against the project root. A tool that
+/// joins it to another directory (the workspace) acts on a different path
+/// than the one judged, so the agent names that directory for those tools,
+/// and the engine that judges them names the project root in the same
+/// (canonical) form as that directory.
+#[derive(Debug, Clone)]
+pub(crate) struct PathBase {
+    dir: String,
+    engine: PermissionEngine,
+    tools: HashSet<String>,
+}
+
+impl PathBase {
+    /// `tools` resolve relative paths in `dir`, an absolute directory.
+    /// `engine` holds the agent's policy with its project root spelled as
+    /// `dir` is.
+    pub(crate) fn new(dir: String, engine: PermissionEngine, tools: HashSet<String>) -> Self {
+        Self { dir, engine, tools }
+    }
+
+    /// The engine that judges `tool` and the directory it resolves a
+    /// relative path in, if it is one of the tools this base covers.
+    fn judge(&self, tool: &str) -> Option<(&PermissionEngine, &str)> {
+        (self.tools.contains(tool)).then_some((&self.engine, self.dir.as_str()))
+    }
+}
+
 /// Decide every call in `blocks`, in order, without running any tool.
 ///
 /// Per call: resolve the name in `tools`, validate the input, run the
@@ -172,14 +202,26 @@ pub async fn plan(
     run: &RunIdentity,
     approvals: &HashMap<String, RecordedApproval>,
 ) -> BatchPlan {
-    plan_gated(blocks, tools, permissions, hooks, run, approvals, &|_| None).await
+    plan_gated(
+        blocks,
+        tools,
+        permissions,
+        hooks,
+        run,
+        approvals,
+        None,
+        &|_| None,
+    )
+    .await
 }
 
 /// [`plan`], with a `gate` that may refuse a call before anything else
 /// is asked about it: it gets the call, and an error message answers the
 /// call with an error result, without the `pre_tool_use` chain, permission
 /// or approval (the call is as an unknown tool's). A call whose tool did
-/// not resolve is never gated.
+/// not resolve is never gated. `path_base` names where some tools resolve a
+/// relative path ([`PathBase`]).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn plan_gated(
     blocks: &[ToolUseBlock],
     tools: &ToolSnapshot,
@@ -187,6 +229,7 @@ pub(crate) async fn plan_gated(
     hooks: &Hooks,
     run: &RunIdentity,
     approvals: &HashMap<String, RecordedApproval>,
+    path_base: Option<&PathBase>,
     gate: &(dyn Fn(&ToolUseBlock) -> Option<String> + Sync),
 ) -> BatchPlan {
     let planner = Planner {
@@ -194,6 +237,7 @@ pub(crate) async fn plan_gated(
         hooks,
         run,
         approvals,
+        path_base,
         gate,
     };
     let mut calls = Vec::with_capacity(blocks.len());
@@ -213,6 +257,7 @@ pub(crate) async fn plan_one(
     permissions: &PermissionEngine,
     hooks: &Hooks,
     run: &RunIdentity,
+    path_base: Option<&PathBase>,
 ) -> PlannedCall {
     let approvals = HashMap::new();
     let planner = Planner {
@@ -220,6 +265,7 @@ pub(crate) async fn plan_one(
         hooks,
         run,
         approvals: &approvals,
+        path_base,
         gate: &|_| None,
     };
     planner.call(block, Some(tool)).await
@@ -230,6 +276,7 @@ struct Planner<'a> {
     hooks: &'a Hooks,
     run: &'a RunIdentity,
     approvals: &'a HashMap<String, RecordedApproval>,
+    path_base: Option<&'a PathBase>,
     gate: &'a (dyn Fn(&ToolUseBlock) -> Option<String> + Sync),
 }
 
@@ -352,8 +399,22 @@ impl Planner<'_> {
     ) -> PermissionDecision {
         let principal = self.run.principal.as_ref();
         let scope = tool.tool().scope();
-        let permission_call = PermissionCall::new(&call.tool_name, scope, &call.input);
-        let mut decision = self.permissions.evaluate(&permission_call, principal);
+        let mut permission_call = PermissionCall::new(&call.tool_name, scope, &call.input);
+        let (engine, cwd) = match self.path_base.and_then(|base| base.judge(&call.tool_name)) {
+            Some((engine, cwd)) => (engine, Some(cwd)),
+            None => (self.permissions, None),
+        };
+        permission_call.cwd = cwd;
+        let mut decision = engine.evaluate(&permission_call, principal);
+        // A path spelled through the project root as written (a link) is
+        // below that root only in the policy's own spelling: its deny holds
+        // as well.
+        if cwd.is_some() && !matches!(decision, PermissionDecision::Deny { .. }) {
+            let written = self.permissions.evaluate(&permission_call, principal);
+            if matches!(written, PermissionDecision::Deny { .. }) {
+                decision = written;
+            }
+        }
         if let PermissionDecision::Ask { reason } = &decision
             && !self.hooks.permission_request.is_empty()
         {

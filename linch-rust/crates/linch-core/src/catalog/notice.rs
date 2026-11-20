@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 
 use super::LiveSkill;
 use crate::canonical::Digest;
+use crate::coordination::escape;
 use crate::message::CatalogChangeBlock;
 use crate::provider::ToolDefinition;
 use crate::skills::system_reminder;
@@ -17,7 +18,8 @@ const HEADER: &str = "The available catalog changed during this session.";
 ///
 /// Added and changed tools are listed in `live` order, removed ones in
 /// `told` order; skills by name. A changed tool's line shows its new
-/// description.
+/// description. Names and descriptions go in with `<`, `>` and `&` escaped,
+/// so none can close the wrapper.
 pub(super) fn diff(
     told: &[ToolDefinition],
     live: &[ToolDefinition],
@@ -58,7 +60,8 @@ pub(super) fn diff(
     if empty && skills_added.is_empty() && skills_changed.is_empty() && removed_skills.is_empty() {
         return None;
     }
-    let line = |name: &str, description: &str| format!("{name}: {description}");
+    let line = |name: &str, description: &str| format!("{}: {}", escape(name), escape(description));
+    let names = |names: &[String]| names.iter().map(|name| escape(name)).collect::<Vec<_>>();
     let tool_lines: Vec<String> = (updated.iter())
         .map(|tool| line(&tool.name, &tool.description))
         .collect();
@@ -69,11 +72,11 @@ pub(super) fn diff(
     };
     let mut lines = vec![HEADER.to_owned()];
     for (label, values) in [
-        ("Added tools", added.clone()),
-        ("Removed tools", removed.clone()),
+        ("Added tools", names(&added)),
+        ("Removed tools", names(&removed)),
         ("Updated tools", tool_lines),
         ("Added skills", skill_lines(&skills_added)),
-        ("Removed skills", removed_skills.clone()),
+        ("Removed skills", names(&removed_skills)),
         ("Updated skills", skill_lines(&skills_changed)),
     ] {
         if !values.is_empty() {

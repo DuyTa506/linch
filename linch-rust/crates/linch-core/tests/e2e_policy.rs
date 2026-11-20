@@ -440,7 +440,7 @@ fn a_forced_tool_choice_cannot_go_with_a_policy_it_defeats() {
         let mut spec = policy;
         spec.tool_choice = Some(choice.clone());
         match build_with(spec) {
-            Err(BuildError::Invalid(reason)) => {
+            Err(BuildError::Policy(reason)) => {
                 assert!(reason.contains("tool_choice"), "{why} {choice:?}: {reason}")
             }
             other => panic!("{why} {choice:?}: {:?}", other.map(|_| ())),
@@ -821,9 +821,10 @@ fn a_policy_that_cannot_run_fails_the_build() {
             stores,
         );
         match builder.build() {
-            Err(BuildError::Invalid(reason)) => reason,
+            Err(BuildError::Policy(reason)) => (true, reason),
+            Err(BuildError::Invalid(reason)) => (false, reason),
             Err(other) => panic!("{other:?}"),
-            Ok(_) => String::new(),
+            Ok(_) => (true, String::new()),
         }
     };
     let need = |tool: &str, requires: &[&str]| json!({"tool": tool, "requires": requires});
@@ -831,60 +832,73 @@ fn a_policy_that_cannot_run_fails_the_build() {
         (
             json!({"prerequisites": [need("Nope", &["Lookup"])]}),
             "not a tool the agent has",
+            true,
         ),
         (
             json!({"prerequisites": [need("Update", &["Nope"])]}),
             "not a tool the agent has",
+            true,
         ),
         (
             json!({"prerequisites": [need("Update", &["Update"])]}),
             "cannot require itself",
+            false,
         ),
         (
             json!({"prerequisites": [need("Update", &[])]}),
             "requires no tool",
+            false,
         ),
         (
             json!({"prerequisites": [need("Update", &["Lookup", "Lookup"])]}),
             "twice",
+            false,
         ),
         (
             json!({"prerequisites": [need("Update", &["Lookup"]), need("Update", &["Test"])]}),
             "two prerequisites name",
+            false,
         ),
         (
             json!({"prerequisites": [
                 need("Update", &["Lookup"]), need("Lookup", &["Test"]), need("Test", &["Update"]),
             ]}),
             "lead back to",
+            true,
         ),
         (
             json!({"gates": [{"name": " ", "succeeded": ["Test"]}]}),
             "must not be blank",
+            false,
         ),
         (
             json!({"gates": [{"name": "a", "succeeded": ["Test"]}, {"name": "a", "succeeded": ["Test"]}]}),
             "two gates are named",
+            false,
         ),
-        (json!({"gates": [{"name": "a"}]}), "asks for nothing"),
+        (json!({"gates": [{"name": "a"}]}), "asks for nothing", false),
         (
             json!({"gates": [{"name": "a", "succeeded": ["Test"], "min_calls": 0}]}),
             "min_calls",
+            false,
         ),
         (
             json!({"gates": [{"name": "a", "succeeded": ["Nope"]}]}),
             "not a tool the agent has",
+            true,
         ),
         (
             json!({"gates": [{"name": "a", "check": {"type": "matches", "pattern": "("}}]}),
             "gate \"a\"",
+            true,
         ),
     ];
-    for (policy, why) in cases {
-        let reason = build(policy.clone());
+    for (policy, why, joint) in cases {
+        let (found_joint, reason) = build(policy.clone());
         assert!(reason.contains(why), "{policy}: {reason:?}");
+        assert_eq!(found_joint, joint, "{policy}: {reason:?}");
     }
-    assert_eq!(build(json!({})), "", "an empty policy is allowed");
+    assert_eq!(build(json!({})).1, "", "an empty policy is allowed");
 }
 
 /// A policy naming the final tool is refused: its call never runs, so it
@@ -919,7 +933,7 @@ fn the_final_tool_cannot_be_named() {
         )
         .build();
         assert!(
-            matches!(&built, Err(BuildError::Invalid(why)) if why.contains("final tool")),
+            matches!(&built, Err(BuildError::Policy(why)) if why.contains("final tool")),
             "{:?}",
             built.err()
         );

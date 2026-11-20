@@ -103,7 +103,10 @@ the tools and the listed skills at that moment
 starts with exactly those bytes, so the prompt cache keeps them whatever the
 registry, the skills or the subagents do. A change goes at the tail instead:
 a `CatalogChangeBlock` (Python Linch's `<system-reminder>` text) in the next
-user message the run logs anyway, so it costs no write.
+user message the run logs anyway, so it costs no write. The notice text
+escapes `<`, `>` and `&` in every tool and skill name and description it
+lists (the structured fields keep the raw text), so a description cannot
+close the wrapper.
 
 - A removed tool keeps its row; a call to it is refused as not registered.
 - An added tool is appended to the request's tools, which costs the cache

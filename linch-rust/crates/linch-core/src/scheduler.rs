@@ -38,9 +38,9 @@ use crate::policy::Principal;
 
 pub(crate) use execute::ABORTED;
 pub use execute::{CallOutcome, ExecuteOptions, Retrying, ToolSink, execute};
-pub(crate) use plan::plan_gated;
 pub(crate) use plan::plan_one;
 pub use plan::{BatchPlan, PlannedAction, PlannedCall, plan};
+pub(crate) use plan::{PathBase, plan_gated};
 
 /// The run a batch belongs to. Every hook request and [`ToolContext`] in the
 /// batch carries these values.
