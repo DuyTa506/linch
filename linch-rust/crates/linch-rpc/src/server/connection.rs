@@ -5,11 +5,9 @@
 //! ([`serve_lines`]) and message transports such as WebSocket
 //! ([`serve_messages`]) feed the same loop.
 
+use std::future::Future;
 use std::io;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures::{Sink, SinkExt, Stream, StreamExt};
@@ -25,9 +23,8 @@ use tokio_util::sync::CancellationToken;
 use super::outgoing::{Batch, Outgoing};
 use super::{Server, login};
 use crate::access::Access;
-use crate::error::{ErrorObject, code};
 use crate::lines::{Frame, HEAD_BYTES, LineCodec};
-use crate::message::{Id, Notification, Response};
+use crate::message::Notification;
 
 /// Longest request line the server reads, in bytes.
 pub const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
@@ -35,12 +32,12 @@ pub const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 /// Responses and notifications waiting for the writer.
 const OUTBOX_CAPACITY: usize = 1024;
 
-/// How long a connection that is ending waits for its writer to make
-/// progress. The queue is written out as long as the client keeps reading;
-/// when nothing more reaches the transport in this time the writer is
-/// aborted and what is queued is dropped, so a client that never reads again
-/// cannot hold its tenant place or the server's shutdown.
-const WRITE_STALL_TIMEOUT: Duration = Duration::from_secs(5);
+/// The grace a connection has after a stop (or the end of its input) to
+/// finish its calls in flight and write what is queued. At its end the calls
+/// still running are dropped, the queue is dropped and the writer is
+/// aborted, however slowly the client was reading; so a client that never
+/// reads again cannot hold its tenant place or the server's shutdown.
+pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(15);
 
 /// Serve one local client until its input ends: [`serve_lines`] with
 /// [`Access::Local`], Postgres pools of its own and no stop signal, as the
@@ -70,8 +67,9 @@ where
 /// stops: each active run is dropped where it stands, as in a crash, so it
 /// stays resumable from its last durable state; every server request still
 /// waiting fails; every agent's MCP servers are disconnected; queued output
-/// is written, unless the client reads nothing for 5 s, when it is dropped;
-/// then this returns.
+/// is written for up to [`SHUTDOWN_GRACE`] after the stop; a client that
+/// cannot take it in that time is cut, however slowly it reads (the calls
+/// still running and the queue are dropped); then this returns.
 ///
 /// Args:
 ///     reader: The client's requests.
@@ -101,17 +99,12 @@ where
         Ok(Frame::TooLong(head)) => Inbound::TooLong(head),
         Err(error) => Inbound::Failed(error),
     });
-    let progress = Progress::default();
-    let writer = Counting {
-        inner: writer,
-        progress: progress.clone(),
-    };
     let output = FramedWrite::new(writer, LinesCodec::new());
     let output = SinkExt::<String>::sink_map_err(output, |error| match error {
         LinesCodecError::Io(error) => error,
         other => io::Error::other(other),
     });
-    connection(input, output, access, stop, progress).await
+    connection(input, output, access, stop).await
 }
 
 /// Serve one client of a message transport (one JSON-RPC message per
@@ -149,7 +142,7 @@ where
         Ok(message) => Inbound::Message(message),
         Err(error) => Inbound::Failed(error),
     });
-    connection(input, outgoing, access, stop, Progress::default()).await
+    connection(input, outgoing, access, stop).await
 }
 
 /// What a transport delivered.
@@ -168,14 +161,13 @@ async fn connection<S, K>(
     output: K,
     access: Access,
     stop: CancellationToken,
-    progress: Progress,
 ) -> io::Result<()>
 where
     S: Stream<Item = Inbound> + Unpin,
     K: Sink<String, Error = io::Error> + Unpin + Send + 'static,
 {
     let (sender, queue) = mpsc::channel(OUTBOX_CAPACITY);
-    let writing = tokio::spawn(write_messages(output, queue, progress.clone()));
+    let writing = tokio::spawn(write_messages(output, queue));
     let outbox = Outbox(sender);
     // A remote connection holds a place among its tenant's connections
     // until it ends.
@@ -192,12 +184,24 @@ where
             }
             None => {
                 drop(outbox);
-                return finish_writing(writing, &progress).await;
+                return finish_writing(writing, tokio::time::sleep(SHUTDOWN_GRACE)).await;
             }
         },
     };
     let tenant = place.as_ref().map(|place| Arc::clone(&place.tenant));
     let server = Server::new(outbox, tenant, pools, &stop);
+    // The grace runs from the first sign of the end: the stop, or the end of
+    // the input (which cancels the server's token in `Server::stop`).
+    let deadline = server.0.deadline.clone();
+    let timer = {
+        let shutdown = server.0.shutdown.clone();
+        let deadline = deadline.clone();
+        tokio::spawn(async move {
+            shutdown.cancelled().await;
+            tokio::time::sleep(SHUTDOWN_GRACE).await;
+            deadline.cancel();
+        })
+    };
     let mut failed = None;
     loop {
         let inbound = tokio::select! {
@@ -207,22 +211,24 @@ where
         };
         match inbound {
             None => break,
-            Some(Inbound::Message(message)) => server.receive(&message).await,
-            Some(Inbound::NotUtf8) => {
-                let error = ErrorObject::new(code::PARSE_ERROR, "not JSON: the line is not UTF-8");
-                server.0.outbox.send(&Response::err(Id::Null, error)).await;
-            }
-            Some(Inbound::TooLong(head)) => server.too_long(&head).await,
             Some(Inbound::Failed(error)) => {
                 failed = Some(error);
                 break;
             }
+            // Handing an answer to a full queue waits for the client: the
+            // stop must not wait behind it.
+            Some(inbound) => tokio::select! {
+                biased;
+                () = stop.cancelled() => break,
+                () = server.inbound(inbound) => {}
+            },
         }
     }
     server.stop().await;
     // The last sender goes with the server; the writer drains and stops.
     drop(server);
-    let written = finish_writing(writing, &progress).await;
+    let written = finish_writing(writing, deadline.cancelled()).await;
+    timer.abort();
     match failed {
         Some(error) => Err(error),
         None => written,
@@ -231,11 +237,7 @@ where
 
 /// Write each queued message, joining a run's consecutive envelopes (see
 /// [`outgoing`](super::outgoing)), and flush once nothing more waits.
-async fn write_messages<K>(
-    mut output: K,
-    mut queue: mpsc::Receiver<Outgoing>,
-    progress: Progress,
-) -> io::Result<()>
+async fn write_messages<K>(mut output: K, mut queue: mpsc::Receiver<Outgoing>) -> io::Result<()>
 where
     K: Sink<String, Error = io::Error> + Unpin,
 {
@@ -249,7 +251,6 @@ where
                         output.feed(line).await?;
                     }
                     output.feed(message).await?;
-                    progress.bump();
                 }
                 Outgoing::Envelope { run_id, envelope } => {
                     if let Some(line) = batch.push(run_id, envelope) {
@@ -263,75 +264,26 @@ where
             output.feed(line).await?;
         }
         output.flush().await?;
-        progress.bump();
     }
     output.close().await
 }
 
-/// Wait for the writer to drain its queue and stop. A writer that gets
-/// nothing more to the transport for [`WRITE_STALL_TIMEOUT`] is aborted,
-/// which drops the queue and the transport.
+/// Wait for the writer to drain its queue and stop, until `deadline`: then
+/// the writer is aborted, which drops the queue and the transport.
 async fn finish_writing(
     mut writing: JoinHandle<io::Result<()>>,
-    progress: &Progress,
+    deadline: impl Future<Output = ()>,
 ) -> io::Result<()> {
-    loop {
-        let seen = progress.get();
-        match tokio::time::timeout(WRITE_STALL_TIMEOUT, &mut writing).await {
-            Ok(written) => return written.map_err(io::Error::other)?,
-            Err(_) if progress.get() != seen => {}
-            Err(_) => {
-                writing.abort();
-                let message = format!(
-                    "the client did not read for {} s; its queued output was dropped",
-                    WRITE_STALL_TIMEOUT.as_secs()
-                );
-                return Err(io::Error::new(io::ErrorKind::TimedOut, message));
-            }
+    tokio::select! {
+        written = &mut writing => written.map_err(io::Error::other)?,
+        () = deadline => {
+            writing.abort();
+            let message = format!(
+                "the client did not take its queued output within {} s of the stop; it was dropped",
+                SHUTDOWN_GRACE.as_secs()
+            );
+            Err(io::Error::new(io::ErrorKind::TimedOut, message))
         }
-    }
-}
-
-/// A count that moves each time the transport takes output.
-#[derive(Clone, Default)]
-struct Progress(Arc<AtomicU64>);
-
-impl Progress {
-    fn bump(&self) {
-        self.0.fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn get(&self) -> u64 {
-        self.0.load(Ordering::Relaxed)
-    }
-}
-
-/// A writer that counts every write the transport accepts, so a client that
-/// reads a large message slowly is seen moving.
-struct Counting<W> {
-    inner: W,
-    progress: Progress,
-}
-
-impl<W: AsyncWrite + Unpin> AsyncWrite for Counting<W> {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        let polled = Pin::new(&mut self.inner).poll_write(cx, buf);
-        if matches!(polled, Poll::Ready(Ok(taken)) if taken > 0) {
-            self.progress.bump();
-        }
-        polled
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_flush(cx)
-    }
-
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
 

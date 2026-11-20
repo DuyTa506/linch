@@ -46,7 +46,7 @@ mod workflow;
 
 use crate::lines::Head;
 use connection::Outbox;
-pub use connection::{MAX_LINE_BYTES, serve, serve_lines, serve_messages};
+pub use connection::{MAX_LINE_BYTES, SHUTDOWN_GRACE, serve, serve_lines, serve_messages};
 use peer::Peer;
 
 /// Calls one connection may have in flight; the read loop waits for one
@@ -84,6 +84,9 @@ struct State {
     runs: TaskTracker,
     /// The tasks answering calls; they finish at shutdown.
     calls: TaskTracker,
+    /// Fires when the grace after the stop is over: the calls still running
+    /// are dropped.
+    deadline: CancellationToken,
     /// One permit per call in flight.
     permits: Arc<Semaphore>,
 }
@@ -171,6 +174,7 @@ impl Server {
             shutdown: stop.child_token(),
             runs: TaskTracker::new(),
             calls: TaskTracker::new(),
+            deadline: CancellationToken::new(),
             permits: Arc::new(Semaphore::new(MAX_REQUESTS)),
         }))
     }
@@ -230,9 +234,27 @@ impl Server {
         };
         let server = self.clone();
         self.0.calls.spawn(async move {
-            server.handle(id, &request.method, request.params).await;
+            tokio::select! {
+                biased;
+                () = server.0.deadline.cancelled() => {}
+                () = server.handle(id, &request.method, request.params) => {}
+            }
             drop(permit);
         });
+    }
+
+    /// One thing the transport delivered, other than its failure.
+    async fn inbound(&self, inbound: connection::Inbound) {
+        use connection::Inbound;
+        match inbound {
+            Inbound::Message(message) => self.receive(&message).await,
+            Inbound::NotUtf8 => {
+                let error = ErrorObject::new(code::PARSE_ERROR, "not JSON: the line is not UTF-8");
+                self.0.outbox.send(&Response::err(Id::Null, error)).await;
+            }
+            Inbound::TooLong(head) => self.too_long(&head).await,
+            Inbound::Failed(_) => {}
+        }
     }
 
     /// Hand the client's answer to the server request it names. A

@@ -55,9 +55,18 @@ pub struct Running {
 impl Running {
     /// Stop the listeners and wait for every connection to end.
     pub async fn stop(self) {
+        self.stop_timed().await;
+    }
+
+    /// [`Self::stop`], returning how long the listeners took to stop; a
+    /// connection may take the shutdown grace.
+    pub async fn stop_timed(self) -> Duration {
+        let started = std::time::Instant::now();
         self.stop.cancel();
-        let stopped = tokio::time::timeout(Duration::from_secs(10), self.task).await;
+        let grace = linch_rpc::SHUTDOWN_GRACE + Duration::from_secs(10);
+        let stopped = tokio::time::timeout(grace, self.task).await;
         stopped.expect("the listeners stop").unwrap();
+        started.elapsed()
     }
 }
 
