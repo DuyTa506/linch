@@ -19,7 +19,8 @@ use tokio_util::sync::CancellationToken;
 use super::beneath::{self, Links, Located, Opener, is_file, open_file, stamp_of_stat};
 use super::search;
 use super::{
-    ExecutionFs, FileContent, FileInfo, FileStamp, FsError, GlobHits, GlobQuery, GrepHits, GrepQuery,
+    ExecutionFs, FileContent, FileInfo, FileStamp, FsError, GlobHits, GlobQuery, GrepHits,
+    GrepQuery,
 };
 use crate::read::MAX_READ_BYTES;
 
@@ -41,6 +42,10 @@ use crate::read::MAX_READ_BYTES;
 #[derive(Debug, Clone)]
 pub struct LocalFs {
     root: PathBuf,
+    /// The root as it was given to [`Self::new`], made absolute, when that
+    /// differs from the canonical root (the root was reached through a
+    /// symlink).
+    spelled: Option<PathBuf>,
     /// The root directory, opened once; every walk starts here.
     root_fd: Arc<OwnedFd>,
     /// Most bytes of one file a search holds in memory.
@@ -62,8 +67,12 @@ impl LocalFs {
         let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
         let root_fd =
             open(&root, flags, Mode::empty()).map_err(|error| io_error(&shown, error.into()))?;
+        let spelled = std::path::absolute(given)
+            .ok()
+            .filter(|spelled| *spelled != root);
         Ok(Self {
             root,
+            spelled,
             root_fd: Arc::new(root_fd),
             search_limit: MAX_READ_BYTES,
         })
@@ -102,37 +111,20 @@ impl LocalFs {
         Opener::new(&self.root_fd, &self.root)
     }
 
-    /// `given` as a path below the root. An absolute path may spell the root
-    /// through a symlink; its longest existing prefix is canonicalized to
-    /// find out. The walk that follows starts at the root descriptor, so
-    /// this only translates a name.
+    /// `given` as a path below the root. An absolute path is below it only
+    /// if it starts with the canonical root or with the root as it was given
+    /// to [`Self::new`]; it is refused otherwise, whether or not anything
+    /// exists there, so the answer says nothing about the host. The walk that
+    /// follows starts at the root descriptor, so this only translates a name.
     fn relative<'a>(&self, given: &'a Path, shown: &str) -> Result<Cow<'a, Path>, FsError> {
         if !given.is_absolute() {
             return Ok(Cow::Borrowed(given));
         }
-        if let Ok(inside) = given.strip_prefix(&self.root) {
-            return Ok(Cow::Borrowed(inside));
-        }
-        for ancestor in given.ancestors() {
-            match fs::canonicalize(ancestor) {
-                Ok(real) => {
-                    let rest = given.strip_prefix(ancestor).unwrap_or(Path::new(""));
-                    let full = real.join(rest);
-                    return match full.strip_prefix(&self.root) {
-                        Ok(inside) => Ok(Cow::Owned(inside.to_owned())),
-                        Err(_) => Err(escape(shown)),
-                    };
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) if error.kind() == io::ErrorKind::NotADirectory => {
-                    return Err(FsError::NotADirectory {
-                        path: shown.to_owned(),
-                    });
-                }
-                Err(error) => return Err(io_error(shown, error)),
-            }
-        }
-        Err(escape(shown))
+        let inside = given.strip_prefix(&self.root).ok().or_else(|| {
+            let spelled = self.spelled.as_deref()?;
+            given.strip_prefix(spelled).ok()
+        });
+        inside.map(Cow::Borrowed).ok_or_else(|| escape(shown))
     }
 
     /// Workspace path of a real path under the root.

@@ -400,9 +400,16 @@ async fn a_root_that_is_a_symlink_stays_on_the_directory_it_opened() {
         local.read("secret.txt", 1024).await,
         Err(FsError::NotFound { .. })
     ));
-    // Spelled through the link, an absolute path now names the outside.
+    // Spelled as the root was given, an absolute path names the pinned
+    // directory, not what the link points at now.
     let through = link.join("secret.txt");
-    assert!(escapes(local.read(through.to_str().unwrap(), 1024).await));
+    assert!(matches!(
+        local.read(through.to_str().unwrap(), 1024).await,
+        Err(FsError::NotFound { .. })
+    ));
+    // Any other spelling of the root is refused, whatever exists there.
+    let other = outside.join("secret.txt");
+    assert!(escapes(local.read(other.to_str().unwrap(), 1024).await));
 }
 
 #[tokio::test]
