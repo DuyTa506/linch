@@ -296,10 +296,13 @@ A remote tenant may hold at most 16 sections of at most 16 KiB (names up to
 sections to every agent of a tenant; they are sent with the tenant's, cannot be
 removed or renamed, and `replace_defaults` leaves them in. A `before_provider_call`
 callback of the tenant that answers `rewrite` cannot remove them either: the
-server puts them back first, as blocks of their own, and does not repeat a block
-with their text; the rest of the rewritten system is the callback's, up to 64 KiB
-(or what the request held beyond the operator's sections, if more), else the
-answer is refused as a failed callback. Changing them
+server puts each one back where the request it was sent had it (the system
+is laid out with every section, the operator's and the tenant's, sorted by `order`,
+each with its `cacheable` flag), and does not repeat a block with their text, so a
+rewrite that changes nothing sends the same system bytes, and a subagent's or a
+fallback model's request is treated the same way. The rest of the rewritten system
+is the callback's, up to 64 KiB (or what the request held beyond the operator's
+sections, if more), else the answer is refused as a failed callback. Changing them
 changes the contract of the tenant's agents, so their in-flight runs are
 refused on resume until they finish.
 

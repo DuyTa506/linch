@@ -40,9 +40,13 @@ impl Tenant {
     }
 
     /// The request a tenant's `before_provider_call` callback rewrote `sent`
-    /// into, with the operator's `system_sections` put back: they come
-    /// first, as blocks of their own, and a block of the rewrite with their
-    /// text is not repeated. The rest of the system is the callback's, up to
+    /// into, with the operator's `system_sections` put back where `sent` had
+    /// them: each block of `sent` that carries a section's text goes back at
+    /// its place in the system, with its `cacheable` flag, and a block of the
+    /// rewrite with that text is not repeated. The system `sent` held is the
+    /// one the core laid out (every section, the operator's and the tenant's,
+    /// sorted by `order`), so a rewrite that changes nothing yields the very
+    /// same system bytes. The rest of the system is the callback's, up to
     /// [`MAX_SYSTEM_BYTES`] (or what `sent` held beyond the sections, when
     /// that is more).
     ///
@@ -53,15 +57,14 @@ impl Tenant {
         sent: &ProviderRequest,
         mut rewritten: ProviderRequest,
     ) -> Result<ProviderRequest, String> {
-        let mut sections: Vec<&SystemSection> = self.allow.system_sections.iter().collect();
-        sections.sort_by_key(|section| section.order);
-        let operator: Vec<SystemBlock> = (sections.into_iter())
-            .map(|section| SystemBlock {
-                text: section.text.clone(),
-                cacheable: section.cacheable,
-            })
+        let operator = &self.allow.system_sections;
+        let is_operator =
+            |block: &SystemBlock| operator.iter().any(|section| section.text == block.text);
+        // What `sent` carries of the operator's, and where: a request with
+        // none (a child whose system is its own) has nothing to put back.
+        let held: Vec<(usize, &SystemBlock)> = (sent.system.iter().enumerate())
+            .filter(|(_, block)| is_operator(block))
             .collect();
-        let is_operator = |block: &SystemBlock| operator.iter().any(|set| set.text == block.text);
         let beyond = |blocks: &[SystemBlock]| {
             let own = blocks.iter().filter(|block| !is_operator(block));
             own.map(|block| block.text.len()).sum::<usize>()
@@ -72,8 +75,14 @@ impl Tenant {
                 "the rewritten system holds more than {allowed} bytes besides the operator's sections"
             ));
         }
+        if held.is_empty() {
+            return Ok(rewritten);
+        }
         rewritten.system.retain(|block| !is_operator(block));
-        rewritten.system.splice(0..0, operator);
+        for (at, block) in held {
+            let at = at.min(rewritten.system.len());
+            rewritten.system.insert(at, block.clone());
+        }
         Ok(rewritten)
     }
 
