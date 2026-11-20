@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Instant;
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::overrides::Override;
@@ -41,6 +42,9 @@ struct State {
     root: PathBuf,
     overrides: Override,
     hide_hidden: bool,
+    /// When the search's time limit passes; every entry after it is dropped.
+    deadline: Option<Instant>,
+    expired: bool,
     dirs: HashMap<PathBuf, Dir>,
     /// The first error that is not "cannot be read from the root": the
     /// process is out of descriptors.
@@ -52,12 +56,20 @@ struct State {
 pub(super) struct IgnoreFiles(Arc<Mutex<State>>);
 
 impl IgnoreFiles {
-    pub(super) fn new(opener: Opener, root: &Path, overrides: Override, hide_hidden: bool) -> Self {
+    pub(super) fn new(
+        opener: Opener,
+        root: &Path,
+        overrides: Override,
+        hide_hidden: bool,
+        deadline: Option<Instant>,
+    ) -> Self {
         Self(Arc::new(Mutex::new(State {
             opener,
             root: root.to_owned(),
             overrides,
             hide_hidden,
+            deadline,
+            expired: false,
             dirs: HashMap::new(),
             error: None,
         })))
@@ -85,6 +97,12 @@ impl IgnoreFiles {
         }
     }
 
+    /// Whether the time limit passed while the walk was being filtered: the
+    /// walk was cut short, so the caller reports a timeout.
+    pub(super) fn expired(&self) -> bool {
+        self.state().expired
+    }
+
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -97,7 +115,14 @@ impl IgnoreFiles {
 
 impl State {
     fn keeps(&mut self, path: &Path, is_dir: bool) -> bool {
-        if self.error.is_some() {
+        if self.error.is_some() || self.expired {
+            return false;
+        }
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.expired = true;
             return false;
         }
         if !self.overrides.matched(path, is_dir).is_none() {

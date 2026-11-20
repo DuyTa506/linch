@@ -200,7 +200,7 @@ impl WorkflowContext {
             .map_err(|error| encode_error(&label, format!("its options do not encode: {error}")))?;
         let content_key = agent_key_with(name, &call.prompt, call.key.as_deref(), options.as_ref())
             .map_err(|error| encode_error(&label, format!("its key does not encode: {error}")))?;
-        let (call_key, occurrence, cached) = self.next_occurrence(&content_key);
+        let (call_key, occurrence, cached) = self.next_occurrence(&content_key)?;
         let title = call.label.as_deref().unwrap_or(name);
         let emit = |kind, result_text: Option<&str>| {
             let mut event = event(kind, title.to_owned(), call_key.clone(), occurrence);

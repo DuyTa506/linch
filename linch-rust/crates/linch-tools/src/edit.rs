@@ -89,20 +89,23 @@ impl Tool for Edit {
             .map_err(|error| error.doing("editing"))?;
         let text = String::from_utf8(file.bytes)
             .map_err(|_| coded(format!("{} is not UTF-8 text.", file.path), "not_text"))?;
+        if all && old.is_empty() {
+            return Err(coded(
+                "old_string must not be empty with replace_all.",
+                "empty_old_string",
+            ));
+        }
         if old.is_empty() {
-            // An empty `old` matches at every position, as in Python: the
-            // first line must be read, or the whole file for `replace_all`.
-            let last = if all {
-                text.split('\n').count() as u64
-            } else {
-                1
-            };
+            // An empty `old` matches at every position, as in Python, so the
+            // first line must have been read.
             self.reads
-                .check(session, &file.path, file.stamp, Some(&[(1, last)]))
+                .check(session, &file.path, file.stamp, Some(&[(1, 1)]))
                 .map_err(|error| error.doing("editing"))?;
         }
-        let starts: Vec<usize> = text.match_indices(old).map(|(at, _)| at).collect();
-        match starts.len() {
+        // Count the matches before anything is built from them: a one-byte
+        // `old` in a file at the read limit matches ten million times.
+        let count = text.matches(old).count();
+        match count {
             0 => {
                 return Err(coded(
                     format!("old_string was not found in {}.", file.path),
@@ -121,7 +124,22 @@ impl Tool for Edit {
             }
             _ => {}
         }
-        let spans = line_spans(&text, old, &starts);
+        // The matches never overlap, so they take `count * old.len()` bytes
+        // of `text`: the size is known before the result is built.
+        let kept = text.len() - count * old.len();
+        let size = (count.checked_mul(new.len()))
+            .and_then(|added| kept.checked_add(added))
+            .unwrap_or(usize::MAX);
+        if size as u64 > MAX_READ_BYTES {
+            return Err(coded(
+                format!(
+                    "The edit would make {} larger than {MAX_READ_BYTES} bytes; use a shorter new_string.",
+                    file.path
+                ),
+                "too_large",
+            ));
+        }
+        let spans = line_spans(&text, old);
         self.reads
             .check(session, &file.path, file.stamp, Some(&spans))
             .map_err(|error| error.doing("editing"))?;
@@ -131,7 +149,7 @@ impl Tool for Edit {
             .write(&file.path, updated.into_bytes(), Some(file.stamp))
             .await?;
         self.reads.record_edit(session, &file.path, stamp);
-        let message = match starts.len() {
+        let message = match count {
             1 => format!("Edited {}", file.path),
             n => format!("Edited {} ({n} replacements)", file.path),
         };
@@ -139,19 +157,26 @@ impl Tool for Edit {
     }
 }
 
-/// The inclusive 1-based lines each match of `old` at `starts` touches.
-fn line_spans(text: &str, old: &str, starts: &[usize]) -> Vec<(u64, u64)> {
+/// The inclusive 1-based lines the matches of `old` in `text` touch, with
+/// ranges that overlap or touch joined: a file of ten million one-byte
+/// matches holds one range, not ten million. The read record merges its
+/// ranges the same way, so the joined ranges are covered exactly when the
+/// separate ones are.
+fn line_spans(text: &str, old: &str) -> Vec<(u64, u64)> {
     let inner = old.matches('\n').count() as u64 - u64::from(old.ends_with('\n'));
     let mut line = 1;
     let mut seen = 0;
-    starts
-        .iter()
-        .map(|&at| {
-            line += text[seen..at].matches('\n').count() as u64;
-            seen = at;
-            (line, line + inner)
-        })
-        .collect()
+    let mut spans: Vec<(u64, u64)> = Vec::new();
+    for (at, _) in text.match_indices(old) {
+        line += text[seen..at].matches('\n').count() as u64;
+        seen = at;
+        let span = (line, line + inner);
+        match spans.last_mut() {
+            Some(last) if span.0 <= last.1.saturating_add(1) => last.1 = last.1.max(span.1),
+            _ => spans.push(span),
+        }
+    }
+    spans
 }
 
 #[cfg(test)]
@@ -161,12 +186,19 @@ mod tests {
     #[test]
     fn spans_count_lines_before_and_inside_each_match() {
         let text = "a\nfoo\nb\nfoo\nbar\n";
-        let starts: Vec<usize> = text.match_indices("foo").map(|(at, _)| at).collect();
-        assert_eq!(line_spans(text, "foo", &starts), [(2, 2), (4, 4)]);
-        let starts: Vec<usize> = text.match_indices("foo\nbar").map(|(at, _)| at).collect();
-        assert_eq!(line_spans(text, "foo\nbar", &starts), [(4, 5)]);
+        assert_eq!(line_spans(text, "foo"), [(2, 2), (4, 4)]);
+        assert_eq!(line_spans(text, "foo\nbar"), [(4, 5)]);
         // A trailing newline does not reach into the next line.
-        let starts: Vec<usize> = text.match_indices("b\n").map(|(at, _)| at).collect();
-        assert_eq!(line_spans(text, "b\n", &starts), [(3, 3)]);
+        assert_eq!(line_spans(text, "b\n"), [(3, 3)]);
+    }
+
+    #[test]
+    fn spans_that_overlap_or_touch_are_joined() {
+        // Lines 1, 2 and 3 touch; line 5 does not.
+        assert_eq!(line_spans("x\nx\nx\n\nx\n", "x"), [(1, 3), (5, 5)]);
+        // Two matches of one line are one range.
+        assert_eq!(line_spans("xx\n", "x"), [(1, 1)]);
+        // Matches over lines 1-2 and 3-4 touch.
+        assert_eq!(line_spans("a\nb\na\nb", "a\nb"), [(1, 4)]);
     }
 }

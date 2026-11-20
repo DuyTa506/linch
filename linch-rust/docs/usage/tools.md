@@ -321,9 +321,11 @@ status: final
 - **A changed file.** If the file changed since the model read it, `Write` and `Edit` answer `Read this file again before writing it.` or `... before editing it.`; a `Read` that sees the file change mid-read answers `File changed while reading; Read this file again.`
 - **Empty `old_string`.** `Edit` accepts it, as Python's does. It matches at
   every position, so on an empty file the new text goes in, on a non-empty
-  file it is refused as ambiguous unless `replace_all` is set (which inserts
-  at every position and needs the whole file read), and the first line must
-  have been read.
+  file it is refused as ambiguous, and the first line must have been read.
+  With `replace_all` it is refused as `empty_old_string`.
+- **Edit size.** An `Edit` whose result would pass 10 MiB (the `Read` limit)
+  is refused as `too_large` before the result is built, and the file stays
+  as it was; this bounds `replace_all` as `edit_file` is bounded.
 - **Confinement.** Paths are relative to the workspace. A path that climbs
   above it with `..` (even if it comes back in), an absolute path outside it
   (checked without looking at what exists there) and symlinks that lead out
@@ -712,8 +714,13 @@ text files that live in the stores, not on disk: scratch notes, plans, and
 tool results too large for the conversation. With
 `offload_threshold_tokens`, a result estimated above that many tokens (a
 string, a structured value or an error) is written to
-`/offload/<tool>_<tool_use_id>.txt` and the model gets its first lines and the
-path:
+`/offload/<session>/<tool>_<tool_use_id>_<digest>.txt` and the model gets its
+first lines and the path. The digest is 16 hex digits of the SHA-256 of the
+stored text, so a provider that repeats call ids (`call_0` in every response)
+never makes one result replace another, and the same result again is the same
+file. An id that is long, empty or holds anything but letters, digits, `_`, `-`
+and `.` is shortened to its first readable characters, a `~` and a digest of
+the whole id, so a path segment stays short on every backend:
 
 ```python
 import asyncio
@@ -735,7 +742,7 @@ config: AgentConfig = {
         "id": "scripted",
         "turns": [
             tool_turn("c1", "export_logs", {"service": "api"}),
-            tool_turn("c2", "read_file", {"path": "/offload/export_logs_c1.txt", "offset": 1999}),
+            tool_turn("c2", "read_file", {"path": "/offload/s1/export_logs_c1_97b1a5182a18162f.txt", "offset": 1999}),
             text_turn("Read the tail."),
         ],
     },
@@ -757,7 +764,7 @@ asyncio.run(main())
 ```
 
 ```text
-export_logs: 371 chars, ends 'read the rest, or ls("/offload") to list offloaded results.]'
+export_logs: 414 chars, ends 'd the rest, or ls("/offload/s1") to list offloaded results.]'
 read_file: 27 chars, ends 'api line 1999\napi line 2000'
 ```
 
@@ -778,7 +785,7 @@ their own output:
 | Tool | Bound |
 |---|---|
 | `Bash`, `BashOutput` | the first 4000 and the last 26000 bytes of each stream |
-| `Grep` | 250 entries by default, 30000 bytes of output |
+| `Grep` | 250 entries by default, 30000 bytes of output; a pattern that compiles past 10 MiB is an `invalid_query`; a call that runs past 30 s fails with `timed_out` (one very long line cannot be interrupted, so it can run longer) |
 | `Glob` | 1000 paths |
 | An MCP tool | 30000 bytes of result text |
 | `memory_recall` | 8 KiB of recalled context per request |

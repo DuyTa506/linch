@@ -5,6 +5,7 @@
 use std::error::Error;
 use std::io;
 use std::path::{Component, Path};
+use std::time::Instant;
 
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkMatch};
@@ -23,6 +24,22 @@ use crate::fs::LocalFs;
 
 /// Longest line text kept in content output, in bytes.
 const MAX_LINE: usize = 500;
+
+/// Largest compiled pattern, in bytes (the library default is 100 MiB). A
+/// larger one is an invalid query. Measured: a Unicode class repeated many
+/// times is what it refuses (`\w{300}` needs more than 10 MiB, `\w{500}`,
+/// `\p{L}{500}` and `\w{1000}` more than 20 MiB and compile in 50 MiB).
+const REGEX_SIZE_LIMIT: usize = 10 << 20;
+
+/// Largest lazy DFA cache of one matcher, in bytes (the library default is
+/// 1000 MiB). A pattern that needs more runs on a slower engine. Measured on
+/// a 64 KiB line of random `a` and `b` with `[ab]{1,20000}c`: 6.3 s and
+/// 386 MiB at the default, 5.3 s and 131 MiB at 128 MiB, 17.3 s and 68 MiB at
+/// 64 MiB, 16.2 s and 36 MiB at 32 MiB. No value both stays near 100 MiB and
+/// keeps the time within twice the default's, so the memory bound wins and
+/// the time limit of a call (`SEARCH_TIME_LIMIT` in `local.rs`) bounds the
+/// slowness.
+const REGEX_DFA_CACHE_LIMIT: usize = 32 << 20;
 
 /// Search file contents under the query's path.
 pub(super) fn grep(
@@ -46,7 +63,14 @@ pub(super) fn grep(
             .map_err(invalid)?,
         None => Override::empty(),
     };
-    let (mut walk, rules) = walker(fs, &target, false, overrides);
+    let time_limit = fs.search_time_limit();
+    let deadline = Instant::now() + time_limit;
+    let timed_out = |files: usize, path: &Path| FsError::TimedOut {
+        limit_secs: time_limit.as_secs(),
+        files,
+        at: fs.workspace_path(path),
+    };
+    let (mut walk, rules) = walker(fs, &target, false, overrides, Some(deadline));
     if let Some(name) = &query.file_type {
         let types = TypesBuilder::new()
             .add_defaults()
@@ -58,10 +82,14 @@ pub(super) fn grep(
     let mut hits = GrepHits::default();
     let mut lines = 0;
     let mut opener = fs.opener();
+    let mut searched_files = 0;
     for entry in walk.build() {
         rules.check()?;
         if stop.is_cancelled() {
             return Err(FsError::Cancelled);
+        }
+        if rules.expired() {
+            return Err(timed_out(searched_files, &target));
         }
         let Some(path) = listed_file(entry, &mut hits.left_out)? else {
             continue;
@@ -74,6 +102,9 @@ pub(super) fn grep(
             hits.left_out += 1;
             continue;
         };
+        if Instant::now() >= deadline {
+            return Err(timed_out(searched_files, &path));
+        }
         // A pattern that can match a newline makes the searcher read the
         // whole file; skip one over the cap without reading it. Other
         // searches stream, so any size is fine.
@@ -88,10 +119,14 @@ pub(super) fn grep(
             _ => usize::MAX,
         };
         let mut sink = Collect::new(query.mode, budget);
-        let searched = search(&mut searcher, &matcher, file, stop, &mut sink);
+        let searched = search(&mut searcher, &matcher, file, (stop, deadline), &mut sink);
         if stop.is_cancelled() {
             return Err(FsError::Cancelled);
         }
+        if searched.is_err() && Instant::now() >= deadline {
+            return Err(timed_out(searched_files, &path));
+        }
+        searched_files += 1;
         if sink.binary {
             continue;
         }
@@ -125,6 +160,9 @@ pub(super) fn grep(
         }
     }
     rules.check()?;
+    if rules.expired() {
+        return Err(timed_out(searched_files, &target));
+    }
     Ok(hits)
 }
 
@@ -173,7 +211,7 @@ pub(super) fn glob(
         .add(&query.pattern)
         .and_then(|builder| builder.build())
         .map_err(invalid)?;
-    let (walk, rules) = walker(fs, &dir, dotted, overrides);
+    let (walk, rules) = walker(fs, &dir, dotted, overrides, None);
     let mut found = GlobHits::default();
     let mut opener = fs.opener();
     for entry in walk.build() {
@@ -208,8 +246,9 @@ fn walker(
     dir: &Path,
     hidden: bool,
     overrides: Override,
+    deadline: Option<Instant>,
 ) -> (WalkBuilder, IgnoreFiles) {
-    let rules = IgnoreFiles::new(fs.opener(), fs.root(), overrides.clone(), !hidden);
+    let rules = IgnoreFiles::new(fs.opener(), fs.root(), overrides.clone(), !hidden, deadline);
     let mut walk = WalkBuilder::new(dir);
     walk.follow_links(false)
         .overrides(overrides)
@@ -278,28 +317,40 @@ fn searcher(query: &GrepQuery, limit: u64) -> Searcher {
         .build()
 }
 
-/// Search one file's contents into `sink`, failing once `stop` fires.
+/// Search one file's contents into `sink`, failing once `stop` fires or the
+/// deadline passes.
 fn search(
     searcher: &mut Searcher,
     matcher: &RegexMatcher,
     file: impl io::Read,
-    stop: &CancellationToken,
+    (stop, deadline): (&CancellationToken, Instant),
     sink: &mut Collect,
 ) -> io::Result<()> {
-    searcher.search_reader(matcher, Stoppable { file, stop }, sink)
+    let file = Stoppable {
+        file,
+        stop,
+        deadline,
+    };
+    searcher.search_reader(matcher, file, sink)
 }
 
-/// A reader that fails once `stop` fires, so a long file is not read to
-/// the end after the call is cancelled.
+/// A reader that fails once `stop` fires or `deadline` passes, so a long file
+/// is not read to the end after the call is cancelled or out of time. It is
+/// asked for more data once per buffer, so a search is interrupted between
+/// buffers, not inside one line.
 struct Stoppable<'a, R> {
     file: R,
     stop: &'a CancellationToken,
+    deadline: Instant,
 }
 
 impl<R: io::Read> io::Read for Stoppable<'_, R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.stop.is_cancelled() {
             return Err(io::Error::other("search cancelled"));
+        }
+        if Instant::now() >= self.deadline {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "search timed out"));
         }
         self.file.read(buf)
     }
@@ -313,7 +364,19 @@ fn matcher(query: &GrepQuery) -> Result<RegexMatcher, FsError> {
     } else {
         builder.line_terminator(Some(b'\n'));
     }
-    builder.build(&query.pattern).map_err(invalid)
+    builder
+        .size_limit(REGEX_SIZE_LIMIT)
+        .dfa_size_limit(REGEX_DFA_CACHE_LIMIT);
+    builder.build(&query.pattern).map_err(|error| {
+        let text = error.to_string();
+        match text.contains("exceeds size limit") {
+            true => invalid(format!(
+                "{text}. A Unicode class such as \\w repeated many times is large: use a \
+                 smaller count or an ASCII class such as [A-Za-z0-9_]"
+            )),
+            false => invalid(text),
+        }
+    })
 }
 
 fn invalid(error: impl std::fmt::Display) -> FsError {

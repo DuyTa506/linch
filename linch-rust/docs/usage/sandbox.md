@@ -135,7 +135,12 @@ ambient set, since a command would keep them.
   The seccomp filter refuses with `EPERM` kernel modules, `kexec`,
   `reboot`, swap, every mount call, `pivot_root` and `chroot`; the user's
   keyrings (`keyctl`, `add_key`, `request_key`), `bpf`,
-  `perf_event_open` and `userfaultfd`; and `unshare`, `setns` and `clone`
+  `perf_event_open` and `userfaultfd`; System V IPC (`shmget`, `shmat`,
+  `shmctl`, `msgget`, `msgsnd`, `msgrcv`, `msgctl`, `semget`, `semop`,
+  `semtimedop`, `semctl`) and POSIX message queues (`mq_open`, `mq_unlink`,
+  `mq_timedsend`, `mq_timedreceive`), whose objects are checked by user id
+  and so would let a command reach another program of the server's user;
+  and `unshare`, `setns` and `clone`
   with a `CLONE_NEW*` flag, so not even an unprivileged user namespace
   opens. `clone3`, whose flags the filter cannot read, gets `ENOSYS` and
   glibc falls back to `clone`. `io_uring`, whose requests the filter would
@@ -161,6 +166,13 @@ ambient set, since a command would keep them.
   fail; Landlock cannot grant a command its
   own `/proc/self` and not the rest. Do not put secrets on the server's
   command line.
+- System V IPC is refused (see above), so a program that needs it fails with
+  `Operation not permitted`: `fakeroot` (`shmget: Operation not permitted`; it
+  worked before this was refused), Perl's `IPC::SysV` users and any tool that
+  shares memory, queues or semaphores that way. A database that takes a System
+  V shared memory segment at start (PostgreSQL does for its interlock) cannot
+  start in the sandbox; PostgreSQL was not tested here. Use `local` or `docker`
+  for such work.
 - Python's `multiprocessing` locks need `/dev/shm`, which is closed, so a
   `Pool` fails.
 - Limits are per process, not per command: there is no cgroup, so no total

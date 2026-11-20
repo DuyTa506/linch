@@ -9,9 +9,6 @@ use tokio_util::sync::CancellationToken;
 use crate::ApiKey;
 use crate::overflow;
 
-/// Longest error summary kept in a [`ProviderError`].
-const MAX_ERROR_CHARS: usize = 500;
-
 const RETRY_INFO: &str = "type.googleapis.com/google.rpc.RetryInfo";
 
 /// POST `body` to `url` with `x-goog-api-key` auth. A redirect is refused,
@@ -142,9 +139,10 @@ fn retry_delay(error: &JsonValue) -> Option<Duration> {
         })
 }
 
-/// Redact first, then cut, so a cut never leaves part of a key behind.
+/// The summary without the key. The cut to 500 characters comes last, after
+/// every secret is out (`RequestOptions::scrub_error`, `sse::events`).
 fn clean(summary: &str, key: &ApiKey) -> String {
-    key.redact(summary).chars().take(MAX_ERROR_CHARS).collect()
+    key.redact(summary)
 }
 
 #[cfg(test)]

@@ -8,6 +8,7 @@ use std::os::fd::OwnedFd;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use rustix::fs::{
@@ -23,6 +24,12 @@ use super::{
     GrepQuery,
 };
 use crate::read::MAX_READ_BYTES;
+
+/// How long one Grep call may run before it stops with `timed_out`. It is
+/// checked between files and each time the search reads more of a file, so a
+/// single very long line, which one regex search cannot be interrupted in,
+/// can run past it.
+const SEARCH_TIME_LIMIT: Duration = Duration::from_secs(30);
 
 /// Files on this host under one root directory.
 ///
@@ -50,6 +57,8 @@ pub struct LocalFs {
     root_fd: Arc<OwnedFd>,
     /// Most bytes of one file a search holds in memory.
     search_limit: u64,
+    /// Longest a Grep call runs before it stops with `timed_out`.
+    search_time_limit: Duration,
 }
 
 impl LocalFs {
@@ -75,6 +84,7 @@ impl LocalFs {
             spelled,
             root_fd: Arc::new(root_fd),
             search_limit: MAX_READ_BYTES,
+            search_time_limit: SEARCH_TIME_LIMIT,
         })
     }
 
@@ -86,9 +96,21 @@ impl LocalFs {
         self
     }
 
+    /// This root with searches limited to `limit` of wall time.
+    #[cfg(test)]
+    pub(crate) fn with_search_time_limit(mut self, limit: Duration) -> Self {
+        self.search_time_limit = limit;
+        self
+    }
+
     /// Most bytes of one file a search holds in memory.
     pub(crate) fn search_limit(&self) -> u64 {
         self.search_limit
+    }
+
+    /// Longest a search runs.
+    pub(crate) fn search_time_limit(&self) -> Duration {
+        self.search_time_limit
     }
 
     /// The canonical root directory.

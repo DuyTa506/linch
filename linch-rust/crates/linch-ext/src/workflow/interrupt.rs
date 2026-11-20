@@ -53,7 +53,7 @@ impl WorkflowContext {
         payload: impl Serialize,
     ) -> Result<A, WorkflowError> {
         let label = format!("interrupt {key}");
-        let (call_key, occurrence, cached) = self.next_occurrence(&interrupt_key(key));
+        let (call_key, occurrence, cached) = self.next_occurrence(&interrupt_key(key))?;
         let event = |kind, result_text: Option<&JsonValue>| {
             let mut event = event(kind, key.to_owned(), call_key.clone(), occurrence);
             event.result_text = result_text.map(JsonValue::to_string);
@@ -77,6 +77,8 @@ impl WorkflowContext {
             }
             self.emit(event(WorkflowKind::InterruptStale, None));
         }
+        // The payload is kept, and written with the workflow's status.
+        self.check_size(&payload, "bytes in an interrupt payload")?;
         let mut requested = event(WorkflowKind::InterruptRequested, None);
         let mut structured = JsonObject::new();
         structured.insert("payload".into(), payload.clone());

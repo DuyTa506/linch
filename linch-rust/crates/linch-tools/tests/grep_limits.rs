@@ -109,3 +109,24 @@ async fn head_limit_and_context_lines_are_bounded() {
     let query = fs.last();
     assert_eq!((query.limit, query.before, query.after), (3, 2, 0));
 }
+
+#[tokio::test]
+async fn a_pattern_that_compiles_too_large_is_an_invalid_query() {
+    let ws = Workspace::new();
+    ws.put("a.txt", "x\n");
+    let tool = Grep::new(ws.fs.clone());
+    let result = call(&tool, json!({"pattern": r"\w{1000}"})).await;
+    let error = result.expect_err("the pattern is refused");
+    assert_eq!(error.code.as_deref(), Some("invalid_query"));
+}
+
+#[tokio::test]
+async fn a_heavy_but_legitimate_pattern_still_searches() {
+    let ws = Workspace::new();
+    ws.put("a.txt", "fn main() {}\nlet x = 12345;\n");
+    let tool = Grep::new(ws.fs.clone());
+    let word = json!({"pattern": r"\b\w{1,40}\s*=\s*\d+;", "output_mode": "content"});
+    assert_eq!(text(call(&tool, word).await), "a.txt:let x = 12345;");
+    let unicode = json!({"pattern": r"\p{L}{2,100}\s\p{L}+", "output_mode": "count"});
+    assert_eq!(text(call(&tool, unicode).await), "a.txt:2");
+}

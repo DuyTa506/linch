@@ -388,7 +388,8 @@ fn a_failed_write_does_not_clear_the_count() {
 }
 
 /// Three calls of `Bash` whose result `ResultOffload` replaced with `preview`
-/// and a pointer to a file made from the call's id: the guard's verdict.
+/// and a pointer to a file named after the call and its text: the guard's
+/// verdict.
 fn offloaded_trip(preview: &str) -> Option<LoopGuardEvent> {
     let mut watch = Watch::new(&LoopGuard::default(), HashSet::new(), HashSet::new());
     let command = json!({"command": "cargo test"});
@@ -403,7 +404,7 @@ fn offloaded_trip(preview: &str) -> Option<LoopGuardEvent> {
             message: Message::new(Role::Assistant, vec![call]),
             stop_reason: StopReason::ToolUse,
         }));
-        let path = format!("/offload/Bash_{id}.txt");
+        let path = crate::vfs::offload_path("/offload", "s1", "Bash", id, preview);
         let text = format!(
             "{preview}\n\n[Tool result truncated: ~900 tokens (3600 bytes) offloaded to '{path}'. \
              Showing the first 10 lines. Use read_file(path=\"{path}\", offset=...)]"
@@ -420,6 +421,7 @@ fn offloaded_trip(preview: &str) -> Option<LoopGuardEvent> {
 
 /// `ResultOffload` replaces a long result with a preview that names a file
 /// made from the call's id, so identical results would never look alike.
+/// Any path that the hook can make is stripped, not only `{tool}_{id}.txt`.
 #[test]
 fn an_offloaded_result_repeats_whatever_its_file_name() {
     let trip = offloaded_trip("line 1").unwrap();
