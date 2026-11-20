@@ -115,6 +115,32 @@ struct Scheduled {
     pool: PgPool,
     namespace: String,
     definition: String,
+    /// Whether the caller is a tenant with no scheduler rights, reading what
+    /// it made before: its errors are not the database's words.
+    limited: bool,
+}
+
+impl Scheduled {
+    /// The wire error of a failed read: a tenant without rights is told only
+    /// that the store is unavailable, for the database's words name the
+    /// operator's tables and migrations.
+    fn fail(&self, error: &WorkerError) -> ErrorObject {
+        if self.limited {
+            return ErrorObject::new(
+                code::STORE_UNAVAILABLE,
+                "the scheduler's store is unavailable",
+            );
+        }
+        worker_error(error)
+    }
+}
+
+/// Whether the worker's tables exist in `pool`'s schema, whatever migration
+/// they are at.
+async fn tables_present(pool: &PgPool) -> Result<bool, sqlx::Error> {
+    let sql = "SELECT to_regclass('linch_worker_jobs') IS NOT NULL \
+               AND to_regclass('linch_worker_schedules') IS NOT NULL";
+    sqlx::query_scalar(sql).fetch_one(pool).await
 }
 
 impl Server {
@@ -129,8 +155,10 @@ impl Server {
     /// [`scheduled`](Self::scheduled) for a call that reads or deletes. A
     /// tenant whose allowlists give it neither schedules nor background
     /// runs does not migrate its database for it: it gets the agent when
-    /// the tables are already there (it may clean up what it made), else
-    /// `None`, which the caller answers as an empty namespace.
+    /// the tables are already there, at whatever migration (it may clean up
+    /// what it made, and its reads fail with a generic error if the older
+    /// schema cannot answer them), else `None`, which the caller answers as
+    /// an empty namespace.
     async fn scheduled_if_present(&self, handle: &str) -> Result<Option<Scheduled>, ErrorObject> {
         let may_schedule = self.0.tenant.as_ref().is_none_or(|tenant| {
             let allow = tenant.allowlists();
@@ -139,11 +167,15 @@ impl Server {
         if may_schedule {
             return self.scheduled(handle).await.map(Some);
         }
-        let (agent, _) = self.attached(handle)?;
-        let version = linch_worker::schema_version(&agent.pool).await;
-        let version =
-            version.map_err(|error| ErrorObject::new(code::STORE_UNAVAILABLE, chain(&error)))?;
-        Ok(version.is_current().then_some(agent))
+        let (mut agent, _) = self.attached(handle)?;
+        let present = tables_present(&agent.pool).await.map_err(|_| {
+            ErrorObject::new(
+                code::STORE_UNAVAILABLE,
+                "the scheduler's store is unavailable",
+            )
+        })?;
+        agent.limited = true;
+        Ok(present.then_some(agent))
     }
 
     /// The agent `handle`'s pool, namespace and definition, and the cell
@@ -159,6 +191,7 @@ impl Server {
             pool,
             namespace: opened.agent.agent().namespace().to_owned(),
             definition,
+            limited: false,
         };
         Ok((agent, Arc::clone(&opened.background.migrated)))
     }
@@ -200,7 +233,7 @@ impl Server {
             });
         };
         let listed = linch_worker::list_schedules(&agent.pool, &agent.namespace).await;
-        let schedules = listed.map_err(|error| worker_error(&error))?;
+        let schedules = listed.map_err(|error| agent.fail(&error))?;
         to_value(&Schedules {
             schedules: schedules.into_iter().map(schedule_info).collect(),
         })
@@ -214,7 +247,7 @@ impl Server {
             return found(Ok(None), &params.id);
         };
         let paused = linch_worker::pause_schedule(&agent.pool, &agent.namespace, &params.id).await;
-        found(paused, &params.id)
+        found(paused.map_err(|error| agent.fail(&error)), &params.id)
     }
 
     pub(super) async fn resume_schedule(
@@ -226,7 +259,7 @@ impl Server {
         };
         let resumed =
             linch_worker::resume_schedule(&agent.pool, &agent.namespace, &params.id).await;
-        found(resumed, &params.id)
+        found(resumed.map_err(|error| agent.fail(&error)), &params.id)
     }
 
     pub(super) async fn delete_schedule(
@@ -238,7 +271,7 @@ impl Server {
         };
         let deleted =
             linch_worker::delete_schedule(&agent.pool, &agent.namespace, &params.id).await;
-        let deleted = deleted.map_err(|error| worker_error(&error))?;
+        let deleted = deleted.map_err(|error| agent.fail(&error))?;
         to_value(&ScheduleDeleted { deleted })
     }
 
@@ -275,7 +308,7 @@ impl Server {
         };
         let id = linch_worker::JobId(params.job_id);
         let job = linch_worker::job(&agent.pool, &agent.namespace, id).await;
-        let job = job.map_err(|error| worker_error(&error))?;
+        let job = job.map_err(|error| agent.fail(&error))?;
         to_value(&job_info(job.ok_or_else(|| job_not_found(params.job_id))?))
     }
 
@@ -291,7 +324,7 @@ impl Server {
             limit,
         )
         .await;
-        let jobs = listed.map_err(|error| worker_error(&error))?;
+        let jobs = listed.map_err(|error| agent.fail(&error))?;
         to_value(&Jobs {
             jobs: jobs.into_iter().map(job_info).collect(),
         })
@@ -406,10 +439,10 @@ fn admit_job(tenant: &Tenant) -> Result<Cap, ErrorObject> {
 }
 
 fn found(
-    schedule: Result<Option<linch_worker::ScheduleInfo>, WorkerError>,
+    schedule: Result<Option<linch_worker::ScheduleInfo>, ErrorObject>,
     id: &str,
 ) -> Result<JsonValue, ErrorObject> {
-    match schedule.map_err(|error| worker_error(&error))? {
+    match schedule? {
         Some(schedule) => to_value(&schedule_info(schedule)),
         None => Err(ErrorObject::new(
             code::SCHEDULE_NOT_FOUND,

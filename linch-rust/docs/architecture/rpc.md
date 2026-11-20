@@ -423,8 +423,10 @@ asked ([usage](../usage/scheduler.md)).
   at the first scheduler call (once per agent), so a server that never
   schedules never creates them. A tenant with neither `max_schedules` nor
   `max_queued_jobs` never migrates: `schedule.list`, `schedule.delete`,
-  `job.list` and `job.get` still read the tables when they are there (it may
-  clean up what it made) and answer as an empty namespace when they are not
+  `job.list` and `job.get` still read the tables when they are there, at
+  whatever migration (it may clean up what it made; a read that the older
+  schema cannot answer is a generic `-32014`, with no table or migration
+  name), and answer as an empty namespace when the tables do not exist
   (`schedule.pause` and `schedule.resume` answer not found).
 - **Tenant checks.** Before any query: `max_schedules` and
   `max_queued_jobs` must be set (`-32004`, kinds `schedules` and
