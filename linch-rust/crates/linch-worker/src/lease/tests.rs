@@ -225,7 +225,7 @@ async fn a_heartbeat_while_the_job_is_owned_hides_it() {
 /// answer `false` and leave the new holder's visibility alone.
 #[tokio::test]
 async fn a_heartbeat_after_another_workers_dequeue_changes_nothing() {
-    let Some(db) = Db::new("late_beat").await else {
+    let Some(db) = Db::new("other_beat").await else {
         return;
     };
     let first = db.held("late_beat").await;
