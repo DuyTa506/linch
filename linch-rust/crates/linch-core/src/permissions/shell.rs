@@ -412,6 +412,50 @@ fn command_is_not_in_the_text(segment: &str) -> bool {
     false
 }
 
+/// Whether `segment` opens a file for writing with a redirection (`>`, `>>`,
+/// `>|`, `<>`, with or without a descriptor number). Descriptor duplication
+/// (`2>&1`, `>&2`, `>&-`) and `/dev/null`, `/dev/stdout` and `/dev/stderr`
+/// are not files.
+pub fn redirects_to_file(segment: &str) -> bool {
+    let b = segment.as_bytes();
+    let mut quote: Option<u8> = None;
+    let mut escaped = false;
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if escaped {
+            escaped = false;
+        } else if c == b'\\' && quote != Some(b'\'') {
+            escaped = true;
+        } else if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            }
+        } else if c == b'\'' || c == b'"' {
+            quote = Some(c);
+        } else if c == b'>' || (c == b'<' && b.get(i + 1) == Some(&b'>')) {
+            let mut end = i + 1;
+            if c == b'<' || matches!(b.get(end), Some(b'>' | b'|')) {
+                end += 1;
+            }
+            if c == b'>' && b.get(end) == Some(&b'&') {
+                // `>&2`, `>&-`: duplicates a descriptor.
+                i = end + 1;
+                continue;
+            }
+            let rest = trim_blanks(&segment[end..]);
+            let target = unquote(&rest[..word_end(rest)]);
+            if !matches!(target.as_str(), "/dev/null" | "/dev/stdout" | "/dev/stderr") {
+                return true;
+            }
+            i = end;
+            continue;
+        }
+        i += 1;
+    }
+    false
+}
+
 /// `command` with the quotes and backslashes of its first word removed
 /// (`\rm -rf x` becomes `rm -rf x`) and the rest left as written, so a
 /// quoted argument keeps its boundaries.
@@ -585,6 +629,37 @@ mod tests {
         ];
         for (segment, expected) in cases {
             assert_eq!(strip_command_prefix(segment), expected, "{segment:?}");
+        }
+    }
+
+    #[test]
+    fn file_redirects_are_found_outside_quotes_only() {
+        for command in [
+            "a > f",
+            "a >f",
+            "a >> f",
+            "a 2>f",
+            "a >| f",
+            "a <> f",
+            "a >\"f\"",
+            "a 2>&1 > f",
+            "a >",
+        ] {
+            assert!(redirects_to_file(command), "{command:?}");
+        }
+        for command in [
+            "a",
+            "a 2>&1",
+            "a >&2",
+            "a >&-",
+            "a <&3",
+            "a < f",
+            "a <<< f",
+            "a > /dev/null",
+            "a 2>/dev/stderr >/dev/stdout",
+            "a '>f' \"> f\" \\>f",
+        ] {
+            assert!(!redirects_to_file(command), "{command:?}");
         }
     }
 

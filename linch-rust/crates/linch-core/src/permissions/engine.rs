@@ -260,7 +260,8 @@ impl<'a> Eval<'a> {
             }
             if own == Some(RuleDecision::Ask) || hidden.contains(&Some(RuleDecision::Ask)) {
                 ask = true;
-            } else if own.is_none() {
+            } else if own.is_none() || shell::redirects_to_file(segment) {
+                // An allow covers a command, not what it writes to a file.
                 all_allowed = false;
             }
         }

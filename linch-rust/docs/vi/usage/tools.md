@@ -493,16 +493,27 @@ Cách các rule kết hợp:
 - Giữa các layer, một deny từ bất kỳ layer nào là quyết định cuối; nếu không, layer
   cuối cùng đã quyết định sẽ thắng. Khi không layer nào quyết định, mode quyết
   định.
-- Một lệnh shell mà bộ tách lệnh không mô hình hóa được (chẳng hạn có `$(...)`, dấu
-  `&` chạy nền hoặc `&>`, `>&file`, chú thích `#`, here-document, `>|`, hay `${...}`
-  trong dấu nháy kép mà phần thân có dấu nháy hoặc dấu gạch chéo ngược) có thể bị rule deny
-  hoặc ask nhưng không bao giờ được rule allow.
-- Các bash rule dựa trên tên lệnh chỉ là nỗ lực tối đa và sandbox mới là ranh giới:
-  một rule deny hoặc ask cũng thấy lệnh khi bỏ dấu nháy (`\rm`, `r""m`) và nằm sau các từ `NAME=value`, chuyển hướng,
-  từ khóa dành riêng (`if`, `then`, `do`, `!`, `{`) và `time`, `exec`, `command`,
-  `builtin`, `env` ở đầu đoạn, và một phép khai triển `$` ở vị trí lệnh bị coi là
-  không phân tích được, nhưng `/bin/rm`, `sudo rm`, `xargs rm`, `eval rm x` và
-  `sh -c 'rm x'` là những lệnh khác đối với rule.
+- Một lệnh shell mà bộ tách lệnh không mô hình hóa được có thể bị rule deny
+  hoặc ask nhưng không bao giờ được rule allow. Gồm `$(...)` và dấu backtick, dấu
+  `&` chạy nền hoặc `&>`, `>&file`, chú thích `#`, here-document, `>|`, `${...}`
+  trong dấu nháy kép mà phần thân có dấu nháy hoặc dấu gạch chéo ngược, `env -S`,
+  và vị trí lệnh là phép khai triển `$`, khai triển ngoặc nhọn (`{rm,-rf}`),
+  `function`, `coproc`, gán phần tử mảng (`a[0]=1`) hay chuyển hướng `{fd}>file`.
+- Một rule allow không bao phủ lệnh chuyển hướng đầu ra vào một tệp
+  (`echo x > file`, `>>`, `2>file`, `>|`, `<>`): lệnh đó sẽ hỏi. Nhân bản
+  descriptor (`2>&1`, `>&2`, `>&-`) và `/dev/null`, `/dev/stdout`, `/dev/stderr`
+  không phải tệp. Rule deny và ask không đổi.
+- Các bash rule dựa trên tên lệnh chỉ là nỗ lực tối đa và sandbox mới là ranh giới.
+  Một rule deny hoặc ask khớp từng đoạn như đã viết, rồi khớp lại sau khi từ lệnh
+  được bỏ dấu nháy (`\rm`, `r""m`) và các từ đứng trước lệnh bị gỡ: phép gán
+  `NAME=value`, chuyển hướng (`>f`, `2>&1`), các từ khóa dành riêng `if`, `then`,
+  `else`, `elif`, `do`, `while`, `until`, `!` và `{`, cùng `time`, `exec`,
+  `command`, `builtin` và `env` (có hoặc không có dấu nháy) với các tùy chọn của
+  chúng, kể cả đối số của `env -u`/`-C`, `time -f`/`-o` và `exec -a`.
+  `command -v NAME` không phải lệnh tên `NAME`. Rule allow không bao giờ khớp dạng
+  đã gỡ: `X=1 echo` không phải `echo`. Các cách viết khác của một lệnh, như
+  `/bin/rm`, `sudo rm`, `xargs rm`, `eval rm x` và `sh -c 'rm x'`, là những lệnh
+  khác đối với rule.
 - Đường dẫn nằm ngoài project root không bao giờ khớp một rule allow.
 
 `auto_allow` (danh sách tên tool) cho phép các tool đó ở mọi mode trừ khi một rule

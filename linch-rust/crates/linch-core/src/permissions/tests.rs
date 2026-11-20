@@ -83,21 +83,20 @@ fn bash_rule(pattern: &str, decision: RuleDecision) -> Rule {
 
 const SUPPORTED: &[&str] = &[
     "pytest -q 2>&1",
-    "pytest -q > test.log",
-    "pytest -q >> test.log",
     "cat < input.txt",
+    "pytest -q > /dev/null 2>&1",
+    "python script.py < input.txt 2> /dev/null",
     "git status | cat",
     "ruff check . | tee ruff.log",
     "npm test 2>&1 | tee npm.log",
     "find . -type f | sort",
     "grep -R TODO src | wc -l",
     "cargo test --all-features 2>&1",
-    "python script.py < input.txt > output.txt",
     "sed -n '1,10p' README.md | cat",
     "echo hi >&2",
     "cat <&3",
     "build 2>&1 && deploy",
-    "build >out.log 2>&1 | tee run.log",
+    "build >/dev/null 2>&1 | tee run.log",
     "tail -f app.log 2>/dev/null",
     "printf '&'",
     "printf '$(literal)'",
@@ -186,7 +185,7 @@ fn an_allow_rule_covers_the_redirections_the_splitter_models() {
         "echo hi 1>&2 | echo ok",
         "echo hi <&3",
         "echo hi && echo ok",
-        "echo hi >out 2>&1 && echo ok",
+        "echo hi >/dev/null 2>&1 && echo ok",
     ] {
         assert_eq!(bash(&allow_echo(), command), "allow", "{command:?}");
     }
@@ -645,6 +644,65 @@ fn a_hash_after_an_escaped_blank_is_not_a_comment() {
     assert_eq!(bash(&allow_echo(), "echo a'b'#c"), "allow");
     assert_eq!(bash(&allow_echo(), "echo a #b"), "ask");
     assert_eq!(bash(&allow_echo(), "echo a ;#b"), "ask");
+}
+
+#[test]
+fn an_allow_rule_does_not_cover_a_command_that_redirects_output_to_a_file() {
+    for command in [
+        "echo x > file",
+        "echo x >file",
+        "echo x >> file",
+        "echo x 2> err",
+        "echo x 2>>err",
+        "echo x 1>f",
+        "echo x >\"f\"",
+        "echo x <>f",
+        "echo x 2>&1 >file",
+        "echo x > /dev/null/../f",
+        "echo x | echo y > f",
+        "echo x && echo y >> f",
+        "echo x >",
+    ] {
+        assert_eq!(bash(&allow_echo(), command), "ask", "{command:?}");
+    }
+}
+
+#[test]
+fn an_allow_rule_covers_descriptor_duplication_and_the_standard_devices() {
+    for command in [
+        "echo x 2>&1",
+        "echo x >&2",
+        "echo x 1>&2",
+        "echo x >&-",
+        "echo x <&3",
+        "echo x >/dev/null",
+        "echo x 2>/dev/null",
+        "echo x >> /dev/null",
+        "echo x > /dev/stderr",
+        "echo x 2>\"/dev/stdout\"",
+        "echo x < in",
+        "echo '>' \">f\" \\>f",
+        "echo x 2>&1 >/dev/null",
+    ] {
+        assert_eq!(bash(&allow_echo(), command), "allow", "{command:?}");
+    }
+}
+
+#[test]
+fn an_allow_all_rule_does_not_cover_a_file_redirect_and_ask_and_deny_rules_are_unchanged() {
+    let allow_all = flat(PermissionMode::Default, vec![bash_rule("*", Allow)]);
+    assert_eq!(bash(&allow_all, "pytest -q > test.log"), "ask");
+    assert_eq!(bash(&allow_all, "pytest -q >/dev/null 2>&1"), "allow");
+    let skip = flat(PermissionMode::SkipDangerous, vec![bash_rule("*", Allow)]);
+    assert_eq!(bash(&skip, "pytest -q > test.log"), "allow");
+    let rules = flat(
+        PermissionMode::SkipDangerous,
+        vec![bash_rule("rm *", Deny), bash_rule("git push *", Ask)],
+    );
+    assert_eq!(bash(&rules, "rm -rf x > /dev/null"), "deny");
+    assert_eq!(bash(&rules, "rm -rf x > f"), "deny");
+    assert_eq!(bash(&rules, "git push > log"), "ask");
+    assert_eq!(bash(&rules, "git status > log"), "allow");
 }
 
 #[test]

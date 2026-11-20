@@ -490,16 +490,28 @@ How rules combine:
   segment denied denies, any asked asks).
 - Across layers a deny from any layer is final; otherwise the last layer that
   decided wins. When no layer decides, the mode decides.
-- A shell command the splitter cannot model (for example with `$(...)`, a
-  background `&` or `&>`, `>&file`, a `#` comment, a here-document, `>|`, or a
-  `${...}` in double quotes whose body holds a quote or a backslash) can be
-  denied or asked by rules but never allowed by one.
-- Name-based bash rules are best effort and the sandbox is the boundary: a
-  deny or ask rule also sees the command unquoted (`\rm`, `r""m`) and behind leading `NAME=value` words,
-  redirections, reserved words (`if`, `then`, `do`, `!`, `{`) and `time`,
-  `exec`, `command`, `builtin`, `env`, and a `$` expansion in command position
-  counts as unparsed, but `/bin/rm`, `sudo rm`, `xargs rm`, `eval rm x` and
-  `sh -c 'rm x'` are other commands to a rule.
+- A shell command the splitter cannot model can be denied or asked by rules
+  but never allowed by one. That covers `$(...)` and backticks, a background
+  `&` or `&>`, `>&file`, a `#` comment, a here-document, `>|`, a `${...}` in
+  double quotes whose body holds a quote or a backslash, `env -S`, and a
+  command position that is a `$` expansion, a brace expansion (`{rm,-rf}`),
+  `function`, `coproc`, an array assignment (`a[0]=1`) or a `{fd}>file`
+  redirection.
+- An allow rule does not cover a command that redirects output to a file
+  (`echo x > file`, `>>`, `2>file`, `>|`, `<>`): it asks. Descriptor
+  duplication (`2>&1`, `>&2`, `>&-`) and `/dev/null`, `/dev/stdout`,
+  `/dev/stderr` are not files. Deny and ask rules are unchanged.
+- Name-based bash rules are best effort and the sandbox is the boundary. A
+  deny or ask rule matches each segment as written, and again after its
+  command word is unquoted (`\rm`, `r""m`) and the words in front of the
+  command are removed: `NAME=value` assignments, redirections (`>f`, `2>&1`),
+  the reserved words `if`, `then`, `else`, `elif`, `do`, `while`, `until`,
+  `!` and `{`, and `time`, `exec`, `command`, `builtin` and `env` (quoted or
+  not) with their options, including the argument of `env -u`/`-C`,
+  `time -f`/`-o` and `exec -a`. `command -v NAME` is not a command named
+  `NAME`. An allow rule never matches the stripped form: `X=1 echo` is not
+  `echo`. Other spellings of a command, such as `/bin/rm`, `sudo rm`,
+  `xargs rm`, `eval rm x` and `sh -c 'rm x'`, are other commands to a rule.
 - A path outside the project root never matches an allow rule.
 
 `auto_allow` (a list of tool names) allows those tools in every mode unless a
