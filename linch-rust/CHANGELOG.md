@@ -6,6 +6,7 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ## Unreleased
 
+- Bash deny and ask rules read the options and `NAME=value` words of `env`, `time`, `exec` and `command` unquoted, accept bundled short options (`env -iu NAME`, `exec -la NAME`) and unique prefixes of long options (`env --uns NAME`), and no longer take the argument of such an option for the command.
 - `>&` followed by anything but exactly digits or `-` (`>&2file`, `>&-file`) counts as a redirect to a file, so a narrow allow rule asks for it.
 - A `${...}` in double quotes whose body holds `$[` (bash nests the old arithmetic form, so a `}` inside it does not close the expansion) counts as syntax the splitter cannot model.
 - The bash file-redirect rule applies to narrow allow rules only: the allow-all rule `*` covers `pytest -q > test.log` again, while `echo` or `git *` allow rules still ask for a command that writes a file; `&>` and `>|` stay unparsed for every rule.

@@ -277,6 +277,7 @@ struct Command<'a> {
 }
 
 /// How a wrapper option takes part in finding the command.
+#[derive(Clone, Copy, PartialEq)]
 enum WrapperOption {
     Plain,
     /// Takes the next word as its argument (`env -u NAME`).
@@ -287,16 +288,87 @@ enum WrapperOption {
     Query,
 }
 
+/// Long options of `env` and `time` (GNU accepts any unique prefix).
+const ENV_LONG: &[(&str, WrapperOption)] = &[
+    ("ignore-environment", WrapperOption::Plain),
+    ("null", WrapperOption::Plain),
+    ("unset", WrapperOption::Takes),
+    ("chdir", WrapperOption::Takes),
+    ("argv0", WrapperOption::Takes),
+    ("split-string", WrapperOption::Split),
+    ("debug", WrapperOption::Plain),
+    ("block-signal", WrapperOption::Plain),
+    ("default-signal", WrapperOption::Plain),
+    ("ignore-signal", WrapperOption::Plain),
+    ("list-signal-handling", WrapperOption::Plain),
+];
+const TIME_LONG: &[(&str, WrapperOption)] = &[
+    ("format", WrapperOption::Takes),
+    ("output", WrapperOption::Takes),
+    ("append", WrapperOption::Plain),
+    ("portability", WrapperOption::Plain),
+    ("verbose", WrapperOption::Plain),
+    ("quiet", WrapperOption::Plain),
+];
+
+/// What `option` (an unquoted word starting with `-`) does for `wrapper`: a
+/// cluster of short options (`-iu`) where a letter that takes an argument
+/// takes the rest of the word or else the next word, or a long option (or
+/// its unique prefix) with an optional `=value`.
 fn wrapper_option(wrapper: &str, option: &str) -> WrapperOption {
-    match (wrapper, option) {
-        ("env", "-u" | "-C" | "--unset" | "--chdir")
-        | ("time", "-f" | "-o" | "--format" | "--output")
-        | ("exec", "-a") => WrapperOption::Takes,
-        ("env", o) if o.starts_with("-S") || o.starts_with("--split-string") => {
-            WrapperOption::Split
+    let Some(long) = option.strip_prefix("--") else {
+        let letters = option.trim_start_matches('-');
+        if wrapper == "command" {
+            return if letters.contains(['v', 'V']) {
+                WrapperOption::Query
+            } else {
+                WrapperOption::Plain
+            };
         }
-        ("command", o) if !o.starts_with("--") && o.contains(['v', 'V']) => WrapperOption::Query,
+        let (takes, split) = match wrapper {
+            "env" => ("uCa", "S"),
+            "time" => ("fo", ""),
+            "exec" => ("a", ""),
+            _ => ("", ""),
+        };
+        for (i, letter) in letters.char_indices() {
+            if split.contains(letter) {
+                return WrapperOption::Split;
+            }
+            if takes.contains(letter) {
+                let attached = !letters[i + letter.len_utf8()..].is_empty();
+                return if attached {
+                    WrapperOption::Plain
+                } else {
+                    WrapperOption::Takes
+                };
+            }
+        }
+        return WrapperOption::Plain;
+    };
+    let (name, attached) = long
+        .split_once('=')
+        .map_or((long, false), |(n, _)| (n, true));
+    let table = match wrapper {
+        "env" => ENV_LONG,
+        "time" => TIME_LONG,
+        _ => &[],
+    };
+    let mut named = table.iter().filter(|(long, _)| long.starts_with(name));
+    let kind = match (
+        name,
+        table.iter().find(|(long, _)| *long == name),
+        named.next(),
+    ) {
+        ("", _, _) => WrapperOption::Plain,
+        (_, Some((_, kind)), _) => *kind,
+        (_, None, Some((_, kind))) if named.next().is_none() => *kind,
         _ => WrapperOption::Plain,
+    };
+    if attached && kind == WrapperOption::Takes {
+        WrapperOption::Plain
+    } else {
+        kind
     }
 }
 
@@ -314,12 +386,14 @@ fn strip_prefix(segment: &str) -> Command<'_> {
                 opaque: true,
             };
         }
-        let assignment = is_assignment(word);
-        let name = if assignment {
+        let plain_assignment = is_assignment(word);
+        let name = if plain_assignment {
             String::new()
         } else {
             unquote(word)
         };
+        // `env "X=1" cmd`: the wrapper reads the word unquoted.
+        let assignment = plain_assignment || (wrapper.is_some() && is_assignment(&name));
         let mut skip = 1;
         if assignment {
         } else if RESERVED.contains(&name.as_str()) {
@@ -327,7 +401,7 @@ fn strip_prefix(segment: &str) -> Command<'_> {
         } else if WRAPPERS.contains(&name.as_str()) {
             wrapper = Some((name, rest));
         } else if let Some((wrapper, at)) = &wrapper
-            && word.starts_with('-')
+            && name.starts_with('-')
         {
             match wrapper_option(wrapper, &name) {
                 WrapperOption::Plain => {}

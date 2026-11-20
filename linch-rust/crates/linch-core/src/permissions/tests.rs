@@ -797,6 +797,82 @@ fn an_allow_rule_does_not_cover_a_redirect_to_a_file_spelled_like_a_descriptor()
 }
 
 #[test]
+fn a_deny_rule_covers_a_command_behind_a_quoted_wrapper_option() {
+    let engine = flat(
+        PermissionMode::SkipDangerous,
+        vec![bash_rule("touch *", Deny)],
+    );
+    for command in [
+        "env -i touch M",
+        "env X=1 touch M",
+        "env \"-i\" touch M",
+        "env \\-i touch M",
+        "env '-u' X touch M",
+        "env \"X=1\" touch M",
+        "env 'X=1' touch M",
+        "env X\\=1 touch M",
+        "command \"-p\" touch M",
+        "time \"-o\" f touch M",
+        "exec \"-a\" n touch M",
+    ] {
+        assert_eq!(bash(&engine, command), "deny", "{command:?}");
+    }
+    for command in ["env \"-S\" 'touch M'", "env '-S' 'touch M'"] {
+        assert_eq!(bash(&engine, command), "ask", "{command:?}");
+    }
+}
+
+#[test]
+fn a_deny_rule_covers_a_command_behind_a_bundled_or_abbreviated_wrapper_option() {
+    let engine = flat(
+        PermissionMode::SkipDangerous,
+        vec![bash_rule("touch *", Deny)],
+    );
+    for command in [
+        "env -u X touch M",
+        "env -iu X touch M",
+        "env -uX touch M",
+        "env --uns X touch M",
+        "env --unset=X touch M",
+        "env -iC . touch M",
+        "env --chd . touch M",
+        "env -a n touch M",
+        "env --argv0 n touch M",
+        "time -po f touch M",
+        "time -ao f touch M",
+        "time -ofile touch M",
+        "time --outp f touch M",
+        "time --format=x touch M",
+        "exec -la n touch M",
+        "exec -ca n touch M",
+        "exec -cla n touch M",
+    ] {
+        assert_eq!(bash(&engine, command), "deny", "{command:?}");
+    }
+    for command in [
+        "env -iS 'touch M'",
+        "env --split-str 'touch M'",
+        "env --split-string='touch M'",
+    ] {
+        assert_eq!(bash(&engine, command), "ask", "{command:?}");
+    }
+}
+
+#[test]
+fn a_deny_rule_does_not_match_the_argument_of_a_bundled_wrapper_option() {
+    let engine = flat(PermissionMode::SkipDangerous, vec![bash_rule("rm", Deny)]);
+    for command in [
+        "env -iu rm make",
+        "env --uns rm make",
+        "exec -la rm sleep 1",
+        "time -po rm make",
+        "env \"-u\" rm make",
+    ] {
+        assert_eq!(bash(&engine, command), "allow", "{command:?}");
+    }
+}
+
+#[test]
 fn unparsed_floor_beats_a_generic_allow_in_any_layer_order() {
     let rules = vec![tool("Bash", Allow), bash_rule("rm -rf *", Deny)];
     let engine = flat(PermissionMode::SkipDangerous, rules);

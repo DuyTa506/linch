@@ -515,7 +515,9 @@ Cách các rule kết hợp:
   `NAME=value`, chuyển hướng (`>f`, `2>&1`), các từ khóa dành riêng `if`, `then`,
   `else`, `elif`, `do`, `while`, `until`, `!` và `{`, cùng `time`, `exec`,
   `command`, `builtin` và `env` (có hoặc không có dấu nháy) với các tùy chọn của
-  chúng, kể cả đối số của `env -u`/`-C`, `time -f`/`-o` và `exec -a`.
+  chúng, đọc sau khi bỏ dấu nháy: tùy chọn ngắn gộp (`env -iu NAME`, `exec -la NAME`),
+  tiền tố duy nhất của tùy chọn dài (`env --uns NAME`) và đối số của
+  `env -u`/`-C`/`-a`, `time -f`/`-o` và `exec -a`.
   `command -v NAME` không phải lệnh tên `NAME`. Rule allow không bao giờ khớp dạng
   đã gỡ: `X=1 echo` không phải `echo`. Các cách viết khác của một lệnh, như
   `/bin/rm`, `sudo rm`, `xargs rm`, `eval rm x` và `sh -c 'rm x'`, là những lệnh
