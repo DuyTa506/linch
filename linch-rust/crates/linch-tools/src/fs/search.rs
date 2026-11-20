@@ -2,20 +2,24 @@
 //! walks (gitignore, hidden files, type table, `--glob` overrides) and
 //! `grep-searcher` searches, so no process is spawned.
 
-use std::fs::File;
+use std::error::Error;
 use std::io;
 use std::path::{Component, Path};
 use std::time::Instant;
 
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkMatch};
-use ignore::overrides::OverrideBuilder;
+use ignore::overrides::{Override, OverrideBuilder};
 use ignore::types::TypesBuilder;
 use ignore::{DirEntry, WalkBuilder};
 use tokio_util::sync::CancellationToken;
 
+use super::beneath::{exhausted, stamp_of_stat};
+use super::ignore_files::IgnoreFiles;
 use super::local::is_hidden;
-use super::{FsError, GlobHit, GlobQuery, GrepFile, GrepHits, GrepLine, GrepMode, GrepQuery};
+use super::{
+    FsError, GlobHit, GlobHits, GlobQuery, GrepFile, GrepHits, GrepLine, GrepMode, GrepQuery,
+};
 use crate::fs::LocalFs;
 
 /// Longest line text kept in content output, in bytes.
@@ -43,29 +47,22 @@ pub(super) fn grep(
     query: &GrepQuery,
     stop: &CancellationToken,
 ) -> Result<GrepHits, FsError> {
-    let target = fs.resolve(query.path.as_deref().unwrap_or("."))?;
+    let at = fs.locate(query.path.as_deref().unwrap_or("."))?;
+    if !at.tail.is_empty() && at.leaf.is_none() {
+        // Nothing there to search.
+        return Ok(GrepHits::default());
+    }
+    let target = at.real_path(fs.root());
     let matcher = matcher(query)?;
     let limit = fs.search_limit();
     let mut searcher = searcher(query, limit);
-    let mut walk = walker(&target, false);
-    if let Some(glob) = &query.glob {
-        let overrides = OverrideBuilder::new(&target)
+    let overrides = match &query.glob {
+        Some(glob) => OverrideBuilder::new(&target)
             .add(glob)
             .and_then(|builder| builder.build())
-            .map_err(invalid)?;
-        walk.overrides(overrides);
-    }
-    if let Some(name) = &query.file_type {
-        let types = TypesBuilder::new()
-            .add_defaults()
-            .select(name)
-            .build()
-            .map_err(invalid)?;
-        walk.types(types);
-    }
-    let mut hits = GrepHits::default();
-    let mut lines = 0;
-    let mut searched_files = 0;
+            .map_err(invalid)?,
+        None => Override::empty(),
+    };
     let time_limit = fs.search_time_limit();
     let deadline = Instant::now() + time_limit;
     let timed_out = |files: usize, path: &Path| FsError::TimedOut {
@@ -73,11 +70,37 @@ pub(super) fn grep(
         files,
         at: fs.workspace_path(path),
     };
+    let (mut walk, rules) = walker(fs, &target, false, overrides, Some(deadline));
+    if let Some(name) = &query.file_type {
+        let types = TypesBuilder::new()
+            .add_defaults()
+            .select(name)
+            .build()
+            .map_err(invalid)?;
+        rules.types(types.clone());
+        walk.types(types);
+    }
+    let mut hits = GrepHits::default();
+    let mut lines = 0;
+    let mut opener = fs.opener();
+    let mut searched_files = 0;
     for entry in walk.build() {
+        rules.check()?;
         if stop.is_cancelled() {
             return Err(FsError::Cancelled);
         }
-        let Some(path) = regular_file(entry) else {
+        if rules.expired() {
+            return Err(timed_out(searched_files, &target));
+        }
+        let Some(path) = listed_file(entry, &mut hits.left_out)? else {
+            continue;
+        };
+        // The walk only proposes names: every file is opened again from the
+        // root, so a directory swapped for a symlink since it was listed
+        // cannot lead the search out of the root. A name that cannot be
+        // opened that way is counted, never named: it may come from outside.
+        let Some(file) = opener.open(&path)? else {
+            hits.left_out += 1;
             continue;
         };
         if Instant::now() >= deadline {
@@ -87,7 +110,7 @@ pub(super) fn grep(
         // whole file; skip one over the cap without reading it. Other
         // searches stream, so any size is fine.
         if searcher.multi_line_with_matcher(&matcher)
-            && path.metadata().is_ok_and(|meta| meta.len() > limit)
+            && file.metadata().is_ok_and(|meta| meta.len() > limit)
         {
             hits.skipped.push(fs.workspace_path(&path));
             continue;
@@ -97,8 +120,7 @@ pub(super) fn grep(
             _ => usize::MAX,
         };
         let mut sink = Collect::new(query.mode, budget);
-        let searched = File::open(&path)
-            .and_then(|file| search(&mut searcher, &matcher, file, (stop, deadline), &mut sink));
+        let searched = search(&mut searcher, &matcher, file, (stop, deadline), &mut sink);
         if stop.is_cancelled() {
             return Err(FsError::Cancelled);
         }
@@ -138,7 +160,29 @@ pub(super) fn grep(
             break;
         }
     }
+    rules.check()?;
+    if rules.expired() {
+        return Err(timed_out(searched_files, &target));
+    }
     Ok(hits)
+}
+
+/// Every regular file under the root, walked with no filter and looked at
+/// again from the root descriptor. Entries that cannot be read from the root
+/// are left out; running out of descriptors is an error.
+pub(super) fn files(fs: &LocalFs) -> Result<Vec<std::path::PathBuf>, FsError> {
+    let mut opener = fs.opener();
+    let mut walk = WalkBuilder::new(fs.root());
+    walk.standard_filters(false).follow_links(false);
+    let (mut found, mut left_out) = (Vec::new(), 0);
+    for entry in walk.build() {
+        if let Some(path) = listed_file(entry, &mut left_out)?
+            && opener.stat(&path)?.is_some()
+        {
+            found.push(path);
+        }
+    }
+    Ok(found)
 }
 
 /// List files under the query's path whose names match its pattern.
@@ -146,19 +190,20 @@ pub(super) fn glob(
     fs: &LocalFs,
     query: &GlobQuery,
     stop: &CancellationToken,
-) -> Result<Vec<GlobHit>, FsError> {
+) -> Result<GlobHits, FsError> {
     let pattern = Path::new(&query.pattern);
     if pattern.is_absolute() || pattern.components().any(|c| c == Component::ParentDir) {
         return Err(FsError::InvalidQuery(
             "glob pattern must be relative and must not contain '..'".to_owned(),
         ));
     }
-    let dir = fs.resolve(query.path.as_deref().unwrap_or("."))?;
-    if !dir.is_dir() {
+    let at = fs.locate(query.path.as_deref().unwrap_or("."))?;
+    if !at.tail.is_empty() {
         return Err(FsError::NotADirectory {
-            path: fs.workspace_path(&dir),
+            path: at.workspace_path(),
         });
     }
+    let dir = at.real_path(fs.root());
     let dotted = pattern.components().any(|part| match part {
         Component::Normal(name) => is_hidden(name),
         _ => false,
@@ -167,45 +212,95 @@ pub(super) fn glob(
         .add(&query.pattern)
         .and_then(|builder| builder.build())
         .map_err(invalid)?;
-    let mut walk = walker(&dir, dotted);
-    walk.overrides(overrides);
-    let mut hits = Vec::new();
+    let (walk, rules) = walker(fs, &dir, dotted, overrides, None);
+    let mut found = GlobHits::default();
+    let mut opener = fs.opener();
     for entry in walk.build() {
+        rules.check()?;
         if stop.is_cancelled() {
             return Err(FsError::Cancelled);
         }
-        let Some(path) = regular_file(entry) else {
+        let Some(path) = listed_file(entry, &mut found.left_out)? else {
             continue;
         };
-        let modified = path.metadata().and_then(|meta| meta.modified()).ok();
-        hits.push(GlobHit {
+        // A name is listed only if it is a regular file under the root when
+        // looked at again from the root descriptor; any other is counted.
+        let Some(stat) = opener.stat(&path)? else {
+            found.left_out += 1;
+            continue;
+        };
+        found.hits.push(GlobHit {
             path: fs.workspace_path(&path),
-            modified,
+            modified: Some(stamp_of_stat(&stat).modified),
         });
     }
-    Ok(hits)
+    rules.check()?;
+    Ok(found)
 }
 
-/// The walker both searches share: sorted, symlinks not followed, the
-/// host's global gitignore not read, `.gitignore` honoured outside git too.
-fn walker(dir: &Path, hidden: bool) -> WalkBuilder {
+/// The walker both searches share, with the rules that drive it: sorted,
+/// symlinks not followed, `.ignore` and `.gitignore` honoured outside git too
+/// but read from the root descriptor (see [`IgnoreFiles`]), the host's global
+/// ignore file not read.
+fn walker(
+    fs: &LocalFs,
+    dir: &Path,
+    hidden: bool,
+    overrides: Override,
+    deadline: Option<Instant>,
+) -> (WalkBuilder, IgnoreFiles) {
+    let rules = IgnoreFiles::new(fs.opener(), fs.root(), overrides.clone(), !hidden, deadline);
     let mut walk = WalkBuilder::new(dir);
-    walk.hidden(!hidden)
-        .follow_links(false)
-        .git_global(false)
-        .require_git(false)
+    walk.follow_links(false)
+        .overrides(overrides)
         .sort_by_file_name(|a, b| a.cmp(b));
-    walk
+    rules.install(&mut walk);
+    (walk, rules)
 }
 
-/// The path of a walked regular file. Directories, symlinks and unreadable
-/// entries yield `None`, so a search never leaves the root through a link.
-fn regular_file(entry: Result<DirEntry, ignore::Error>) -> Option<std::path::PathBuf> {
-    let entry = entry.ok()?;
-    entry
-        .file_type()
-        .is_some_and(|kind| kind.is_file())
-        .then(|| entry.into_path())
+/// The path of a walked regular file. Directories and symlinks yield `None`,
+/// so a search never leaves the root through a link. An entry the walk could
+/// not read is counted in `left_out`, unless the process is out of
+/// descriptors, which is an error: an empty answer would look like a tree
+/// with nothing in it.
+fn listed_file(
+    entry: Result<DirEntry, ignore::Error>,
+    left_out: &mut usize,
+) -> Result<Option<std::path::PathBuf>, FsError> {
+    match entry {
+        Ok(entry) => Ok(entry
+            .file_type()
+            .is_some_and(|kind| kind.is_file())
+            .then(|| entry.into_path())),
+        Err(error) => {
+            if let Some(source) = error.io_error() {
+                if exhausted_in(source) {
+                    return Err(super::local::io_error(
+                        ".",
+                        io::Error::from(rustix::io::Errno::MFILE),
+                    ));
+                }
+                *left_out += 1;
+            }
+            Ok(None)
+        }
+    }
+}
+
+/// Whether `error`, or an error it wraps (the walk wraps the system's), is
+/// the process running out of descriptors.
+fn exhausted_in(error: &io::Error) -> bool {
+    if exhausted(error) {
+        return true;
+    }
+    let mut next = error.get_ref().map(|inner| inner as &(dyn Error + 'static));
+    while let Some(inner) = next {
+        if inner.downcast_ref::<io::Error>().is_some_and(exhausted) {
+            return true;
+        }
+        next = inner.source();
+    }
+    false
 }
 
 /// The searcher for `query`. It holds at most `limit` bytes of a file: the

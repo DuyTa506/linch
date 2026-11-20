@@ -213,3 +213,20 @@ fn the_time_limit_is_checked_between_files() {
         "{error:?}"
     );
 }
+
+#[test]
+fn the_time_limit_is_checked_while_the_walk_lists_entries() {
+    // Every file is ignored, so none reaches the per-file check: only the
+    // walk's own filter can notice that the time is up.
+    let (_dir, fs) = workspace(&[
+        (".gitignore", "*.txt\n"),
+        ("a.txt", "needle\n"),
+        ("b.txt", "needle\n"),
+    ]);
+    let fs = fs.with_search_time_limit(Duration::ZERO);
+    let error = grep(&fs, &query("needle", false), &CancellationToken::new()).unwrap_err();
+    assert!(
+        matches!(error, FsError::TimedOut { files: 0, .. }),
+        "{error:?}"
+    );
+}

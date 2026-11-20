@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
 use common::{Workspace, call, text};
-use linch_tools::fs::{FileContent, FileInfo, FileStamp, GlobHit, GlobQuery, GrepHits, GrepQuery};
+use linch_tools::fs::{FileContent, FileInfo, FileStamp, GlobHits, GlobQuery, GrepHits, GrepQuery};
 use linch_tools::{ExecutionFs, FsError, Grep};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -42,7 +42,7 @@ impl ExecutionFs for Recording {
         Ok(GrepHits::default())
     }
 
-    async fn glob(&self, _: &GlobQuery, _: &CancellationToken) -> Result<Vec<GlobHit>, FsError> {
+    async fn glob(&self, _: &GlobQuery, _: &CancellationToken) -> Result<GlobHits, FsError> {
         unreachable!()
     }
 }
