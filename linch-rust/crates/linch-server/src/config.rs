@@ -173,7 +173,7 @@ impl TryFrom<serde_json::Value> for TokenSource {
     /// Exactly one of `env` and `value`, a string. The error never holds
     /// the value, which may be the secret itself given in the wrong shape.
     fn try_from(value: serde_json::Value) -> Result<Self, Self::Error> {
-        const SHAPE: &str = "expected an object with `env` or `value`";
+        const SHAPE: &str = TOKEN_SHAPE;
         let serde_json::Value::Object(map) = value else {
             return Err(SHAPE);
         };
@@ -189,74 +189,130 @@ impl TryFrom<serde_json::Value> for TokenSource {
     }
 }
 
-/// The text of a config parse error without any string of the input: serde
-/// quotes the value that did not fit (`invalid type: string "tok-..."`) and
-/// the key it did not know (`unknown field `tok-...``), and the config holds
-/// secrets, which `linch-server` would print on stderr. What stays is the
-/// kind of error, what was expected and the line and column.
+/// What `TokenSource` says of a value that is not `{"env"}` or `{"value"}`.
+const TOKEN_SHAPE: &str = "expected an object with `env` or `value`";
+
+/// Kinds of value serde names, in its own words, at the start of an
+/// `invalid type` or `invalid value` message.
+const VALUE_KINDS: [&str; 15] = [
+    "string",
+    "integer",
+    "floating point",
+    "boolean",
+    "character",
+    "sequence",
+    "map",
+    "null",
+    "unit value",
+    "Option value",
+    "newtype struct",
+    "byte array",
+    "enum",
+    "unit variant",
+    "struct variant",
+];
+
+/// The text of a config parse error without any string of the input. The
+/// config holds secrets, and serde quotes the value that did not fit
+/// (`invalid type: string "tok-..."`) and the key it did not know (`unknown
+/// field `tok-...``), which `linch-server` would print on stderr.
+///
+/// The message is rebuilt from the parts that cannot come from the input:
+/// its start (the kind of error, which serde writes before the input's
+/// words) and its end (what was expected, which serde writes after them,
+/// and which is the part after the last `, expected `). Whatever lies
+/// between is dropped, whatever characters it holds. The line and column
+/// come from the error, not its text. A message of another shape is
+/// reduced to `invalid value`.
 fn redact(error: &serde_json::Error) -> String {
-    // After each of these serde names the input's own value in quotes or
-    // backticks; the field and variant names that follow it are ours.
-    const VALUES: [&str; 13] = [
-        "unknown field ",
-        "unknown variant ",
-        "invalid type: string ",
-        "invalid type: integer ",
-        "invalid type: floating point ",
-        "invalid type: boolean ",
-        "invalid type: character ",
-        "invalid value: string ",
-        "invalid value: integer ",
-        "invalid value: floating point ",
-        "invalid value: boolean ",
-        "invalid value: character ",
-        "duplicate field ",
-    ];
-    let mut text = error.to_string();
-    for prefix in VALUES {
-        let Some(at) = text.find(prefix) else {
-            continue;
-        };
-        let start = at + prefix.len();
-        let rest = &text[start..];
-        let end = match rest.chars().next() {
-            Some('"') => quoted_len(rest),
-            Some('`') => rest[1..].find('`').map(|close| close + 2),
-            _ => None,
-        };
-        if let Some(end) = end {
-            text.replace_range(start..start + end, "");
-            // "unknown field , expected": drop the gap the value left.
-            if text[start..].starts_with(',') || text[start..].starts_with(' ') {
-                text.replace_range(start - 1..start, "");
-            }
-        }
+    let full = error.to_string();
+    let place = format!(" at line {} column {}", error.line(), error.column());
+    let message = full.strip_suffix(&place).unwrap_or(&full);
+    let place = if message.len() == full.len() {
+        ""
+    } else {
+        place.as_str()
+    };
+    if error.classify() != serde_json::error::Category::Data {
+        // A syntax error names a byte of the file, never a string of it.
+        return format!("{message}{place}");
     }
-    // Whatever else quotes a string of the input is cut too.
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text.as_str();
-    while let Some(open) = rest.find('"') {
-        out.push_str(&rest[..open]);
-        let end = quoted_len(&rest[open..]).unwrap_or(rest.len() - open);
-        rest = &rest[open + end..];
-    }
-    out.push_str(rest);
-    out
+    format!("{}{place}", data_error(message))
 }
 
-/// Bytes of the string literal at the start of `text` (which starts with a
-/// `"`), its closing quote included; escapes are skipped.
-fn quoted_len(text: &str) -> Option<usize> {
-    let mut escaped = false;
-    for (at, character) in text.char_indices().skip(1) {
-        match character {
-            _ if escaped => escaped = false,
-            '\\' => escaped = true,
-            '"' => return Some(at + 1),
-            _ => {}
+fn data_error(message: &str) -> String {
+    const NO_FIELDS: &str = ", there are no fields";
+    if message == TOKEN_SHAPE {
+        return message.to_owned();
+    }
+    let expected = message.rfind(", expected ").map(|at| &message[at + 2..]);
+    for kind in ["unknown field", "unknown variant"] {
+        if message.starts_with(&format!("{kind} `")) {
+            if message.ends_with(NO_FIELDS) {
+                return format!("{kind}{NO_FIELDS}");
+            }
+            return match expected.filter(|expected| names_only(expected)) {
+                Some(expected) => format!("{kind}, {expected}"),
+                None => kind.to_owned(),
+            };
         }
     }
-    None
+    for lead in ["invalid type: ", "invalid value: "] {
+        if let Some(rest) = message.strip_prefix(lead) {
+            let kind = VALUE_KINDS.iter().find(|kind| rest.starts_with(**kind));
+            let kind = kind.map_or(lead.trim_end_matches(": ").to_owned(), |kind| {
+                format!("{lead}{kind}")
+            });
+            return match expected {
+                Some(expected) => format!("{kind}, {expected}"),
+                None => kind,
+            };
+        }
+    }
+    if let Some(name) = message.strip_prefix("missing field `")
+        && name.strip_suffix('`').is_some_and(is_name)
+    {
+        return message.to_owned();
+    }
+    "invalid value".to_owned()
+}
+
+/// Whether `expected` is `expected` and then only field or variant names in
+/// backticks, as serde lists them: `expected `a``, `expected `a` or `b``,
+/// `expected one of `a`, `b``.
+fn names_only(expected: &str) -> bool {
+    let Some(list) = expected.strip_prefix("expected ") else {
+        return false;
+    };
+    let mut rest = list.strip_prefix("one of ").unwrap_or(list);
+    loop {
+        let Some(open) = rest.strip_prefix('`') else {
+            return false;
+        };
+        let Some((name, after)) = open.split_once('`') else {
+            return false;
+        };
+        if !is_name(name) {
+            return false;
+        }
+        if after.is_empty() {
+            return true;
+        }
+        match after
+            .strip_prefix(", ")
+            .or_else(|| after.strip_prefix(" or "))
+        {
+            Some(next) => rest = next,
+            None => return false,
+        }
+    }
+}
+
+fn is_name(text: &str) -> bool {
+    !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 impl fmt::Debug for TokenSource {
