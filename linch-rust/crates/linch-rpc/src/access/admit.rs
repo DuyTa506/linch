@@ -10,8 +10,8 @@ use linch::permissions::RuleDecision;
 use linch::verification::Check;
 use linch::{
     AgentConfig, AgentSpec, ByteQuota, CacheScope, ExecutionConfig, McpTransportConfig,
-    PermissionMode, PermissionPolicy, Principal, ProviderConfig, ReliabilityPolicy, StoreConfig,
-    SystemSection, ToolChoice,
+    PermissionMode, PermissionPolicy, Principal, ProviderConfig, ProviderRequest,
+    ReliabilityPolicy, StoreConfig, SystemBlock, SystemSection, ToolChoice,
 };
 use serde_json::json;
 use url::Url;
@@ -37,6 +37,53 @@ impl Tenant {
             ),
             _ => error,
         }
+    }
+
+    /// The request a tenant's `before_provider_call` callback rewrote `sent`
+    /// into, with the operator's `system_sections` put back where `sent` had
+    /// them: each block of `sent` that carries a section's text goes back at
+    /// its place in the system, with its `cacheable` flag, and a block of the
+    /// rewrite with that text is not repeated. The system `sent` held is the
+    /// one the core laid out (every section, the operator's and the tenant's,
+    /// sorted by `order`), so a rewrite that changes nothing yields the very
+    /// same system bytes. The rest of the system is the callback's, up to
+    /// [`MAX_SYSTEM_BYTES`] (or what `sent` held beyond the sections, when
+    /// that is more).
+    ///
+    /// Raises:
+    ///     String: What the rewrite holds beyond that bound.
+    pub(crate) fn confine_rewrite(
+        &self,
+        sent: &ProviderRequest,
+        mut rewritten: ProviderRequest,
+    ) -> Result<ProviderRequest, String> {
+        let operator = &self.allow.system_sections;
+        let is_operator =
+            |block: &SystemBlock| operator.iter().any(|section| section.text == block.text);
+        // What `sent` carries of the operator's, and where: a request with
+        // none (a child whose system is its own) has nothing to put back.
+        let held: Vec<(usize, &SystemBlock)> = (sent.system.iter().enumerate())
+            .filter(|(_, block)| is_operator(block))
+            .collect();
+        let beyond = |blocks: &[SystemBlock]| {
+            let own = blocks.iter().filter(|block| !is_operator(block));
+            own.map(|block| block.text.len()).sum::<usize>()
+        };
+        let allowed = MAX_SYSTEM_BYTES.max(beyond(&sent.system));
+        if beyond(&rewritten.system) > allowed {
+            return Err(format!(
+                "the rewritten system holds more than {allowed} bytes besides the operator's sections"
+            ));
+        }
+        if held.is_empty() {
+            return Ok(rewritten);
+        }
+        rewritten.system.retain(|block| !is_operator(block));
+        for (at, block) in held {
+            let at = at.min(rewritten.system.len());
+            rewritten.system.insert(at, block.clone());
+        }
+        Ok(rewritten)
     }
 
     /// With cache isolation on, give `provider` the tenant's cache salt, set

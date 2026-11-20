@@ -85,6 +85,7 @@ tới handler của nó. Các kiểu params từ chối trường không biết;
 | `workflow.start` | `WorkflowStartParams` `{agent, run_id, budget?, resume?, principal?}` (`protocol/workflow.rs`) | `Server::start_workflow` (`server/workflow.rs`): `admit_principal`, các mức trần của tenant, rồi `WorkflowSession::open_held`; `-32045` khi một client khác đang drive nó | `WorkflowStarted` `{records, resumed, previous?, limits?}` |
 | `workflow.agent` | `WorkflowAgentParams` `{run_id, prompt, name?, subagent?, label?, key?, output_schema?, fork?, timeout_ms?, retry?, branch?, call_id?}` | `workflow_agent`: `WorkflowContext::agent_with` trên nhánh; bị bỏ cùng kết nối như một run | `WorkflowAgentResult` `{text, structured?, session_id, tokens, cost_usd, replayed}` |
 | `workflow.step.begin`, `workflow.step.complete` | `{run_id, name, key?, branch?}`, `{run_id, ticket, value}` | `step_begin`, `step_complete`; ticket do server giữ | `{replayed, value?, ticket?}`, `{}` |
+| `workflow.step.abandon` | `{run_id, ticket}` | trả lại một ticket mà function của nó thất bại trong client (capability `workflow_step_abandon`); idempotent; một workflow của tenant giữ tối đa `MAX_CALL_KEYS` (10.000, hoặc `max_records` nếu lớn hơn) ticket, vượt thì `workflow.step.begin` bị từ chối (`-32005`, `kind: pending_steps`) | `{abandoned}` |
 | `workflow.interrupt` | `{run_id, key, payload?, branch?}` | `WorkflowContext::interrupt` | `{suspended, value?}` |
 | `workflow.cancel` | `{run_id, call_id?}` | hủy một lời gọi agent đang chạy, hoặc tất cả | `{cancelled}` |
 | `workflow.finish` | `{run_id, ok}` | kết thúc các lời gọi đang chạy, ghi trạng thái (`awaiting_input` khi một interrupt đã suspend nó), giải phóng hold | `{status}` |
@@ -412,7 +413,12 @@ kết nối đã yêu cầu ([cách dùng](../usage/scheduler.md)).
   Mọi method của scheduler nêu tên một agent đang mở; pool Postgres của nó
   (`OpenedAgent::pool`) giữ các hàng, namespace của nó phân vùng chúng, và các bảng hàng đợi
   được migrate trên cơ sở dữ liệu của nó ở lần gọi scheduler đầu tiên (một lần cho mỗi
-  agent), nên một server không bao giờ lập lịch thì không bao giờ tạo chúng.
+  agent), nên một server không bao giờ lập lịch thì không bao giờ tạo chúng. Một tenant không có
+  `max_schedules` lẫn `max_queued_jobs` thì không bao giờ migrate: `schedule.list`,
+  `schedule.delete`, `job.list` và `job.get` vẫn đọc các bảng khi chúng đã có, ở bất kỳ migration nào (nó có thể dọn
+  những gì nó đã tạo; một lời gọi đọc mà schema cũ không trả lời được là một `-32014` chung,
+  không nêu tên bảng hay migration) và trả lời như một namespace rỗng khi các bảng chưa có
+  (`schedule.pause` và `schedule.resume` trả not found).
 - **Kiểm tra tenant.** Trước mọi truy vấn: `max_schedules` và `max_queued_jobs` phải được đặt
   (`-32004`, kind `schedules` và `background_runs`), và `Timing::shortest_gap` của một lịch
   phải ít nhất bằng `min_schedule_interval` (`kind: schedule_interval`). Bản thân các số đếm
@@ -479,7 +485,7 @@ từ chối ngay khi không khớp, thay vì lỗi ở method đầu tiên có h
 
 ```json
 {"server_version": "0.1.1", "protocol": 1, "contract_version": 1,
- "capabilities": ["cache_isolation", "exec_idempotency_key", "provider_info", "run_steer", "schedule", "workflow"],
+ "capabilities": ["cache_isolation", "exec_idempotency_key", "provider_info", "run_steer", "schedule", "workflow", "workflow_step_abandon"],
  "backends": ["local", "sandbox", "docker", "remote"],
  "limits": {"max_message_bytes": 16777216, "default_max_runs": 16}}
 ```

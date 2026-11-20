@@ -7,12 +7,12 @@
 
 use std::time::Duration;
 
-use futures::StreamExt;
-use linch_core::{JsonObject, JsonValue, ProviderError, ProviderStream};
+use linch_core::{JsonObject, JsonValue, ProviderError};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
 use crate::ApiKey;
 use crate::HttpClients;
+use crate::api_key::scrub;
 use crate::clients::SharedClient;
 
 /// Body fields an adapter owns: `extra_body` never replaces them. The
@@ -57,6 +57,9 @@ const MIN_SCRUBBED_VALUE: usize = 8;
 const CREDENTIAL_NAMES: [&str; 5] = ["token", "key", "secret", "auth", "cookie"];
 
 const REDACTED: &str = "[redacted]";
+
+/// The most characters of error text an error carries.
+pub(crate) const MAX_ERROR_CHARS: usize = 500;
 
 const CHAT_TEMPLATE_KWARGS: &str = "chat_template_kwargs";
 
@@ -114,6 +117,78 @@ impl CacheSalt {
 impl std::fmt::Debug for CacheSalt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("CacheSalt([redacted])")
+    }
+}
+
+/// What the text of an error must not carry, for the errors a call yields
+/// inside its stream: the provider key and bearer tokens, then the header
+/// values and the cache salt of [`RequestOptions`], and only then the cut
+/// to [`MAX_ERROR_CHARS`], so a cut never leaves the start of a secret
+/// behind. [`RequestOptions::scrub_error`] is the same for the errors that
+/// come before the stream.
+#[derive(Clone, Default)]
+pub(crate) struct ErrorScrub {
+    key: Option<ApiKey>,
+    request: Option<RequestOptions>,
+}
+
+impl ErrorScrub {
+    pub(crate) fn new(key: Option<ApiKey>, request: &RequestOptions) -> Self {
+        Self {
+            key,
+            request: Some(request.clone()),
+        }
+    }
+
+    pub(crate) fn error(&self, err: ProviderError) -> ProviderError {
+        clean_error(self.key.as_ref(), self.request.as_ref(), err)
+    }
+}
+
+impl From<ApiKey> for ErrorScrub {
+    fn from(key: ApiKey) -> Self {
+        Self {
+            key: Some(key),
+            request: None,
+        }
+    }
+}
+
+impl From<Option<ApiKey>> for ErrorScrub {
+    fn from(key: Option<ApiKey>) -> Self {
+        Self { key, request: None }
+    }
+}
+
+/// `err` with the text of its message cleaned, in the order above.
+fn clean_error(
+    key: Option<&ApiKey>,
+    request: Option<&RequestOptions>,
+    err: ProviderError,
+) -> ProviderError {
+    let clean = |message: String| -> String {
+        let text = scrub(key, &message);
+        let text = request.map_or(text.clone(), |request| request.scrub(&text));
+        text.chars().take(MAX_ERROR_CHARS).collect()
+    };
+    match err {
+        ProviderError::Transport { message } => ProviderError::Transport {
+            message: clean(message),
+        },
+        ProviderError::Status {
+            status,
+            retry_after,
+            message,
+        } => ProviderError::Status {
+            status,
+            retry_after,
+            message: clean(message),
+        },
+        ProviderError::ContextLength { status, message } => ProviderError::ContextLength {
+            status,
+            message: clean(message),
+        },
+        other => other,
     }
 }
 
@@ -210,41 +285,10 @@ impl RequestOptions {
         text
     }
 
-    /// `err` with its message scrubbed of the header values.
+    /// `err` with its message scrubbed of the header values and the cache
+    /// salt, then cut to [`MAX_ERROR_CHARS`].
     pub(crate) fn scrub_error(&self, err: ProviderError) -> ProviderError {
-        if self.headers.is_empty() && self.cache_salt.is_none() {
-            return err;
-        }
-        match err {
-            ProviderError::Transport { message } => ProviderError::Transport {
-                message: self.scrub(&message),
-            },
-            ProviderError::Status {
-                status,
-                retry_after,
-                message,
-            } => ProviderError::Status {
-                status,
-                retry_after,
-                message: self.scrub(&message),
-            },
-            ProviderError::ContextLength { status, message } => ProviderError::ContextLength {
-                status,
-                message: self.scrub(&message),
-            },
-            other => other,
-        }
-    }
-
-    /// `stream` with the errors it yields scrubbed of the header values.
-    pub(crate) fn scrub_stream(&self, stream: ProviderStream) -> ProviderStream {
-        if self.headers.is_empty() && self.cache_salt.is_none() {
-            return stream;
-        }
-        let options = self.clone();
-        stream
-            .map(move |item| item.map_err(|err| options.scrub_error(err)))
-            .boxed()
+        clean_error(None, Some(self), err)
     }
 
     /// Merge `extra_body` into `body`, which must be a JSON object.

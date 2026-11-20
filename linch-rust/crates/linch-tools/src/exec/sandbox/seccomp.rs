@@ -78,9 +78,10 @@ const IOPRIO_WHO_PROCESS: u32 = 1;
 /// Calls refused with `EPERM` whatever their arguments: privileged calls
 /// (kernel modules, kexec, reboot, swap, mounts, `chroot`), as defence in
 /// depth behind the root check at open; the user's keyrings, BPF, perf and
-/// userfaultfd, which reach past the sandbox; and namespaces.
+/// userfaultfd, which reach past the sandbox; System V IPC and POSIX
+/// message queues, whose objects are checked by user id; and namespaces.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-const REFUSED: [libc::c_long; 27] = [
+const REFUSED: [libc::c_long; 42] = [
     libc::SYS_init_module,
     libc::SYS_finit_module,
     libc::SYS_delete_module,
@@ -108,6 +109,21 @@ const REFUSED: [libc::c_long; 27] = [
     libc::SYS_userfaultfd,
     libc::SYS_unshare,
     libc::SYS_setns,
+    libc::SYS_shmget,
+    libc::SYS_shmat,
+    libc::SYS_shmctl,
+    libc::SYS_msgget,
+    libc::SYS_msgsnd,
+    libc::SYS_msgrcv,
+    libc::SYS_msgctl,
+    libc::SYS_semget,
+    libc::SYS_semop,
+    libc::SYS_semtimedop,
+    libc::SYS_semctl,
+    libc::SYS_mq_open,
+    libc::SYS_mq_unlink,
+    libc::SYS_mq_timedsend,
+    libc::SYS_mq_timedreceive,
 ];
 
 /// Calls whose first argument is a pid: allowed for 0 (the caller) only.
@@ -354,6 +370,35 @@ mod tests {
             libc::SYS_fsmount,
             libc::SYS_fspick,
             libc::SYS_mount_setattr,
+        ];
+        for network in [false, true] {
+            let program = program(network);
+            for call in calls {
+                assert_eq!(eval(&program, NATIVE, nr(call), [0; 3]), EPERM, "{call}");
+            }
+        }
+    }
+
+    /// System V IPC and POSIX message queues are checked by user id, the
+    /// server's, so another program of that user is reachable through them.
+    #[test]
+    fn ipc_calls_are_refused() {
+        let calls = [
+            libc::SYS_shmget,
+            libc::SYS_shmat,
+            libc::SYS_shmctl,
+            libc::SYS_msgget,
+            libc::SYS_msgsnd,
+            libc::SYS_msgrcv,
+            libc::SYS_msgctl,
+            libc::SYS_semget,
+            libc::SYS_semop,
+            libc::SYS_semtimedop,
+            libc::SYS_semctl,
+            libc::SYS_mq_open,
+            libc::SYS_mq_unlink,
+            libc::SYS_mq_timedsend,
+            libc::SYS_mq_timedreceive,
         ];
         for network in [false, true] {
             let program = program(network);

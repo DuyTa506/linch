@@ -60,6 +60,7 @@ pub(super) struct Inner {
     /// cap could not count it.
     pub(super) unpriced: Mutex<Option<String>>,
     max_records: Option<u64>,
+    max_call_keys: Option<usize>,
     max_record_bytes: Option<usize>,
     pub(super) live_gate: Option<LiveGate>,
     /// Who the agent calls' runs act for.
@@ -105,6 +106,7 @@ impl WorkflowContext {
             spent: Mutex::new((0, 0.0)),
             unpriced: Mutex::new(None),
             max_records: options.max_records,
+            max_call_keys: options.max_call_keys,
             max_record_bytes: options.max_record_bytes,
             live_gate: options.live_gate.clone(),
             principal: options.principal.clone(),
@@ -151,7 +153,16 @@ impl WorkflowContext {
     /// different order on replay, where journaled calls return at once; a
     /// count shared across branches would hand one branch another's
     /// record.
-    pub(super) fn next_occurrence(&self, call_key: &str) -> (String, u64, Option<JsonValue>) {
+    ///
+    /// With `max_call_keys` set, a call whose key this run has not used and
+    /// no record answers is refused once the run holds that many keys, so
+    /// calls that journal nothing (a suspended interrupt, a failed call)
+    /// cannot grow the counters without bound. The keys of replayed records
+    /// are never refused: they are bounded by the records.
+    pub(super) fn next_occurrence(
+        &self,
+        call_key: &str,
+    ) -> Result<(String, u64, Option<JsonValue>), WorkflowError> {
         let path = branch_path();
         let key = if path.is_empty() {
             call_key.to_owned()
@@ -159,11 +170,21 @@ impl WorkflowContext {
             format!("{call_key}@{path}")
         };
         let mut journal = lock(&self.inner.journal);
-        let counter = journal.counters.entry(key.clone()).or_default();
-        let occurrence = *counter;
-        *counter += 1;
+        let seen = journal.counters.get(&key).copied();
+        let occurrence = seen.unwrap_or_default();
         let cached = journal.records.get(&(key.clone(), occurrence)).cloned();
-        (key, occurrence, cached)
+        if let Some(max) = self.inner.max_call_keys
+            && seen.is_none()
+            && cached.is_none()
+            && journal.counters.len() >= max
+        {
+            return Err(WorkflowError::LimitExceeded {
+                what: "call keys",
+                max: max as u64,
+            });
+        }
+        journal.counters.insert(key.clone(), occurrence + 1);
+        Ok((key, occurrence, cached))
     }
 
     /// `LimitExceeded` when the journal holds as many records as it may.
@@ -182,6 +203,24 @@ impl WorkflowContext {
         Ok(())
     }
 
+    /// `LimitExceeded` (`what` names the value) when `value` is longer than
+    /// `max_record_bytes`: a record's value, or a payload that is kept in the
+    /// workflow's stored status.
+    pub(super) fn check_size(
+        &self,
+        value: &JsonValue,
+        what: &'static str,
+    ) -> Result<(), WorkflowError> {
+        let too_big = (self.inner.max_record_bytes).filter(|max| value.to_string().len() > *max);
+        match too_big {
+            Some(max) => Err(WorkflowError::LimitExceeded {
+                what,
+                max: max as u64,
+            }),
+            None => Ok(()),
+        }
+    }
+
     /// Make one result durable, then cache it.
     pub(super) async fn record(
         &self,
@@ -190,13 +229,7 @@ impl WorkflowContext {
         value: &JsonValue,
     ) -> Result<(), WorkflowError> {
         self.check_room()?;
-        let too_big = (self.inner.max_record_bytes).filter(|max| value.to_string().len() > *max);
-        if let Some(max) = too_big {
-            return Err(WorkflowError::LimitExceeded {
-                what: "bytes in a journal record",
-                max: max as u64,
-            });
-        }
+        self.check_size(value, "bytes in a journal record")?;
         let record = JournalRecord {
             call_key: call_key.to_owned(),
             occurrence,

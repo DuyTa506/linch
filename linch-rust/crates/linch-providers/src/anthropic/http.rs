@@ -10,9 +10,6 @@ use super::API_VERSION;
 use crate::ApiKey;
 use crate::overflow;
 
-/// Longest error summary kept in a [`ProviderError`].
-const MAX_ERROR_CHARS: usize = 500;
-
 /// POST `body` to `url` with `x-api-key` auth, and `beta` as the
 /// `anthropic-beta` header when there is one. A redirect is refused,
 /// never followed; any other non-2xx maps through [`status_error`].
@@ -138,9 +135,10 @@ fn summarize(error: &JsonValue) -> Option<String> {
     })
 }
 
-/// Redact first, then cut, so a cut never leaves part of a key behind.
+/// The summary without the key. The cut to 500 characters comes last, after
+/// every secret is out (`RequestOptions::scrub_error`, `sse::events`).
 fn clean(summary: &str, key: &ApiKey) -> String {
-    key.redact(summary).chars().take(MAX_ERROR_CHARS).collect()
+    key.redact(summary)
 }
 
 #[cfg(test)]
@@ -191,7 +189,7 @@ mod tests {
         );
         let err = status_error(401, None, &body, &key());
         assert_clean(&err);
-        let plain = format!("{}x-api-key={SECRET}", "y".repeat(MAX_ERROR_CHARS - 12));
+        let plain = format!("{}x-api-key={SECRET}", "y".repeat(500 - 12));
         assert_clean(&status_error(500, None, &plain, &key()));
     }
 

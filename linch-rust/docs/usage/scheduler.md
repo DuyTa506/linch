@@ -113,6 +113,14 @@ and open it again to schedule it anew. Each background run takes one of the tena
 
 A stdio client has no tenant and no caps.
 
+A tenant with neither `max_schedules` nor `max_queued_jobs` never migrates the
+database, but its reads stay available so it can clean up what it made:
+`schedule.list`, `schedule.delete`, `job.list` and `job.get` read the worker's tables where
+they exist, at whatever migration they are at, and answer as an empty namespace
+only where the tables do not exist. If a read fails because the tables are older
+than the server's, the answer is a generic `StoreUnavailable` (`-32014`) that
+names no table, column or migration.
+
 ## Which agents can run in the background
 
 The agent you schedule needs Postgres stores, no host tools or callbacks,

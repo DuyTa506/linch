@@ -29,6 +29,7 @@ fn expected() -> Value {
             "run_steer",
             "schedule",
             "workflow",
+            "workflow_step_abandon",
         ],
         "backends": backends,
         "limits": {

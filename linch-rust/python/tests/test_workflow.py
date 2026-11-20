@@ -410,6 +410,23 @@ async def test_a_deadline_and_a_step_timeout_end_the_workflow() -> None:
         assert await run_workflow(agent, quick, run_id="q", step_timeout_ms=300) == 1
 
 
+async def test_a_step_that_failed_gives_its_ticket_back() -> None:
+    """A workflow that catches failed steps never runs out of pending steps."""
+
+    def boom() -> None:
+        raise RuntimeError("boom")
+
+    async def flow(wf: WorkflowContext) -> int:
+        for _ in range(1100):
+            with pytest.raises(RuntimeError, match="boom"):
+                await wf.step("flaky", boom)
+        return await wf.step("fallback", lambda: 7)
+
+    async with Server() as server:
+        agent = await server.open_agent(config([]))
+        assert await run_workflow(agent, flow, run_id="caught") == 7
+
+
 async def test_a_retried_step_is_journaled_once() -> None:
     attempts: list[int] = []
 

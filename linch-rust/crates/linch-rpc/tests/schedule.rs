@@ -941,3 +941,142 @@ async fn a_tenant_never_reaches_another_tenants_schedules_or_jobs() {
     }
     db.drop().await;
 }
+
+/// Worker tables in the test schema.
+async fn worker_tables(db: &TestDb) -> i64 {
+    let pool = sqlx::PgPool::connect(&db.dsn).await.unwrap();
+    let sql = "SELECT count(*) FROM information_schema.tables \
+               WHERE table_schema = current_schema() AND table_name LIKE 'linch_worker%'";
+    let tables: i64 = sqlx::query_scalar(sql).fetch_one(&pool).await.unwrap();
+    pool.close().await;
+    tables
+}
+
+/// A tenant whose allowlists give it no schedules and no background runs
+/// is refused by `schedule.create` and `job.enqueue`; the other scheduler
+/// methods must not run the queue's migrations (DDL) in its database. With
+/// no tables they answer as an empty namespace does, and create nothing.
+#[tokio::test]
+async fn a_tenant_without_schedule_rights_cannot_reach_the_scheduler() {
+    let Some(db) = TestDb::empty("sched_no_rights").await else {
+        return;
+    };
+    let rpc = Rpc::remote(tenant("acme", allow(&db)));
+    let agent = rpc.open(on_postgres(&db, "acme")).await;
+    let id = json!({"agent": agent, "id": "x"});
+    let listed = rpc.call(method::SCHEDULE_LIST, json!({"agent": agent}));
+    assert_eq!(listed.await.unwrap(), json!({"schedules": []}));
+    let deleted = rpc.call(method::SCHEDULE_DELETE, id.clone()).await;
+    assert_eq!(deleted.unwrap(), json!({"deleted": false}));
+    for name in [method::SCHEDULE_PAUSE, method::SCHEDULE_RESUME] {
+        let missing = rpc.call(name, id.clone()).await.unwrap_err();
+        assert_eq!(code_of(missing), code::SCHEDULE_NOT_FOUND, "{name}");
+    }
+    let jobs = rpc.call(method::JOB_LIST, json!({"agent": agent}));
+    assert_eq!(jobs.await.unwrap(), json!({"jobs": []}));
+    let job = json!({"agent": agent, "job_id": 1});
+    let missing = rpc.call(method::JOB_GET, job).await.unwrap_err();
+    assert_eq!(code_of(missing), code::JOB_NOT_FOUND);
+    let tables = worker_tables(&db).await;
+    db.drop().await;
+    assert_eq!(
+        tables, 0,
+        "worker tables were created for a tenant with no right"
+    );
+}
+
+/// Where the tables exist (a tenant with rights made them), a tenant that
+/// has since lost its rights still lists and deletes what it made.
+#[tokio::test]
+async fn a_tenant_that_lost_its_schedule_rights_can_still_list_and_delete() {
+    let Some(db) = TestDb::empty("sched_lost_rights").await else {
+        return;
+    };
+    let rights = allow(&db).max_schedules(Some(2));
+    let rpc = Rpc::remote(tenant("acme", rights));
+    let agent = rpc.open(on_postgres(&db, "acme")).await;
+    let hourly = json!({"agent": agent, "id": "digest", "prompt": "p", "cron": "0 * * * *"});
+    rpc.call(method::SCHEDULE_CREATE, hourly).await.unwrap();
+
+    let rpc = Rpc::remote(tenant("acme", allow(&db)));
+    let agent = rpc.open(on_postgres(&db, "acme")).await;
+    let listed = rpc
+        .call(method::SCHEDULE_LIST, json!({"agent": agent}))
+        .await
+        .unwrap();
+    let listed: Schedules = serde_json::from_value(listed).unwrap();
+    assert_eq!(listed.schedules.len(), 1);
+    let id = json!({"agent": agent, "id": "digest"});
+    let deleted = rpc.call(method::SCHEDULE_DELETE, id).await.unwrap();
+    assert_eq!(deleted, json!({"deleted": true}));
+    let jobs = rpc.call(method::JOB_LIST, json!({"agent": agent}));
+    assert_eq!(jobs.await.unwrap(), json!({"jobs": []}));
+    db.drop().await;
+}
+
+/// Reads stay available to a tenant that lost its rights, so it can clean up
+/// after itself, and that holds on a worker schema older than this binary's
+/// (a migration not run yet): the tables are there, so the tenant is not
+/// told its schedules are gone while they still fire. The older schema is
+/// simulated by removing the newest row of the worker's migration table.
+#[tokio::test]
+async fn a_tenant_without_rights_is_not_told_its_schedules_are_gone_on_an_older_schema() {
+    let Some(db) = TestDb::empty("sched_older").await else {
+        return;
+    };
+    let rights = allow(&db).max_schedules(Some(2));
+    let rpc = Rpc::remote(tenant("acme", rights));
+    let agent = rpc.open(on_postgres(&db, "acme")).await;
+    let hourly = json!({"agent": agent, "id": "digest", "prompt": "p", "cron": "0 * * * *"});
+    rpc.call(method::SCHEDULE_CREATE, hourly).await.unwrap();
+    let admin = sqlx::PgPool::connect(&db.dsn).await.unwrap();
+    let older = "DELETE FROM linch_worker_migrations WHERE version = \
+                 (SELECT max(version) FROM linch_worker_migrations)";
+    sqlx::query(older).execute(&admin).await.unwrap();
+    let kept = "SELECT count(*) FROM linch_worker_schedules WHERE id = 'digest'";
+
+    let rpc = Rpc::remote(tenant("acme", allow(&db)));
+    let agent = rpc.open(on_postgres(&db, "acme")).await;
+    let listed = rpc.call(method::SCHEDULE_LIST, json!({"agent": agent}));
+    let listed = listed.await.unwrap();
+    let listed: Schedules = serde_json::from_value(listed).unwrap();
+    assert_eq!(listed.schedules.len(), 1);
+    let id = json!({"agent": agent, "id": "digest"});
+    let deleted = rpc.call(method::SCHEDULE_DELETE, id).await.unwrap();
+    assert_eq!(deleted, json!({"deleted": true}));
+    let left: i64 = sqlx::query_scalar(kept).fetch_one(&admin).await.unwrap();
+    admin.close().await;
+    db.drop().await;
+    assert_eq!(left, 0);
+}
+
+/// Where the tables are there but a read fails for a schema reason, a
+/// tenant without rights is told only that the store is unavailable: not
+/// the database's words, which name the operator's tables and columns.
+#[tokio::test]
+async fn a_read_that_fails_on_the_schema_shows_a_tenant_without_rights_no_database_text() {
+    let Some(db) = TestDb::empty("sched_broken").await else {
+        return;
+    };
+    let rights = allow(&db).max_schedules(Some(2));
+    let rpc = Rpc::remote(tenant("acme", rights));
+    let agent = rpc.open(on_postgres(&db, "acme")).await;
+    let hourly = json!({"agent": agent, "id": "digest", "prompt": "p", "cron": "0 * * * *"});
+    rpc.call(method::SCHEDULE_CREATE, hourly).await.unwrap();
+    let admin = sqlx::PgPool::connect(&db.dsn).await.unwrap();
+    let broken = "ALTER TABLE linch_worker_schedules RENAME COLUMN prompt TO prompt_moved";
+    sqlx::query(broken).execute(&admin).await.unwrap();
+    admin.close().await;
+
+    let rpc = Rpc::remote(tenant("acme", allow(&db)));
+    let agent = rpc.open(on_postgres(&db, "acme")).await;
+    let listed = rpc.call(method::SCHEDULE_LIST, json!({"agent": agent}));
+    let refused = listed.await.unwrap_err();
+    db.drop().await;
+    let text = refused.to_string();
+    assert_eq!(code_of(refused), code::STORE_UNAVAILABLE, "{text}");
+    assert!(
+        !text.contains("prompt") && !text.contains("linch_worker"),
+        "{text}"
+    );
+}

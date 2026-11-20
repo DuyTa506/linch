@@ -10,9 +10,6 @@ use crate::ApiKey;
 use crate::api_key::scrub;
 use crate::overflow::Overflow;
 
-/// Longest error-body summary kept in a [`ProviderError::Status`].
-const MAX_ERROR_CHARS: usize = 500;
-
 /// POST `body` to `url` and return the response once its status is 2xx.
 ///
 /// `key`, when given, is sent as a bearer token. A redirect is refused,
@@ -79,8 +76,9 @@ pub(crate) fn transport(key: Option<&ApiKey>, err: &reqwest::Error) -> ProviderE
 /// `code` and `type`, and its whole message, nested under `error` or flat
 /// (older vLLM, SGLang).
 ///
-/// The summary prefers the OpenAI-style `error.message`; it is redacted
-/// before it is cut, so a cut never leaves part of a key behind.
+/// The summary prefers the OpenAI-style `error.message`. It is redacted of
+/// the key here; the cut to 500 characters comes last, after every secret
+/// is out (`RequestOptions::scrub_error`).
 /// `Retry-After` is read as whole seconds; an HTTP date is ignored.
 pub(crate) fn status_error(
     status: u16,
@@ -105,7 +103,7 @@ pub(crate) fn status_error(
             })
         })
         .unwrap_or_else(|| body.trim().to_string());
-    let message: String = scrub(key, &summary).chars().take(MAX_ERROR_CHARS).collect();
+    let message = scrub(key, &summary);
     if refused {
         return ProviderError::ContextLength {
             status: Some(status),
@@ -278,12 +276,9 @@ mod tests {
     }
 
     #[test]
-    fn a_long_body_is_redacted_before_it_is_cut() {
-        let body = format!("{}{SECRET}", "x".repeat(MAX_ERROR_CHARS - 5));
+    fn a_long_body_is_redacted_whole() {
+        let body = format!("{}{SECRET}", "x".repeat(500 - 5));
         let err = status_error(500, None, &body, Some(&key()), &OPENAI_CHAT);
         assert_clean(&err);
-        assert!(
-            matches!(&err, ProviderError::Status { message, .. } if message.chars().count() == MAX_ERROR_CHARS)
-        );
     }
 }
