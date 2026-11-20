@@ -6,6 +6,8 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ## Unreleased
 
+- A relative path in a call of a workspace tool is judged where the tool resolves it, the workspace, so path rules and the `accept_edits` check name the file the call touches when `project_root` is above or below the workspace; the project root and the workspace being one directory is judged as before.
+
 ## 0.2.0 - 2026-11-19
 
 0.1.1 was uploaded to PyPI from commit `e102d938` and never tagged; this is the first tagged release. The Python client of this build refuses a server without `server.info` (`IncompatibleServer`), so ship the client and the `linch-server` binary together.

@@ -396,7 +396,12 @@ run until you [approve](#approvals) it.
 
 Without `permissions`, the mode is `default` and the project root is the
 workspace (or `/`). With `permissions`, `project_root` is required and must be
-absolute. The spellings are `accept_edits` and `skip_dangerous`, not Python
+absolute. A relative path in a call is judged where the file tools resolve it,
+in the workspace, so with a `project_root` above or below the workspace (or
+`/`) a write to `app/secrets/key` is the path `<workspace>/app/secrets/key`:
+the project root decides whether it is inside, and a relative rule matches the
+part below the project root. The spellings are `accept_edits` and
+`skip_dangerous`, not Python
 Linch's `acceptEdits` and `skip-dangerous`; another spelling is a
 `ProtocolError` at open.
 

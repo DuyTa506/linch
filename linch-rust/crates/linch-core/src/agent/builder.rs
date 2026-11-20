@@ -18,6 +18,7 @@ use crate::provider::{ContextSource, Provider, ProviderGate};
 use crate::redaction::Redactor;
 use crate::registration::Registration;
 use crate::registry::ToolRegistry;
+use crate::scheduler::PathBase;
 use crate::skills::{Skill, SkillSet, SkillTool};
 use crate::store::{RunStore, SessionStore};
 use crate::structured::{FINAL_TOOL_FEATURE, FinalTool, OutputContract};
@@ -37,6 +38,7 @@ pub struct AgentBuilder {
     provider: Option<Arc<dyn Provider>>,
     tools: Arc<ToolRegistry>,
     permissions: Option<PermissionEngine>,
+    path_base: Option<PathBase>,
     hooks: Arc<Hooks>,
     runs: Option<Arc<dyn RunStore>>,
     sessions: Option<Arc<dyn SessionStore>>,
@@ -62,6 +64,7 @@ impl AgentBuilder {
             provider: None,
             tools: Arc::new(ToolRegistry::new()),
             permissions: None,
+            path_base: None,
             hooks: Arc::new(Hooks::default()),
             runs: None,
             sessions: None,
@@ -95,6 +98,27 @@ impl AgentBuilder {
     /// The permission engine that decides every tool call.
     pub fn permissions(mut self, permissions: PermissionEngine) -> Self {
         self.permissions = Some(permissions);
+        self
+    }
+
+    /// Have permission judge a relative path in a call of `tools` where those
+    /// tools resolve it, instead of in the policy's project root.
+    ///
+    /// For file tools that join a path to a directory other than the project
+    /// root (a workspace): without this a rule is matched against a path the
+    /// tool never touches. Other tools keep the project root, and the
+    /// run contract does not change.
+    ///
+    /// Args:
+    ///     base: The directory, absolute or relative to the project root.
+    ///     tools: Names of the tools that resolve a relative path in it.
+    pub fn path_base(
+        mut self,
+        base: impl Into<String>,
+        tools: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        let tools = tools.into_iter().map(Into::into).collect();
+        self.path_base = Some(PathBase::new(base.into(), tools));
         self
     }
 
@@ -506,6 +530,7 @@ impl AgentBuilder {
         let inner = Arc::new(AgentInner {
             provider,
             permissions,
+            path_base: self.path_base,
             runs,
             sessions,
             spec: self.spec,

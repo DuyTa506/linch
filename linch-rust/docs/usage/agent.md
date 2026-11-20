@@ -533,7 +533,7 @@ spec = {"model": "claude-sonnet-4-6", "budget": {"max_tokens": 200_000, "max_cos
 | Field | Default | What it controls |
 |---|---|---|
 | `mode` | `default` | The decision when no rule matches: `default` (write and exec calls ask), `accept_edits` (writes inside the project root run; exec asks), `skip_dangerous` (every call runs) |
-| `project_root` | required when `permissions` is given | An absolute path (a relative one is refused at open, unlike `workspace`) that relative paths and path patterns resolve against |
+| `project_root` | required when `permissions` is given | An absolute path (a relative one is refused at open, unlike `workspace`) that path patterns resolve against; a relative path in a call resolves against the workspace, as the file tools do |
 | `layers` | `[]` | Named lists of rules, from least to most specific |
 | `auto_allow` | `[]` | Tool names allowed in every mode (rules still apply first) |
 | `path_fields` | built in | Which input field holds the path, per tool, added to the built-in table |

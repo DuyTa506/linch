@@ -2,7 +2,7 @@
 //! servers and agent, and the [`OpenedAgent`] that closes them.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -178,6 +178,10 @@ impl AgentConfig {
         policy
             .layers
             .extend(self.profile.and_then(|p| p.deny_layer()));
+        let path_base = match &root {
+            Some(workspace) => workspace_base(&policy.project_root, workspace).await,
+            None => None,
+        };
         let permissions = PermissionEngine::new(policy)?;
         let (runs, sessions, tasks, pool) = stores(self.stores, pools).await?;
         let ledger = match &self.task_ledger {
@@ -286,6 +290,9 @@ impl AgentConfig {
             // A compaction folds or clears what the model read: it reads a
             // file again before changing it (Python's `reset_read_tracker`).
             .on_compact(move |session| unread.forget(session));
+        if let Some(base) = path_base {
+            builder = builder.path_base(base, WORKSPACE_PATH_TOOLS);
+        }
         if let Some(gate) = gate {
             builder = builder.provider_gate(gate);
         }
@@ -493,6 +500,36 @@ fn schedule_tools_bound(stores: &StoreConfig, tools: &ToolRegistry) -> Result<()
 /// dropped runs: each is one small write, so a database that does not take
 /// it within this long leaves those runs to wait out their leases.
 pub const RELEASE_WAIT: Duration = Duration::from_secs(5);
+
+/// The workspace tools whose path fields name a file under the workspace.
+const WORKSPACE_PATH_TOOLS: [&str; 5] = ["Read", "Write", "Edit", "Grep", "Glob"];
+
+/// Where the workspace tools resolve a relative path, as a path from
+/// `project_root`, or `None` when that is the project root itself.
+///
+/// Permission joins a relative path to the project root. The workspace tools
+/// join it to `workspace` (canonical), so this is the way from the one to the
+/// other, spelled from the canonical project root: below it a plain relative
+/// path, above it `..` segments. A project root that is a symlink to the
+/// workspace, or the workspace itself spelled another way, gives `None`.
+async fn workspace_base(project_root: &str, workspace: &str) -> Option<String> {
+    let root = tokio::fs::canonicalize(project_root).await;
+    let root = root.unwrap_or_else(|_| PathBuf::from(project_root));
+    let way = relative_path(&root, Path::new(workspace));
+    (!way.is_empty()).then_some(way)
+}
+
+/// The path that leads from the directory `from` to `to`, both absolute and
+/// normalized: empty when they are the same.
+fn relative_path(from: &Path, to: &Path) -> String {
+    let (from, to): (Vec<_>, Vec<_>) = (from.components().collect(), to.components().collect());
+    let shared = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    let ups = std::iter::repeat_n("..".to_owned(), from.len() - shared);
+    let downs = to[shared..]
+        .iter()
+        .map(|part| part.as_os_str().to_string_lossy().into_owned());
+    ups.chain(downs).collect::<Vec<_>>().join("/")
+}
 
 /// The workspace tools that run commands, which the `bash` switch turns off
 /// together.
@@ -799,5 +836,20 @@ fn summary(config: ReasoningSummaryConfig) -> ReasoningSummary {
         ReasoningSummaryConfig::Auto => ReasoningSummary::Auto,
         ReasoningSummaryConfig::Concise => ReasoningSummary::Concise,
         ReasoningSummaryConfig::Detailed => ReasoningSummary::Detailed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_way_between_two_directories_is_spelled_from_the_first() {
+        let way = |from: &str, to: &str| relative_path(Path::new(from), Path::new(to));
+        assert_eq!(way("/srv/acme", "/srv/acme"), "");
+        assert_eq!(way("/srv/acme", "/srv/acme/app/src"), "app/src");
+        assert_eq!(way("/srv/acme/app", "/srv/acme"), "..");
+        assert_eq!(way("/srv/acme/app", "/srv/other/x"), "../../other/x");
+        assert_eq!(way("/", "/srv/acme"), "srv/acme");
     }
 }

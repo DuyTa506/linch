@@ -157,6 +157,7 @@ impl AgentInner {
             tools: Arc::clone(&self.tools),
             filter: Some(filter),
             permissions: self.permissions.clone(),
+            path_base: self.path_base.clone(),
             hooks: Arc::clone(&self.hooks),
             runs: Arc::clone(&self.runs),
             sessions: Arc::clone(&self.sessions),

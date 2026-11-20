@@ -527,7 +527,7 @@ spec = {"model": "claude-sonnet-4-6", "budget": {"max_tokens": 200_000, "max_cos
 | Trường | Mặc định | Điều khiển gì |
 |---|---|---|
 | `mode` | `default` | Quyết định khi không có rule nào khớp: `default` (lời gọi write và exec hỏi), `accept_edits` (lệnh ghi trong project root chạy; exec hỏi), `skip_dangerous` (mọi lời gọi đều chạy) |
-| `project_root` | bắt buộc khi có `permissions` | Một đường dẫn tuyệt đối (đường dẫn tương đối bị từ chối lúc mở, khác với `workspace`) mà các đường dẫn tương đối và path pattern được phân giải theo |
+| `project_root` | bắt buộc khi có `permissions` | Một đường dẫn tuyệt đối (đường dẫn tương đối bị từ chối lúc mở, khác với `workspace`) mà các path pattern được phân giải theo; một đường dẫn tương đối trong lời gọi được phân giải theo workspace, như các tool file |
 | `layers` | `[]` | Các danh sách rule có tên, từ ít cụ thể nhất đến cụ thể nhất |
 | `auto_allow` | `[]` | Tên các tool được cho phép ở mọi mode (các rule vẫn được áp dụng trước) |
 | `path_fields` | tích hợp sẵn | Trường input nào chứa đường dẫn, theo từng tool, được thêm vào bảng tích hợp sẵn |
