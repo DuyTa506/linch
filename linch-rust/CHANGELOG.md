@@ -7,6 +7,7 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 ## Unreleased
 
 - A relative path in a call of a workspace tool is judged where the tool resolves it, the workspace, so path rules and the `accept_edits` check name the file the call touches when `project_root` is above or below the workspace; the project root and the workspace being one directory is judged as before.
+- The catalog change notice escapes `<`, `>` and `&` in the tool and skill names and descriptions it lists, so a description cannot close the notice's wrapper.
 
 ## 0.2.0 - 2026-11-19
 

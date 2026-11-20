@@ -103,7 +103,9 @@ các tool và các skill được liệt kê tại thời điểm đó
 đều bắt đầu bằng đúng những byte này, nên prompt cache giữ chúng bất kể
 registry, skill hay subagent làm gì. Một thay đổi thì đi vào phần đuôi:
 một `CatalogChangeBlock` (văn bản `<system-reminder>` của Linch bản Python) trong
-message user kế tiếp mà run vẫn ghi log, nên nó không tốn thêm lần ghi nào.
+message user kế tiếp mà run vẫn ghi log, nên nó không tốn thêm lần ghi nào. Văn bản
+thông báo thoát `<`, `>` và `&` trong mọi tên và mô tả tool và skill mà nó liệt kê
+(các trường có cấu trúc giữ nguyên văn bản gốc), nên một mô tả không thể đóng wrapper.
 
 - Một tool bị gỡ giữ lại hàng của nó; một lời gọi tới nó bị từ chối với lý do chưa đăng ký.
 - Một tool được thêm sẽ được nối vào các tool của request, việc này làm mất cache
