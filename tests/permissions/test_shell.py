@@ -66,6 +66,7 @@ _UNPARSED = [
     "echo \"${x#'a'}\"",
     "echo \"${x#'\"'}\" ; b ; echo \\'",
     'echo "${x:-${y}}"',
+    "echo \"${x:+$[}]'\"'}\" ; b ; echo \\'",
     'echo "${x#\\"}"',
     "a &> log",
     "echo hi &>/tmp/f touch x",

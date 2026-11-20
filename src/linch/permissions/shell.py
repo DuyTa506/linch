@@ -142,8 +142,8 @@ def has_unparsed_construct(command: str) -> bool:
     clobber redirect ``>|``, command substitution (backtick, ``$(``), process
     substitution or subshell parentheses, ANSI-C quoting (``$'...'``, whose ``\\'``
     the quote tracking would misread), an unbalanced quote or trailing backslash, or a
-    ``${...}`` inside double quotes whose body holds a quote, a backslash or a nested
-    ``${``. ``&`` is a redirection only right after an unescaped, unquoted ``<`` or
+    ``${...}`` inside double quotes whose body holds a quote, a backslash, a nested
+    ``${`` or ``$[``. ``&`` is a redirection only right after an unescaped, unquoted ``<`` or
     ``>`` and names a descriptor (``2>&1``, ``>&2``, ``<&3``, ``>&-``): what
     ``>&file`` means differs between shells. A ``$`` expansion in command position
     (``$a -rf x``) or ``env -S`` is reported too: the command is not in the text.
@@ -224,14 +224,16 @@ def has_unparsed_construct(command: str) -> bool:
 
 
 def _quotes_in_expansion(command: str, start: int) -> bool:
-    """Return whether the body of a ``${`` up to its first ``}`` holds a quote, backslash or ``${``.
+    """Return whether the body of a ``${`` up to its first ``}`` is not plain text.
 
-    The shell reads those on their own (``"${x#'"'}"`` quotes a ``"`` inside the
-    pattern), which the quote tracking cannot follow, so the operators are not modelled.
+    A body holding a quote, a backslash, a nested ``${`` or an old-style arithmetic
+    ``$[`` (bash nests it, so a ``}`` inside it does not end the expansion) is read by
+    the shell on its own (``"${x#'"'}"`` quotes a ``"`` inside the pattern), which the
+    quote tracking cannot follow, so the operators are not modelled.
     """
     end = command.find("}", start)
     body = command[start:] if end < 0 else command[start:end]
-    return any(c in "'\"\\" for c in body) or "${" in body
+    return any(c in "'\"\\" for c in body) or "${" in body or "$[" in body
 
 
 def _word_end(text: str) -> int:

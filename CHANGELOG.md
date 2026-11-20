@@ -30,6 +30,9 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
   word is matched unquoted (`\rm`, `r""m`) while arguments stay as written, so a deny rule
   `* --force` does not match a commit message that contains `--force`. Allow rules still match
   the segment as written. Regex patterns follow the same rule.
+- A `$[` inside the `${...}` of a double-quoted parameter expansion makes the command unparsed
+  for Bash rules, as a quote or a nested `${` already did, since bash nests the arithmetic and a
+  `}` inside it does not end the expansion.
 - The compaction summary no longer loses early content. The summary request ended with the
   folded history's last user message, which the model answered ("Acknowledged. Received log
   excerpt 2...") instead of summarizing. It now ends with one user message carrying a guard

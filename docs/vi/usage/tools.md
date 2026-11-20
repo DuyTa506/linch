@@ -696,7 +696,7 @@ Cách Bash rule đọc một lệnh:
 - Một lệnh mà bộ tách không mô hình hóa được có thể bị rule từ chối hoặc hỏi,
   nhưng không bao giờ được rule cho phép. Gồm `$(...)` và backtick, `&` chạy nền
   hoặc `&>`, `|&`, `>&file`, chú thích `#`, here-document (`<<`, `<<-`), `>|`,
-  xuống dòng, `${...}` trong dấu nháy kép có chứa dấu nháy hoặc `\`, `env -S`,
+  xuống dòng, `${...}` trong dấu nháy kép có chứa dấu nháy, `\`, `${` lồng nhau hoặc `$[`, `env -S`,
   và vị trí lệnh là một khai triển `$`, khai triển ngoặc (`{rm,-rf}`),
   `function`, `coproc`, phép gán phần tử mảng (`a[0]=1`) hoặc chuyển hướng
   `{fd}>file`. Here-string (`<<<`) và nhân đôi descriptor (`2>&1`, `>&2`, `<&3`,

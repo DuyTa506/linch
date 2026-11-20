@@ -455,3 +455,35 @@ def test_evaluating_shell_text_never_raises() -> None:
     for _ in range(3000):
         command = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 40)))
         assert _bash(rules, command) in {"allow", "deny", "ask"}
+
+
+# Source: `OLD_ARITHMETIC` in the Rust kernel's permission tests.
+_OLD_ARITHMETIC = [
+    "echo \"${x:+$[}'\"']}\" ; touch M ; echo \\'",
+    "echo \"${x:+$[}]'\"'}\" ; touch M ; echo \\'",
+    "echo \"${x#$[}]'\"'}\" ; touch M ; echo \\'",
+    "echo \"${x:-$((}'\"']}\" ; touch M ; echo \\'",
+    "echo \"${x:-`}'\"']}\" ; touch M ; echo \\'",
+]
+
+
+@pytest.mark.parametrize("command", _OLD_ARITHMETIC)
+def test_an_allow_rule_does_not_cover_a_command_behind_a_brace_in_old_arithmetic(
+    command: str,
+) -> None:
+    assert _allow_echo(command) == "ask"
+
+
+@pytest.mark.parametrize("command", _OLD_ARITHMETIC)
+def test_a_deny_rule_covers_a_command_behind_a_brace_in_old_arithmetic(command: str) -> None:
+    rules: list[PermissionRule] = [BashRule("touch *", "deny")]
+    assert _bash(rules, command, "skip-dangerous") != "allow"
+
+
+def test_old_arithmetic_outside_a_parameter_expansion_is_modelled() -> None:
+    assert _allow_echo('echo "${x:-a} $[1+1]"') == "allow"
+
+
+def test_a_blank_after_an_ampersand_redirect_is_unparsed_and_never_allowed() -> None:
+    assert _allow_echo("echo hi >& 2") == "ask"
+    assert _bash([BashRule("*", "allow")], "echo hi >& 2") == "ask"
