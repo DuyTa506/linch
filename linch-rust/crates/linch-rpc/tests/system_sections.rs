@@ -188,7 +188,7 @@ async fn blocks_sent(system: Option<Value>) -> u64 {
     let ended = rpc.until_end(&run_id).await;
     (ended.envelopes.iter())
         .find_map(|envelope| match &envelope.event {
-            linch::Event::ContextBuild(build) => Some(build.system_blocks as u64),
+            linch::Event::ContextBuild(build) => Some(build.system_blocks),
             _ => None,
         })
         .expect("a context_build event")
