@@ -374,3 +374,28 @@ async fn byte_offset_needs_one_line_and_a_valid_position() {
     let no_limit = call(&t.read, json!({"path": "/w", "byte_offset": 3})).await;
     assert_eq!(code(no_limit), "invalid_input");
 }
+
+/// The names, descriptions and input schemas of the four tools are part of
+/// the run contract of an agent with `filesystem`: a stored run resumes only
+/// while they are byte for byte what it was opened with. Change one on
+/// purpose and this digest moves; then say so in the changelog.
+#[test]
+fn the_tool_schemas_of_an_agent_with_filesystem_keep_their_digest() {
+    let files: Arc<dyn SessionFiles> = Arc::new(MemorySessions::new());
+    let listed: Vec<Value> = vfs_tools(files)
+        .iter()
+        .map(|tool| {
+            json!({
+                "name": tool.name(),
+                "description": tool.description(),
+                "input_schema": tool.input_schema(),
+            })
+        })
+        .collect();
+    let digest = linch_core::digest(&Value::Array(listed)).unwrap();
+    assert_eq!(
+        digest.to_string(),
+        "c73dbe3692030c186d19d480e2cfb9ed7a75f76b8a67b82232598bf9fe4c6954",
+        "the tool schemas changed: a stored run of an agent with filesystem would not resume"
+    );
+}

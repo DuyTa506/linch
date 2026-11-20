@@ -523,7 +523,17 @@ provider refuses as longer than the model's context window (`context_length`)
 is never retried: with `spec.compaction` the run shortens it and calls again
 ([Memory](./memory.md#when-the-prompt-does-not-fit)). A cancelled call ends the run
 `aborted`. Each adapter has a 30 s connect timeout and a read timeout between
-reads (300 s or 600 s); there is no deadline on a whole call.
+reads (300 s or 600 s); there is no deadline on a whole call. Two other
+limits apply to a streamed response: one event may hold at most 16 MiB (from
+the end of the last event, a line with no end included), and a body that is
+not valid UTF-8 fails at the first bad byte; both end the call with a
+`stream` error, which is not retried (the next call would meet the same
+body, and a run that does not retry does not fail over either), after every
+event that the body completed
+before the fault has been delivered (so the result does not depend on where
+the network cut the chunks). Error text a provider sends inside a
+stream is cut to 500 characters, like an HTTP error body, after the provider
+key, header values and the cache salt are removed from it.
 
 Two [`spec`](./agent.md#spec) fields shape this:
 

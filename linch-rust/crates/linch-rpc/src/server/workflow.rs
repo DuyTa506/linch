@@ -33,11 +33,12 @@ use crate::access::{Tenant, WorkflowCaps};
 use crate::error::{ErrorObject, chain, code, invalid_params};
 use crate::message::Notification;
 use crate::protocol::{
-    MAX_WORKFLOW_ID_BYTES, WorkflowAgentParams, WorkflowAgentResult, WorkflowBudget,
+    MAX_CALL_KEYS, MAX_WORKFLOW_ID_BYTES, WorkflowAgentParams, WorkflowAgentResult, WorkflowBudget,
     WorkflowCancelParams, WorkflowCancelled, WorkflowEventParams, WorkflowFinishParams,
     WorkflowFinished, WorkflowInterruptParams, WorkflowInterrupted, WorkflowLimits,
     WorkflowStartParams, WorkflowStarted, WorkflowStatus, WorkflowStatusParams,
-    WorkflowStepBeginParams, WorkflowStepBegun, WorkflowStepCompleteParams, method,
+    WorkflowStepAbandonParams, WorkflowStepAbandoned, WorkflowStepBeginParams, WorkflowStepBegun,
+    WorkflowStepCompleteParams, method,
 };
 
 /// The journal an agent's workflows use: its Postgres database (migrated
@@ -57,6 +58,8 @@ pub(super) struct Driven {
     next_call: AtomicU64,
     /// Steps begun and not completed.
     tickets: Mutex<HashMap<String, StepTicket>>,
+    /// Most of them a tenant's workflow holds; `None` on a local connection.
+    max_pending: Option<usize>,
     next_ticket: AtomicU64,
     /// Held by each call in flight, so a finish waits for them.
     inflight: TaskTracker,
@@ -168,6 +171,8 @@ impl Server {
         }));
         if let Some(caps) = &caps {
             options.max_records = Some(caps.max_records);
+            let records = usize::try_from(caps.max_records).unwrap_or(usize::MAX);
+            options.max_call_keys = Some(MAX_CALL_KEYS.max(records));
             options.max_record_bytes = Some(caps.max_record_bytes);
         }
         options.live_gate = Some(live_gate(self.0.tenant.clone(), caps));
@@ -191,6 +196,7 @@ impl Server {
             calls: Mutex::default(),
             next_call: AtomicU64::new(0),
             tickets: Mutex::default(),
+            max_pending: options.max_call_keys,
             next_ticket: AtomicU64::new(0),
             inflight: TaskTracker::new(),
             _place: place,
@@ -204,6 +210,8 @@ impl Server {
         params: WorkflowAgentParams,
     ) -> Result<serde_json::Value, ErrorObject> {
         let driven = self.driven(&params.run_id)?;
+        self.bounded("name", params.name.as_deref())?;
+        self.bounded("branch", params.branch.as_deref())?;
         let (token, _in_flight) = self.begin_call(&driven, params.call_id)?;
         let subagent = params.subagent.as_deref();
         let agent = match subagent {
@@ -254,6 +262,8 @@ impl Server {
         params: WorkflowStepBeginParams,
     ) -> Result<serde_json::Value, ErrorObject> {
         let driven = self.driven(&params.run_id)?;
+        self.bounded("name", Some(&params.name))?;
+        self.bounded("branch", params.branch.as_deref())?;
         let context = driven.context();
         let path = params.branch.unwrap_or_default();
         let name = params.name;
@@ -269,9 +279,17 @@ impl Server {
                 ticket: None,
             },
             StepSlot::Run(ticket) => {
+                let mut tickets = lock(&driven.tickets);
+                if let Some(max) = driven.max_pending.filter(|max| tickets.len() >= *max) {
+                    return Err(self.workflow_error(&WorkflowError::LimitExceeded {
+                        what: "pending steps",
+                        max: max as u64,
+                    }));
+                }
                 let id = driven.next_ticket.fetch_add(1, Ordering::Relaxed) + 1;
                 let id = format!("step-{id}");
-                lock(&driven.tickets).insert(id.clone(), ticket);
+                tickets.insert(id.clone(), ticket);
+                drop(tickets);
                 WorkflowStepBegun {
                     replayed: false,
                     value: None,
@@ -299,11 +317,25 @@ impl Server {
         Ok(json!({}))
     }
 
+    /// Give back a ticket whose function failed in the client: the step is
+    /// not pending any more and journals nothing. A ticket already
+    /// completed, abandoned or never given answers `abandoned: false`.
+    pub(super) fn workflow_step_abandon(
+        &self,
+        params: WorkflowStepAbandonParams,
+    ) -> Result<serde_json::Value, ErrorObject> {
+        let driven = self.driven(&params.run_id)?;
+        let abandoned = lock(&driven.tickets).remove(&params.ticket).is_some();
+        to_value(&WorkflowStepAbandoned { abandoned })
+    }
+
     pub(super) async fn workflow_interrupt(
         &self,
         params: WorkflowInterruptParams,
     ) -> Result<serde_json::Value, ErrorObject> {
         let driven = self.driven(&params.run_id)?;
+        self.bounded("key", Some(&params.key))?;
+        self.bounded("branch", params.branch.as_deref())?;
         let context = driven.context();
         let path = params.branch.unwrap_or_default();
         let asked = context.interrupt::<JsonValue>(&params.key, params.payload);
@@ -405,6 +437,20 @@ impl Server {
             driven.quiesce().await;
             driven.release().await;
         }
+    }
+
+    /// A name, interrupt key or branch the server keeps (in a ticket, a
+    /// counter or the stored status) for the workflow's life: on a tenant
+    /// connection, where the memory is another party's, at most
+    /// [`MAX_WORKFLOW_ID_BYTES`]. A local connection is not held to it, and
+    /// a `key` that is only hashed (a step's, an agent call's) never is.
+    fn bounded(&self, what: &str, text: Option<&str>) -> Result<(), ErrorObject> {
+        let long = text.is_some_and(|text| text.len() > MAX_WORKFLOW_ID_BYTES);
+        if long && self.0.tenant.is_some() {
+            let message = format!("{what} must be at most {MAX_WORKFLOW_ID_BYTES} bytes");
+            return Err(invalid_params(&message));
+        }
+        Ok(())
     }
 
     fn driven(&self, run_id: &str) -> Result<Arc<Driven>, ErrorObject> {

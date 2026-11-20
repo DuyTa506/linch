@@ -12,6 +12,9 @@
 //! Every backend passes [`conformance::backend_suite`].
 
 pub mod conformance;
+mod offload;
+
+pub use offload::{OFFLOADED_TO, offload_path, without_offload_path};
 
 use async_trait::async_trait;
 use thiserror::Error;

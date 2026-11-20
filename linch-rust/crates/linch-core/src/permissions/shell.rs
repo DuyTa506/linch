@@ -3,7 +3,7 @@
 //!
 //! The model is small on purpose: words, single and double quotes,
 //! backslash escapes, the list operators `;` `&&` `||` `|`, and redirections
-//! (`>`, `2>&1`, `&>`). Anything that can run a command the splitter would
+//! (`>`, `2>&1`). Anything that can run a command the splitter would
 //! not see as its own segment is reported by [`has_unparsed_construct`], and
 //! the engine applies its floor to it instead of trusting the segments.
 //! Words are separated by space and tab only, as in bash.
@@ -33,7 +33,18 @@ pub fn tokenize(input: &str) -> Vec<String> {
             Some('\'') if c == '\'' => quote = None,
             Some('\'') => current.push(c),
             Some(_) if c == '"' => quote = None,
-            Some(_) if c == '\\' => current.push(chars.next().unwrap_or('\\')),
+            Some(_) if c == '\\' => match chars.clone().next() {
+                // Inside double quotes only these bytes lose their
+                // backslash; before any other byte the shell keeps it.
+                Some(n @ ('$' | '`' | '"' | '\\')) => {
+                    current.push(n);
+                    chars.next();
+                }
+                Some('\n') => {
+                    chars.next();
+                }
+                _ => current.push(c),
+            },
             Some(_) => current.push(c),
             None if is_blank(c) => {
                 if in_token {
@@ -98,14 +109,27 @@ pub fn split_composite(input: &str) -> Vec<&str> {
 }
 
 /// Whether `command` uses shell syntax that [`split_composite`] cannot
-/// model: a background `&`, an unquoted newline or carriage return, a line
-/// continuation, command substitution (`` ` ``, `$(`), process substitution
-/// or subshell parentheses, ANSI-C quoting (`$'...'`, whose `\'` the quote
-/// tracking would misread), or an unbalanced quote or trailing backslash.
+/// model: a background `&` (`&>` included: `sh` reads it as `&` then `>`), an
+/// unquoted newline or carriage return, a line continuation, a comment
+/// (an unquoted `#` at the start of a word), a here-document (`<<`, `<<-`),
+/// the clobber redirect `>|`, command substitution (`` ` ``, `$(`), process
+/// substitution or subshell parentheses, ANSI-C quoting (`$'...'`, whose `\'`
+/// the quote tracking would misread), or an unbalanced quote or trailing
+/// backslash, or a `${...}` inside double quotes whose body holds a quote, a
+/// backslash or a nested `${`. `&` is a redirection only right after an unescaped, unquoted
+/// `<` or `>` and names a descriptor (`2>&1`, `>&2`, `<&3`, `>&-`): what
+/// `>&file` means differs between shells. The shell differs per backend (dash,
+/// bash, busybox), so what one of them reads differently is reported. A `$`
+/// expansion in command position (`$a -rf x`) or `env -S` is reported too:
+/// the command is not in the text.
 pub fn has_unparsed_construct(command: &str) -> bool {
     let b = command.as_bytes();
     let mut quote: Option<u8> = None;
     let mut escaped = false;
+    // Index just past the last unescaped, unquoted `<` or `>`.
+    let mut redirect_end = 0;
+    // Index just past the last unescaped, unquoted blank or operator.
+    let mut break_end = 0;
     let mut i = 0;
     while i < b.len() {
         let c = b[i];
@@ -124,31 +148,470 @@ pub fn has_unparsed_construct(command: &str) -> bool {
         } else if quote == Some(b'"') {
             if c == b'"' {
                 quote = None;
-            } else if c == b'`' || (c == b'$' && next == Some(b'(')) {
+            } else if c == b'`'
+                || (c == b'$' && next == Some(b'('))
+                || (c == b'$' && next == Some(b'{') && quotes_in_expansion(&b[i + 2..]))
+            {
                 return true;
             }
         } else {
+            if matches!(c, b' ' | b'\t' | b';' | b'&' | b'|' | b'<' | b'>') {
+                break_end = i + 1;
+            }
             match c {
                 b'\'' | b'"' => quote = Some(c),
                 b'\r' | b'\n' | b'`' | b'(' | b')' => return true,
                 b'$' if matches!(next, Some(b'(' | b'\'')) => return true,
-                b'&' => {
-                    let prev = i.checked_sub(1).map(|p| b[p]);
-                    if next == Some(b'>') || matches!(prev, Some(b'<' | b'>')) {
-                        // `&>file`, `2>&1`, `<&3`: a redirection.
-                    } else if next == Some(b'&') {
-                        i += 2;
-                        continue;
-                    } else {
-                        return true;
-                    }
+                b'$' if next == Some(b'{') && blank_or_bar(&b[i + 2..]) => return true,
+                b'#' if i == 0 || break_end == i => return true,
+                b'<' if b[i..].starts_with(b"<<<") => {
+                    // A here-string: its word is an ordinary word.
+                    i += 3;
+                    redirect_end = i;
+                    break_end = i;
+                    continue;
                 }
+                b'<' if next == Some(b'<') => return true,
+                b'>' if next == Some(b'|') => return true,
+                b'<' | b'>' => redirect_end = i + 1,
+                // `2>&1`, `>&2`, `<&3`: a redirection.
+                b'&' if redirect_end == i && matches!(next, Some(b'0'..=b'9' | b'-')) => {}
+                b'&' if next == Some(b'&') => {
+                    i += 2;
+                    break_end = i;
+                    continue;
+                }
+                b'&' => return true,
                 _ => {}
             }
         }
         i += 1;
     }
-    escaped || quote.is_some()
+    escaped
+        || quote.is_some()
+        || split_composite(command)
+            .into_iter()
+            .any(command_is_not_in_the_text)
+}
+
+/// Whether `after`, the text after a `${`, starts with a blank or `|`: bash
+/// 5.3 reads `${ cmd; }` and `${| cmd; }` as command substitutions.
+fn blank_or_bar(after: &[u8]) -> bool {
+    matches!(after.first(), Some(b' ' | b'\t' | b'|'))
+}
+
+/// Whether the body of a `${` inside double quotes, up to its first `}`,
+/// holds a quote, a backslash, a nested `${` or an old-style arithmetic `$[`
+/// (bash nests it, so a `}` inside it does not end the expansion). The shell
+/// reads those on its own (`"${x#'"'}"` quotes a `"` inside the pattern),
+/// which the quote tracking cannot follow, so the operators are not modelled.
+fn quotes_in_expansion(after: &[u8]) -> bool {
+    if blank_or_bar(after) {
+        return true;
+    }
+    let end = after.iter().position(|&c| c == b'}').unwrap_or(after.len());
+    let body = &after[..end];
+    body.iter().any(|c| matches!(c, b'\'' | b'"' | b'\\'))
+        || body.windows(2).any(|w| w == b"${" || w == b"$[")
+}
+
+/// End of the first word of `text`: the first blank outside quotes and
+/// escapes, or its length.
+fn word_end(text: &str) -> usize {
+    let b = text.as_bytes();
+    let mut quote: Option<u8> = None;
+    let mut i = 0;
+    while i < b.len() {
+        match (quote, b[i]) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(b'\''), _) => {}
+            (_, b'\\') => i += 1,
+            (Some(_), _) => {}
+            (None, c @ (b'\'' | b'"')) => quote = Some(c),
+            (None, b' ' | b'\t') => return i,
+            _ => {}
+        }
+        i += 1;
+    }
+    b.len()
+}
+
+/// `word` with its quotes and backslashes removed.
+fn unquote(word: &str) -> String {
+    tokenize(word).concat()
+}
+
+/// Whether `word` is `NAME=value` or `NAME+=value`.
+fn is_assignment(word: &str) -> bool {
+    let name = word.split('=').next().unwrap_or("");
+    let name = name.strip_suffix('+').unwrap_or(name);
+    word.contains('=')
+        && name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Whether `word` is an assignment to an array element (`a[0]=1`).
+fn is_array_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') && name.contains('[')
+    })
+}
+
+/// Whether `word` is a redirection with a descriptor variable (`{fd}>log`).
+fn is_fd_redirection(word: &str) -> bool {
+    word.strip_prefix('{')
+        .and_then(|rest| rest.split_once('}'))
+        .is_some_and(|(name, after)| {
+            !name.is_empty()
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && after.starts_with(['<', '>'])
+        })
+}
+
+/// Words that precede a command without being it.
+const RESERVED: &[&str] = &[
+    "if", "then", "else", "elif", "do", "while", "until", "!", "{",
+];
+/// Commands that run their arguments as a command, and may take options.
+const WRAPPERS: &[&str] = &["time", "exec", "command", "builtin", "env"];
+
+/// What a segment's command is once the words in front of it are removed.
+struct Command<'a> {
+    /// The segment from the command word on.
+    text: &'a str,
+    /// Whether the shell reads the command from text the segment does not
+    /// hold as words (`env -S 'rm x'`).
+    opaque: bool,
+}
+
+/// How a wrapper option takes part in finding the command.
+#[derive(Clone, Copy, PartialEq)]
+enum WrapperOption {
+    Plain,
+    /// Takes the next word as its argument (`env -u NAME`).
+    Takes,
+    /// Splits a string into the command (`env -S`).
+    Split,
+    /// Only looks the command up (`command -v`).
+    Query,
+}
+
+/// Long options of `env` and `time` (GNU accepts any unique prefix).
+const ENV_LONG: &[(&str, WrapperOption)] = &[
+    ("ignore-environment", WrapperOption::Plain),
+    ("null", WrapperOption::Plain),
+    ("unset", WrapperOption::Takes),
+    ("chdir", WrapperOption::Takes),
+    ("argv0", WrapperOption::Takes),
+    ("split-string", WrapperOption::Split),
+    ("debug", WrapperOption::Plain),
+    ("block-signal", WrapperOption::Plain),
+    ("default-signal", WrapperOption::Plain),
+    ("ignore-signal", WrapperOption::Plain),
+    ("list-signal-handling", WrapperOption::Plain),
+];
+const TIME_LONG: &[(&str, WrapperOption)] = &[
+    ("format", WrapperOption::Takes),
+    ("output", WrapperOption::Takes),
+    ("append", WrapperOption::Plain),
+    ("portability", WrapperOption::Plain),
+    ("verbose", WrapperOption::Plain),
+    ("quiet", WrapperOption::Plain),
+];
+
+/// What `option` (an unquoted word starting with `-`) does for `wrapper`: a
+/// cluster of short options (`-iu`) where a letter that takes an argument
+/// takes the rest of the word or else the next word, or a long option (or
+/// its unique prefix) with an optional `=value`.
+fn wrapper_option(wrapper: &str, option: &str) -> WrapperOption {
+    let Some(long) = option.strip_prefix("--") else {
+        let letters = option.trim_start_matches('-');
+        if wrapper == "command" {
+            return if letters.contains(['v', 'V']) {
+                WrapperOption::Query
+            } else {
+                WrapperOption::Plain
+            };
+        }
+        let (takes, split) = match wrapper {
+            "env" => ("uCa", "S"),
+            "time" => ("fo", ""),
+            "exec" => ("a", ""),
+            _ => ("", ""),
+        };
+        for (i, letter) in letters.char_indices() {
+            if split.contains(letter) {
+                return WrapperOption::Split;
+            }
+            if takes.contains(letter) {
+                let attached = !letters[i + letter.len_utf8()..].is_empty();
+                return if attached {
+                    WrapperOption::Plain
+                } else {
+                    WrapperOption::Takes
+                };
+            }
+        }
+        return WrapperOption::Plain;
+    };
+    let (name, attached) = long
+        .split_once('=')
+        .map_or((long, false), |(n, _)| (n, true));
+    let table = match wrapper {
+        "env" => ENV_LONG,
+        "time" => TIME_LONG,
+        _ => &[],
+    };
+    let mut named = table.iter().filter(|(long, _)| long.starts_with(name));
+    let kind = match (
+        name,
+        table.iter().find(|(long, _)| *long == name),
+        named.next(),
+    ) {
+        ("", _, _) => WrapperOption::Plain,
+        (_, Some((_, kind)), _) => *kind,
+        (_, None, Some((_, kind))) if named.next().is_none() => *kind,
+        _ => WrapperOption::Plain,
+    };
+    if attached && kind == WrapperOption::Takes {
+        WrapperOption::Plain
+    } else {
+        kind
+    }
+}
+
+fn strip_prefix(segment: &str) -> Command<'_> {
+    let mut rest = trim_blanks(segment);
+    // The wrapper whose options are being read, and the text from it on.
+    let mut wrapper: Option<(String, &str)> = None;
+    // Whether the next word that is not a redirection is an option argument.
+    let mut argument = false;
+    loop {
+        let end = word_end(rest);
+        let word = &rest[..end];
+        let redirection = redirection_len(word);
+        if argument && redirection == 0 {
+            argument = false;
+            rest = trim_blanks(&rest[end..]);
+            continue;
+        }
+        if is_array_assignment(word) || is_fd_redirection(word) {
+            return Command {
+                text: rest,
+                opaque: true,
+            };
+        }
+        let plain_assignment = is_assignment(word);
+        let name = if plain_assignment {
+            String::new()
+        } else {
+            unquote(word)
+        };
+        // `env "X=1" cmd`: the wrapper reads the word unquoted.
+        let assignment = plain_assignment
+            || wrapper.as_ref().is_some_and(|(wrapper, _)| {
+                if wrapper == "env" {
+                    // `env` takes any word with a `=` as an assignment.
+                    name.contains('=') && !name.starts_with('-')
+                } else {
+                    is_assignment(&name)
+                }
+            });
+        let mut skip = 1;
+        if assignment {
+        } else if RESERVED.contains(&name.as_str()) {
+            wrapper = None;
+        } else if WRAPPERS.contains(&name.as_str()) {
+            wrapper = Some((name, rest));
+        } else if let Some((wrapper, at)) = &wrapper
+            && name.starts_with('-')
+        {
+            match wrapper_option(wrapper, &name) {
+                WrapperOption::Plain => {}
+                WrapperOption::Takes => argument = true,
+                WrapperOption::Split => {
+                    return Command {
+                        text: rest,
+                        opaque: true,
+                    };
+                }
+                WrapperOption::Query => {
+                    return Command {
+                        text: at,
+                        opaque: false,
+                    };
+                }
+            }
+        } else if redirection > 0 {
+            skip = redirection;
+        } else {
+            return Command {
+                text: rest,
+                opaque: matches!(name.as_str(), "function" | "coproc"),
+            };
+        }
+        for _ in 0..skip {
+            let end = word_end(rest);
+            rest = trim_blanks(&rest[end..]);
+        }
+    }
+}
+
+/// `segment` without the words in front of its command, which may be quoted
+/// or escaped (`\env`): `NAME=value` assignments, redirections (`>f`,
+/// `2>&1`, `< in`), reserved words (`if`, `then`, `else`, `elif`, `do`,
+/// `while`, `until`, `!`, `{`) and the wrappers `time`, `exec`, `command`,
+/// `builtin` and `env` with their options (`env -u NAME`, `time -o FILE`,
+/// `exec -a NAME` take an argument; `command -v` only looks a name up and is
+/// kept whole). Deny and ask rules are matched against this form as well, so
+/// a prefix cannot hide the command. Allow rules never use it: `X=1 echo` is
+/// not `echo`. Name-based and best effort: `/bin/rm`, `sudo rm` and
+/// `sh -c 'rm x'` are other commands.
+pub fn strip_command_prefix(segment: &str) -> &str {
+    strip_prefix(segment).text
+}
+
+/// Whether the command of `segment` is not in its text: the shell reads it
+/// from a string (`env -S`), or the segment starts with a bash construct that
+/// is not modelled (`function`, `coproc`, `a[0]=1`, `{fd}>log`), or its word
+/// (after [`strip_command_prefix`]) holds a `$` expansion outside single
+/// quotes or a brace expansion (`{rm,-rf}`).
+fn command_is_not_in_the_text(segment: &str) -> bool {
+    let command = strip_prefix(segment);
+    if command.opaque {
+        return true;
+    }
+    let rest = command.text;
+    let b = &rest.as_bytes()[..word_end(rest)];
+    let mut quote: Option<u8> = None;
+    let mut escaped = false;
+    let (mut open, mut last) = (false, 0);
+    for &c in b {
+        if escaped {
+            escaped = false;
+        } else if c == b'\\' && quote != Some(b'\'') {
+            escaped = true;
+        } else if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            } else if c == b'$' && q == b'"' {
+                return true;
+            }
+        } else if c == b'\'' || c == b'"' {
+            quote = Some(c);
+        } else if c == b'$' || (open && (c == b',' || (c == b'.' && last == b'.'))) {
+            return true;
+        } else if c == b'{' {
+            open = true;
+        }
+        last = c;
+    }
+    false
+}
+
+/// Whether `segment` opens a file for writing with a redirection (`>`, `>>`,
+/// `>|`, `<>`, with or without a descriptor number). `>&` followed by exactly
+/// digits or `-` (`2>&1`, `>&2`, `>&-`) duplicates a descriptor, and
+/// `/dev/null`, `/dev/stdout` and `/dev/stderr` are not files; any other word
+/// after `>&` is one.
+pub fn redirects_to_file(segment: &str) -> bool {
+    let b = segment.as_bytes();
+    let mut quote: Option<u8> = None;
+    let mut escaped = false;
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if escaped {
+            escaped = false;
+        } else if c == b'\\' && quote != Some(b'\'') {
+            escaped = true;
+        } else if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            }
+        } else if c == b'\'' || c == b'"' {
+            quote = Some(c);
+        } else if c == b'>' || (c == b'<' && b.get(i + 1) == Some(&b'>')) {
+            let mut end = i + 1;
+            if c == b'<' || matches!(b.get(end), Some(b'>' | b'|')) {
+                end += 1;
+            }
+            if c == b'>' && b.get(end) == Some(&b'&') {
+                // `>&2` and `>&-` duplicate a descriptor; `>&2file` and
+                // `>& 2` name a file.
+                let word = &segment[end + 1..];
+                let word = &word[..word_end(word)];
+                if word == "-" || (!word.is_empty() && word.bytes().all(|d| d.is_ascii_digit())) {
+                    i = end + 1 + word.len();
+                    continue;
+                }
+                end += 1;
+            }
+            let rest = trim_blanks(&segment[end..]);
+            let target = unquote(&rest[..word_end(rest)]);
+            if !matches!(target.as_str(), "/dev/null" | "/dev/stdout" | "/dev/stderr") {
+                return true;
+            }
+            i = end;
+            continue;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// How many words the redirection that `word` starts takes: 0 when it is not
+/// one, 2 for a bare operator (`>`, `2>&`) whose target is the next word.
+fn redirection_len(word: &str) -> usize {
+    let operator = word.trim_start_matches(|c: char| c.is_ascii_digit());
+    if !operator.starts_with(['<', '>']) {
+        0
+    } else if operator.trim_start_matches(['<', '>', '&', '|']).is_empty() {
+        2
+    } else {
+        1
+    }
+}
+
+/// The words of `command` as the shell passes them, for matching deny and ask
+/// rules: quotes and backslashes removed, blanks collapsed to one space,
+/// redirections (and the target of a bare operator) dropped wherever they
+/// appear. A word that is empty or holds a blank, a quote or a backslash is
+/// written back in single quotes, so `git 'push' "a b"` becomes `git push 'a b'`
+/// and a quoted argument stays one word.
+pub fn unquote_words(command: &str) -> String {
+    let mut out = String::with_capacity(command.len());
+    let mut rest = trim_blanks(command);
+    let mut target = false;
+    while !rest.is_empty() {
+        let end = word_end(rest);
+        let raw = &rest[..end];
+        rest = trim_blanks(&rest[end..]);
+        if target {
+            target = false;
+            continue;
+        }
+        match redirection_len(raw) {
+            0 => {}
+            1 => continue,
+            _ => {
+                target = true;
+                continue;
+            }
+        }
+        let word = unquote(raw);
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        if word.is_empty() || word.contains([' ', '\t', '\'', '"', '\\']) {
+            out.push('\'');
+            out.push_str(&word.replace('\'', "'\\''"));
+            out.push('\'');
+        } else {
+            out.push_str(&word);
+        }
+    }
+    out
 }
 
 /// Whether bash rule `pattern` matches one command segment: as a glob over
@@ -178,6 +641,12 @@ mod tests {
         assert_eq!(tokenize(r#"echo "x \" y" a\ b"#), ["echo", "x \" y", "a b"]);
         assert_eq!(tokenize(r"echo 'a\' b"), ["echo", r"a\", "b"]);
         assert_eq!(tokenize("''"), [""]);
+        // Inside double quotes a backslash escapes only `$`, backtick, `"`,
+        // `\` and newline; before any other byte the shell keeps it.
+        assert_eq!(
+            tokenize(r#"echo "a\nb" "c\$d" "e\\f" "g\`h""#),
+            ["echo", r"a\nb", "c$d", r"e\f", "g`h"]
+        );
         assert_eq!(tokenize("tail\\"), ["tail\\"]);
         assert!(tokenize(" \t ").is_empty());
         // Only space and tab separate words, as in bash.
@@ -216,6 +685,31 @@ mod tests {
             "echo \"open",
             "echo trailing\\",
             "a |& b",
+            "echo \"${x#'a'}\"",
+            "echo \"${x#'\"'}\" ; b ; echo \\'",
+            "echo \"${x:-${y}}\"",
+            "echo \"${x:+$[}]'\"'}\" ; b ; echo \\'",
+            "echo \"${x#\\\"}\"",
+            "a &> log",
+            "echo hi &>/tmp/f touch x",
+            "echo \\>& x",
+            "echo \\<& x",
+            "echo >& file",
+            "echo >&$fd",
+            "echo '>'& x",
+            "echo hi #'\ntouch x\n#'",
+            "echo hi #",
+            "echo hi;#x",
+            "echo hi|#x",
+            "#x",
+            "a >| f",
+            "$a -rf x",
+            "x=1 $a",
+            "a | ${b}",
+            "a; \"$b\"",
+            "a <<EOF",
+            "a <<-EOF",
+            "a <<'EOF'",
             "echo \\$(x)",
             "echo $'\\'' ; rm -rf / ; '\\'",
         ] {
@@ -224,9 +718,23 @@ mod tests {
         for command in [
             "a && b",
             "a 2>&1",
-            "a &> log",
             "a <&3",
+            "a >&-",
+            "a 1>&2 2>&1",
+            "a <<< word",
+            "a <<<\"x;y\"",
+            "a $b",
+            "x=$a b",
+            "'$a' b",
+            "a#b",
+            "echo $#",
+            "echo ${#x} ${x#p}",
+            "echo \\# \"#\" '#'",
+            "echo \"a\\x\"",
+            "echo \"a\\\"b\"",
+            "{ a; }",
             "printf '&'",
+            "echo \"${x#a}\" \"${y:-b}\" ${z#'\"'}",
             "printf '$(x)'",
             "echo \"\\$(x)\"",
             "echo \"a\nb\"",
@@ -244,6 +752,63 @@ mod tests {
         let command = "echo $'\\'' ; rm -rf / ; '\\'";
         assert_eq!(split_composite(command).len(), 1);
         assert!(has_unparsed_construct(command));
+    }
+
+    #[test]
+    fn prefix_words_are_stripped_before_the_command() {
+        let cases = [
+            ("rm -rf x", "rm -rf x"),
+            ("  X=1 rm x", "rm x"),
+            ("X=1 Y='a b' Z+=\"c d\" rm x", "rm x"),
+            ("if rm x", "rm x"),
+            ("then ! { rm x", "rm x"),
+            ("time -p command -- rm x", "rm x"),
+            ("env -i X=1 rm x", "rm x"),
+            (">log 2>&1 rm x", "rm x"),
+            ("> log < in rm x", "rm x"),
+            ("2>&1 rm x", "rm x"),
+            ("X=1", ""),
+            ("then", ""),
+            ("echo if rm x", "echo if rm x"),
+            ("X='a b rm x", ""),
+            ("\"X\"=1 rm x", "\"X\"=1 rm x"),
+            ("1x=1 rm x", "1x=1 rm x"),
+            ("rm -rf x", "rm -rf x"),
+        ];
+        for (segment, expected) in cases {
+            assert_eq!(strip_command_prefix(segment), expected, "{segment:?}");
+        }
+    }
+
+    #[test]
+    fn file_redirects_are_found_outside_quotes_only() {
+        for command in [
+            "a > f",
+            "a >f",
+            "a >> f",
+            "a 2>f",
+            "a >| f",
+            "a <> f",
+            "a >\"f\"",
+            "a 2>&1 > f",
+            "a >",
+        ] {
+            assert!(redirects_to_file(command), "{command:?}");
+        }
+        for command in [
+            "a",
+            "a 2>&1",
+            "a >&2",
+            "a >&-",
+            "a <&3",
+            "a < f",
+            "a <<< f",
+            "a > /dev/null",
+            "a 2>/dev/stderr >/dev/stdout",
+            "a '>f' \"> f\" \\>f",
+        ] {
+            assert!(!redirects_to_file(command), "{command:?}");
+        }
     }
 
     #[test]

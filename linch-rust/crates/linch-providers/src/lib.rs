@@ -23,6 +23,8 @@ mod context;
 #[cfg(test)]
 mod cut_stream_tests;
 pub mod deepseek;
+#[cfg(test)]
+mod error_text_tests;
 pub mod gemini;
 mod models;
 mod native;

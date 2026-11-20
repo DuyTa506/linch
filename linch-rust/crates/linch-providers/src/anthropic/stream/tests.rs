@@ -175,6 +175,18 @@ async fn stop_reasons_map_and_unknown_ones_fail() {
 }
 
 #[tokio::test]
+async fn an_unknown_stop_reason_is_cut_like_an_http_error_body() {
+    let long = "r".repeat(256 * 1024);
+    let delta = format!(r#"{{"type":"message_delta","delta":{{"stop_reason":"{long}"}}}}"#);
+    let err = last_error(run(&frames(&[START, &delta, STOP]), 4096).await);
+    assert!(
+        err.to_string().len() <= 1024,
+        "{} bytes",
+        err.to_string().len()
+    );
+}
+
+#[tokio::test]
 async fn error_event_mid_stream_is_a_status_error_and_ends_the_stream() {
     let sse = format!(
         "event: message_start\ndata: {START}\n\nevent: error\ndata: {}\n\ndata: {STOP}\n\n",
