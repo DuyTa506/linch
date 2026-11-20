@@ -490,7 +490,8 @@ How rules combine:
   segment denied denies, any asked asks).
 - Across layers a deny from any layer is final; otherwise the last layer that
   decided wins. When no layer decides, the mode decides.
-- A shell command the splitter cannot model (for example with `$(...)`) can be
+- A shell command the splitter cannot model (for example with `$(...)`, a
+  background `&` or `&>`, a `#` comment, a here-document or `>|`) can be
   denied or asked by rules but never allowed by one.
 - A path outside the project root never matches an allow rule.
 

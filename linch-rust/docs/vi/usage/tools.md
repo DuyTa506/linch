@@ -493,8 +493,9 @@ Cách các rule kết hợp:
 - Giữa các layer, một deny từ bất kỳ layer nào là quyết định cuối; nếu không, layer
   cuối cùng đã quyết định sẽ thắng. Khi không layer nào quyết định, mode quyết
   định.
-- Một lệnh shell mà bộ tách lệnh không mô hình hóa được (chẳng hạn có `$(...)`) có
-  thể bị rule deny hoặc ask nhưng không bao giờ được rule allow.
+- Một lệnh shell mà bộ tách lệnh không mô hình hóa được (chẳng hạn có `$(...)`, dấu
+  `&` chạy nền hoặc `&>`, chú thích `#`, here-document hay `>|`) có thể bị rule deny
+  hoặc ask nhưng không bao giờ được rule allow.
 - Đường dẫn nằm ngoài project root không bao giờ khớp một rule allow.
 
 `auto_allow` (danh sách tên tool) cho phép các tool đó ở mọi mode trừ khi một rule

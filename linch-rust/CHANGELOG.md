@@ -6,6 +6,8 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ## Unreleased
 
+- Bash permission rules: `&>`, a `&` after an escaped or quoted `<`/`>`, a `#` comment, here-documents and `>|` count as syntax the splitter cannot model, so allow rules no longer cover them; a backslash inside double quotes is kept before bytes other than `$`, backtick, `"`, `\` and newline.
+
 ## 0.2.0 - 2026-11-19
 
 0.1.1 was uploaded to PyPI from commit `e102d938` and never tagged; this is the first tagged release. The Python client of this build refuses a server without `server.info` (`IncompatibleServer`), so ship the client and the `linch-server` binary together.

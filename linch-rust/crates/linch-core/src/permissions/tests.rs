@@ -86,7 +86,6 @@ const SUPPORTED: &[&str] = &[
     "pytest -q > test.log",
     "pytest -q >> test.log",
     "cat < input.txt",
-    "cmd &> output.log",
     "git status | cat",
     "ruff check . | tee ruff.log",
     "npm test 2>&1 | tee npm.log",
@@ -95,7 +94,10 @@ const SUPPORTED: &[&str] = &[
     "cargo test --all-features 2>&1",
     "python script.py < input.txt > output.txt",
     "sed -n '1,10p' README.md | cat",
-    "pytest -q &>pytest.log",
+    "echo hi >&2",
+    "cat <&3",
+    "build 2>&1 && deploy",
+    "build >out.log 2>&1 | tee run.log",
     "tail -f app.log 2>/dev/null",
     "printf '&'",
     "printf '$(literal)'",
@@ -114,6 +116,16 @@ const UNPARSED: &[&str] = &[
     "echo $(cat secrets.txt)",
     "printf '%s' `cat token.txt`",
     "echo $'\\'' ; rm -rf / ; '\\'",
+    "cmd &> output.log",
+    "echo hi &>/tmp/f touch /tmp/pwned",
+    "echo \\>& touch /tmp/pwned",
+    "echo \\<& touch /tmp/pwned",
+    "echo hi #'\ntouch /tmp/pwned\n#'",
+    "echo hi # comment",
+    "echo hi;# comment",
+    "echo hi >| /tmp/f touch /tmp/pwned",
+    "cat <<EOF",
+    "cat <<-EOF",
 ];
 
 #[test]
@@ -134,6 +146,75 @@ fn unparsed_syntax_is_never_allowed_by_bash_rules() {
     }
     let narrow = flat(PermissionMode::Default, vec![bash_rule("echo *", Allow)]);
     assert_eq!(bash(&narrow, "echo $'\\'' ; rm -rf / ; '\\'"), "ask");
+}
+
+fn allow_echo() -> PermissionEngine {
+    flat(PermissionMode::Default, vec![bash_rule("echo", Allow)])
+}
+
+#[test]
+fn an_allow_rule_does_not_cover_the_command_after_a_background_redirect() {
+    let command = "echo hi &>/tmp/f touch /tmp/pwned";
+    assert_eq!(bash(&allow_echo(), command), "ask", "{command:?}");
+}
+
+#[test]
+fn an_allow_rule_does_not_cover_the_command_after_an_escaped_redirect_and_ampersand() {
+    for command in ["echo \\>& touch /tmp/pwned", "echo \\<& touch /tmp/pwned"] {
+        assert_eq!(bash(&allow_echo(), command), "ask", "{command:?}");
+    }
+}
+
+#[test]
+fn an_allow_rule_does_not_cover_a_line_hidden_behind_a_comment_quote() {
+    let command = "echo hi #'\ntouch /tmp/pwned\n#'";
+    assert_eq!(bash(&allow_echo(), command), "ask", "{command:?}");
+}
+
+#[test]
+fn a_deny_rule_still_sees_a_command_after_an_ampersand_redirect() {
+    let engine = flat(PermissionMode::SkipDangerous, vec![bash_rule("rm *", Deny)]);
+    assert_eq!(bash(&engine, "rm -rf build &>log"), "deny");
+    assert_eq!(bash(&engine, "echo hi &>log touch x"), "ask");
+}
+
+#[test]
+fn an_allow_rule_covers_the_redirections_the_splitter_models() {
+    for command in [
+        "echo hi 2>&1",
+        "echo hi >&2",
+        "echo hi 1>&2 | echo ok",
+        "echo hi <&3",
+        "echo hi && echo ok",
+        "echo hi >out 2>&1 && echo ok",
+    ] {
+        assert_eq!(bash(&allow_echo(), command), "allow", "{command:?}");
+    }
+    assert_eq!(bash(&allow_echo(), "echo hi & echo ok"), "ask");
+}
+
+#[test]
+fn a_hash_inside_a_word_or_a_quote_is_not_a_comment() {
+    for command in [
+        "echo a#b",
+        "echo '#x'",
+        "echo \"#x\"",
+        "echo \\#x",
+        "echo ${#PATH}",
+    ] {
+        assert_eq!(bash(&allow_echo(), command), "allow", "{command:?}");
+    }
+}
+
+#[test]
+fn a_brace_group_is_not_allowed_by_a_narrow_allow_rule() {
+    for command in [
+        "{ echo hi; }",
+        "echo hi; { touch x; }",
+        "echo hi && { touch x; }",
+    ] {
+        assert_eq!(bash(&allow_echo(), command), "ask", "{command:?}");
+    }
 }
 
 #[test]
