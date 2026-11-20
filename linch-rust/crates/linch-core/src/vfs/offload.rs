@@ -31,7 +31,7 @@ const DIGEST_HEX: usize = 16;
 /// backend what exists: the same result of the same call is the same file (a
 /// retry, a loop), and a different result of a call id that a provider
 /// repeats is a different file. Two writers of one name therefore write the
-/// same text. Each id is made one short path segment by [`segment`].
+/// same text. Each id is made one short path segment by `segment`.
 ///
 /// Args:
 ///     prefix: Normalized directory the results go under.
