@@ -6,6 +6,8 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ## Unreleased
 
+- The MCP streamable HTTP client no longer follows redirects, so the transport's headers stay on the configured URL; it still keeps no idle connection (pooling showed 31 to 48 ms stalls in 2 of 9 runs of 50 calls on loopback).
+
 ## 0.2.0 - 2026-11-19
 
 0.1.1 was uploaded to PyPI from commit `e102d938` and never tagged; this is the first tagged release. The Python client of this build refuses a server without `server.info` (`IncompatibleServer`), so ship the client and the `linch-server` binary together.

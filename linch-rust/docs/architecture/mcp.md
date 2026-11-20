@@ -33,6 +33,20 @@ timeout; headers are checked when the transport is built. `Custom` takes a
 `Connector` (`crates/linch-mcp/src/connector.rs:110`) for in-process servers
 and tests: it opens a transport and runs `Handler::serve` over it.
 
+The HTTP transport uses a `reqwest` client of the crate's own
+(`connector.rs`, `http_client`), built once per connection attempt. It never
+follows a redirect: a 3xx answer ends that request as an HTTP error, so the
+transport's headers and the session id stay on the configured URL (rmcp's
+default client follows same-origin 307 and 308, which would take them to
+another path of the origin; the provider adapters refuse every redirect the
+same way). It keeps no idle connection, as rmcp's client does, so every call
+opens a connection: on loopback, 50 sequential calls took about 0.36 ms each
+unpooled and 0.26 ms pooled, but 2 of 9 pooled runs of 50 calls had one call
+of 31 to 48 ms (the TCP delayed-ACK stall rmcp's comment names, after a response body
+that was not read to its end) against none of 9 unpooled, so pooling stays off.
+The proxy environment (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`) applies as in
+reqwest's default client, as before.
+
 ## Tool mapping
 
 On connect, and on every relist, each listed tool becomes one registration

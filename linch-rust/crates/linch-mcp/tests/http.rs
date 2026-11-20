@@ -4,13 +4,14 @@ mod common;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use common::{
     Fixture, PATIENCE, TestServer, call, call_with, eventually, standard_tools, text_input, tool,
 };
@@ -199,4 +200,60 @@ async fn an_http_error_on_one_post_fails_only_that_call() {
 
     server.disconnect().await;
     http.stop().await;
+}
+
+/// A server at the configured path that answers 307 sends a redirect-following
+/// client, with the transport's headers, to another path of the origin. The
+/// client stays on the path it was configured with.
+#[tokio::test]
+async fn a_redirect_does_not_take_the_client_off_the_configured_path() {
+    let elsewhere = Arc::new(AtomicUsize::new(0));
+    let with_header = Arc::new(AtomicUsize::new(0));
+    let count = {
+        let (elsewhere, with_header) = (Arc::clone(&elsewhere), Arc::clone(&with_header));
+        move |request: Request, next: Next| {
+            let (elsewhere, with_header) = (Arc::clone(&elsewhere), Arc::clone(&with_header));
+            async move {
+                if request.uri().path().starts_with("/mcp") {
+                    elsewhere.fetch_add(1, Ordering::SeqCst);
+                    if request.headers().contains_key("x-tenant-token") {
+                        with_header.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+                next.run(request).await
+            }
+        }
+    };
+    let http = Http::start(&Fixture::new(standard_tools()), |router| {
+        router
+            .route(
+                "/allowed",
+                axum::routing::any(|| async { Redirect::temporary("/mcp").into_response() }),
+            )
+            .layer(middleware::from_fn(count))
+    })
+    .await;
+    let mut headers = BTreeMap::new();
+    headers.insert("X-Tenant-Token".to_owned(), "tenant-secret".to_owned());
+    let transport = McpTransport::Http {
+        url: http.url.replace("/mcp", "/allowed"),
+        headers,
+    };
+    let mut config = McpServerConfig::new("web", transport);
+    config.reconnect.attempt_timeout = Duration::from_secs(5);
+    let connected = McpServer::connect(config, Arc::new(ToolRegistry::new())).await;
+    let (hits, keyed) = (
+        elsewhere.load(Ordering::SeqCst),
+        with_header.load(Ordering::SeqCst),
+    );
+    let listed = connected.as_ref().map(|server| server.tools().len()).ok();
+    if let Ok(server) = connected {
+        server.disconnect().await;
+    }
+    http.stop().await;
+    assert_eq!(
+        hits, 0,
+        "{hits} requests left /allowed for /mcp, {keyed} with the transport's header; \
+         tools listed from there: {listed:?}"
+    );
 }

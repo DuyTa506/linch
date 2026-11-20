@@ -1777,6 +1777,7 @@ dependencies = [
  "http",
  "linch-core",
  "process-wrap",
+ "reqwest",
  "rmcp",
  "serde_json",
  "thiserror",

@@ -34,6 +34,19 @@ lần thử; header được kiểm tra khi transport được dựng. `Custom` 
 `Connector` (`crates/linch-mcp/src/connector.rs:110`) cho các server trong process
 và test: nó mở một transport và chạy `Handler::serve` trên đó.
 
+Transport HTTP dùng một client `reqwest` riêng của crate
+(`connector.rs`, `http_client`), dựng một lần cho mỗi lần thử kết nối. Nó không bao giờ
+đi theo redirect: một phản hồi 3xx kết thúc yêu cầu đó như một lỗi HTTP, nên header của
+transport và session id ở lại trên URL đã cấu hình (client mặc định của rmcp đi theo
+307 và 308 cùng origin, sẽ đưa chúng tới một đường dẫn khác của origin; các adapter
+provider từ chối mọi redirect theo cùng cách). Nó không giữ connection nhàn rỗi, giống
+client của rmcp, nên mỗi lời gọi mở một connection: trên loopback, 50 lời gọi tuần tự mất
+khoảng 0,36 ms mỗi lời gọi khi không pool và 0,26 ms khi có pool, nhưng 2 trên 9 lượt chạy
+50 lời gọi có pool có một lời gọi mất 31 đến 48 ms (cú đứng do TCP delayed ACK mà ghi chú
+của rmcp nhắc tới, sau một response body chưa được đọc hết) so với 0 trên 9 khi không pool,
+nên pool vẫn tắt. Biến môi trường proxy (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`) áp dụng như
+client mặc định của reqwest, giống trước đây.
+
 ## Ánh xạ tool
 
 Khi kết nối, và ở mỗi lần relist, mỗi tool được liệt kê trở thành một đăng ký

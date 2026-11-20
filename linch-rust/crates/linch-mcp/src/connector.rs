@@ -51,6 +51,9 @@ pub enum ConnectError {
     /// The attempt took longer than the policy's `attempt_timeout`.
     #[error("MCP connection attempt timed out after {} s", .0.as_secs_f64())]
     Timeout(Duration),
+    /// The HTTP client could not be built.
+    #[error("could not build the MCP HTTP client: {0}")]
+    HttpClient(#[source] reqwest::Error),
 }
 
 /// The client side of one connection, handed to a [`Connector`].
@@ -278,10 +281,26 @@ impl Connector for Http {
     ) -> Result<RunningService<RoleClient, Handler>, ConnectError> {
         let config = StreamableHttpClientTransportConfig::with_uri(self.url.as_str())
             .custom_headers(self.headers.clone());
+        let client = http_client().map_err(ConnectError::HttpClient)?;
         handler
-            .serve(StreamableHttpClientTransport::from_config(config))
+            .serve(StreamableHttpClientTransport::with_client(client, config))
             .await
     }
+}
+
+/// The HTTP client of one connection. It never follows a redirect, so the
+/// transport's headers and the session id stay on the configured URL (the
+/// provider adapters refuse redirects the same way). It keeps no idle
+/// connection, as rmcp's own client does: a response body that is not read
+/// to its end leaves a pooled connection that can stall the next request for
+/// about 40 ms (TCP delayed ACK), which 2 of 9 runs of 50 calls on loopback
+/// showed with pooling on and none of 9 with it off, at 0.1 ms a call saved.
+/// Everything else is reqwest's default, the proxy environment included.
+fn http_client() -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .pool_max_idle_per_host(0)
+        .build()
 }
 
 fn parse_headers(
