@@ -23,9 +23,9 @@ backend sees the same workspace directory, so a file `Bash` writes is the
 file `Read` reads. A command that shares the workspace cannot move the file
 tools out of it by swapping a directory or file for a symlink while a call
 runs: every path is walked name by name from an open descriptor of the root
-and a symlink that leads out is refused. That protects file contents; the
-names a `Grep` or `Glob` listing finds in a directory swapped that way are
-not protected (what is and is not covered:
+and a symlink that leads out is refused. That protects file contents, ignore
+files included; the names a `Grep`, `Glob` or `ls` listing finds in a directory
+swapped that way are not protected (what is and is not covered:
 [Confinement](../architecture/tools.md#confinement)).
 
 ```python
@@ -301,7 +301,7 @@ docker stays green.
 | No server secret reaches the command's environment | yes | yes | yes |
 | The server's own `environ` is unreadable from the command | n/a | yes | yes |
 | A write outside the workspace does not reach the host (the file tools included, while a command swaps directories for symlinks) | n/a | yes | yes |
-| The content of a host file beside the workspace cannot be read (the file tools included, same swap; which names exist in a swapped directory is not protected) | n/a | yes | yes |
+| The content of a host file beside the workspace cannot be read (the file tools included, same swap, and `.ignore`/`.gitignore` too; which names exist in a swapped directory is not protected) | n/a | yes | yes |
 | A forbidden syscall is an error result, not a crash | n/a | yes | n/a |
 | A command cannot `ptrace` a process outside the sandbox | n/a | yes | n/a |
 | No capabilities, `no-new-privileges`, `mount` refused | n/a | n/a | yes |

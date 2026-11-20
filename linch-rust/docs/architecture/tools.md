@@ -253,7 +253,7 @@ shell for `Bash`; see [Execution backends](#execution-backends)), sharing one
 
 Grep and Glob skip ignored files and do not follow symlinks; Grep also skips
 hidden and binary files, and Glob lists hidden files only when the pattern
-names a dot segment (`crates/linch-tools/src/fs.rs:253-269`).
+names a dot segment (`crates/linch-tools/src/fs.rs:254-270`).
 
 ### Read before write
 
@@ -267,7 +267,7 @@ session ends (`tracker.rs:65`).
 
 ### Confinement
 
-Every file tool goes through the `ExecutionFs` trait (`fs.rs:230`), so a
+Every file tool goes through the `ExecutionFs` trait (`fs.rs:231`), so a
 remote execution world can replace `LocalFs` without changing the tools.
 `LocalFs` (`crates/linch-tools/src/fs/local.rs`) canonicalizes the root once
 and keeps a directory descriptor of it; `new` is blocking, so call it before
@@ -313,33 +313,42 @@ under `sandbox` or `docker`) and swaps a directory or a file for a symlink,
 or renames a directory, between any two steps of a call cannot make the call
 leave the root. The directory in hand is always one the walk opened beneath
 the root, and a swapped name is refused by `O_NOFOLLOW` where it is next
-opened. File contents are never read from outside the root.
+opened. The content of a file is never read from outside the root, and that
+includes `.ignore` and `.gitignore`: a search reads them through the root
+descriptor like any file, so one that is a symlink is not honoured and no host
+file decides what a search answers.
 
 Listings are weaker. `Grep`, `Glob` and `DiskBackend::ls` list names with
-`ignore`'s walk (gitignore, types and globs need it), which reads
-directories by name, so a listing may come from a directory a racing command
-swapped for a symlink to a host directory. A listed name is searched or
+`ignore`'s walk (types and globs need it), which reads directories by name, so
+a listing may come from a directory a racing command swapped for a symlink to
+a host directory. The walk does not read ignore files: `fs/ignore_files.rs`
+does, from the root descriptor (no symlink on the way or at the end, regular
+files up to 1 MiB; any other is skipped without a word), and drops the
+entries they rule out. It keeps the walk's precedence: a glob pattern beats
+every ignore file, then the nearest matching `.ignore` rule, then the nearest
+matching `.gitignore` rule, from the workspace root down, also for the
+directories above a searched subdirectory. `.git/info/exclude` and the host's
+global ignore file are not read. A listed name is searched or
 returned only after it is opened again from the root descriptor with no
 symlink allowed, one descriptor at a time, so there is no depth limit. A name
 that fails that (unreadable or not searchable, gone, swapped) is never named
 in any output or error: `Grep` and `Glob` end with a line giving how many
 entries were left out, and an unreadable directory counts as one. Running out
 of descriptors is an error, not an empty answer. Not protected: which names
-exist in a directory that was swapped. `Glob` reports a listed name only if it
-is also a regular file at that path beneath the root, so a caller that
-guesses a name, creates it in the workspace and races a swap can learn
-whether the host directory also has it (names and existence, not contents).
-Closing this means walking the directories through descriptors instead of
-`ignore`'s walk, which is a rewrite of the walker, about 350 lines with its
-gitignore, type and glob precedence, and was not done.
+exist in a directory that was swapped. `Glob`, `Grep` and `ls` report a listed
+name only if it is also a regular file at that path beneath the root, so a
+caller that guesses a name, creates it in the workspace and races a swap can
+learn whether the host directory also has it (names and existence, not
+contents) from any of the three. Closing this means walking the directories
+through descriptors instead of `ignore`'s walk, which is a rewrite of the
+walker and was not done.
 
 Not covered: hard links (a second name inside the root for a file outside it
 reads as that file; a write replaces the name and leaves the other file's
 content alone), mounts inside the root, and the root directory itself being
 moved or replaced (the descriptor stays on the directory `new` opened). The
 walk uses only POSIX `*at` calls through `rustix`, so there is no Linux-only
-fallback to keep; it has not been built or tested on macOS. A FIFO named
-`.gitignore` blocks a `Glob` or `Grep` (the `ignore` crate opens it by path).
+fallback to keep; it has not been built or tested on macOS.
 
 ### Bash
 

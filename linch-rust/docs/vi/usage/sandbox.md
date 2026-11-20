@@ -23,8 +23,8 @@ workspace, nên một tệp `Bash` ghi chính là tệp `Read` đọc. Một l�
 workspace không thể đẩy các tool tệp ra khỏi nó bằng cách hoán đổi một thư mục hay
 tệp thành symlink trong lúc một lệnh gọi chạy: mọi đường dẫn được đi từng tên từ một
 descriptor đang mở của thư mục gốc và symlink dẫn ra ngoài bị từ chối. Điều đó bảo vệ
-nội dung tệp; tên mà một danh sách của `Grep` hay `Glob` tìm thấy trong một thư mục bị
-hoán đổi như vậy thì không được bảo vệ (điều được và không được che:
+nội dung tệp, kể cả tệp ignore; tên mà một danh sách của `Grep`, `Glob` hay `ls` tìm
+thấy trong một thư mục bị hoán đổi như vậy thì không được bảo vệ (điều được và không được che:
 [Giới hạn truy cập](../architecture/tools.md#giới-hạn-truy-cập)).
 
 ```python
@@ -276,7 +276,7 @@ cập được docker), nên CI không có docker vẫn xanh.
 | Không bí mật nào của server lọt vào môi trường của lệnh | có | có | có |
 | `environ` của server không đọc được từ lệnh | n/a | có | có |
 | Ghi ngoài workspace không tới được host (kể cả tool tệp, khi một lệnh hoán đổi thư mục thành symlink) | n/a | có | có |
-| Không đọc được nội dung tệp host nằm cạnh workspace (kể cả tool tệp, cùng phép hoán đổi; tên nào tồn tại trong một thư mục bị hoán đổi thì không được bảo vệ) | n/a | có | có |
+| Không đọc được nội dung tệp host nằm cạnh workspace (kể cả tool tệp, cùng phép hoán đổi, và cả `.ignore`/`.gitignore`; tên nào tồn tại trong một thư mục bị hoán đổi thì không được bảo vệ) | n/a | có | có |
 | Syscall bị cấm cho kết quả lỗi, không làm sập | n/a | có | n/a |
 | Lệnh không `ptrace` được tiến trình ngoài sandbox | n/a | có | n/a |
 | Không có capability, `no-new-privileges`, `mount` bị từ chối | n/a | n/a | có |

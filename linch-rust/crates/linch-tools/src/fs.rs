@@ -8,6 +8,7 @@
 //! has one name. The read-before-write policy keys on these names.
 
 mod beneath;
+mod ignore_files;
 mod local;
 mod search;
 #[cfg(test)]

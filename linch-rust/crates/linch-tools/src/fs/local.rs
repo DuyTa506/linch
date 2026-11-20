@@ -107,7 +107,7 @@ impl LocalFs {
     }
 
     /// Opens the files a search found by name, through the root descriptor.
-    pub(crate) fn opener(&self) -> Opener<'_> {
+    pub(crate) fn opener(&self) -> Opener {
         Opener::new(&self.root_fd, &self.root)
     }
 

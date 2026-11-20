@@ -355,19 +355,19 @@ pub(super) fn is_file(stat: &Stat) -> bool {
 /// have swapped a directory for a symlink since it was listed. Every file is
 /// walked again from the root with no symlink allowed, so nothing is read or
 /// reported from outside the root.
-pub(crate) struct Opener<'a> {
-    root_fd: &'a Arc<OwnedFd>,
-    root: &'a Path,
+pub(crate) struct Opener {
+    root_fd: Arc<OwnedFd>,
+    root: PathBuf,
     /// The last parent directory, relative to the root: a sorted walk visits
     /// the files of one directory together.
     parent: Option<(PathBuf, Arc<OwnedFd>)>,
 }
 
-impl<'a> Opener<'a> {
-    pub(super) fn new(root_fd: &'a Arc<OwnedFd>, root: &'a Path) -> Self {
+impl Opener {
+    pub(super) fn new(root_fd: &Arc<OwnedFd>, root: &Path) -> Self {
         Self {
-            root_fd,
-            root,
+            root_fd: Arc::clone(root_fd),
+            root: root.to_owned(),
             parent: None,
         }
     }
@@ -377,7 +377,7 @@ impl<'a> Opener<'a> {
         &mut self,
         real: &'p Path,
     ) -> Result<Option<(Arc<OwnedFd>, &'p OsStr)>, FsError> {
-        let Some(relative) = real.strip_prefix(self.root).ok() else {
+        let Some(relative) = real.strip_prefix(&self.root).ok() else {
             return Ok(None);
         };
         let (Some(name), Some(above)) = (relative.file_name(), relative.parent()) else {
@@ -388,7 +388,7 @@ impl<'a> Opener<'a> {
         {
             return Ok(Some((Arc::clone(dir), name)));
         }
-        match locate(self.root_fd, self.root, above, "", Links::Refuse) {
+        match locate(&self.root_fd, &self.root, above, "", Links::Refuse) {
             Ok(at) if at.tail.is_empty() => {
                 self.parent = Some((above.to_owned(), Arc::clone(&at.dir)));
                 Ok(Some((at.dir, name)))

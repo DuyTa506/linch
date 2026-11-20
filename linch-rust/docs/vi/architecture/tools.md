@@ -250,7 +250,7 @@ nó cho `Bash`; xem [Execution backend](#execution-backend)), dùng chung một
 
 Grep và Glob bỏ qua các tệp bị ignore và không đi theo symlink; Grep cũng bỏ qua
 các tệp ẩn và nhị phân, và Glob chỉ liệt kê tệp ẩn khi mẫu
-nêu tên một đoạn bắt đầu bằng dấu chấm (`crates/linch-tools/src/fs.rs:253-269`).
+nêu tên một đoạn bắt đầu bằng dấu chấm (`crates/linch-tools/src/fs.rs:254-270`).
 
 ### Đọc trước khi ghi
 
@@ -264,7 +264,7 @@ session kết thúc (`tracker.rs:65`).
 
 ### Giới hạn truy cập
 
-Mọi tool tệp đều đi qua trait `ExecutionFs` (`fs.rs:230`), nên một
+Mọi tool tệp đều đi qua trait `ExecutionFs` (`fs.rs:231`), nên một
 thế giới thực thi từ xa có thể thay `LocalFs` mà không đổi các tool.
 `LocalFs` (`crates/linch-tools/src/fs/local.rs`) canonicalize thư mục gốc một
 lần và giữ một directory descriptor của nó; `new` là blocking, nên hãy gọi nó
@@ -311,32 +311,40 @@ Một đường dẫn được phép là gì:
 tên một thư mục, giữa hai bước bất kỳ của một lệnh gọi thì không thể làm lệnh
 gọi đó ra khỏi thư mục gốc. Thư mục đang cầm luôn là thư mục mà lượt đi đã mở
 bên dưới thư mục gốc, và một tên bị hoán đổi bị `O_NOFOLLOW` từ chối ở nơi nó được
-mở tiếp theo. Nội dung tệp không bao giờ được đọc từ ngoài thư mục gốc.
+mở tiếp theo. Nội dung của một tệp không bao giờ được đọc từ ngoài thư mục gốc, kể cả
+`.ignore` và `.gitignore`: lệnh tìm kiếm đọc chúng qua descriptor gốc như mọi tệp
+khác, nên tệp là symlink thì không được tuân theo và không tệp host nào quyết
+định câu trả lời của một lệnh tìm kiếm.
 
 Danh sách thì yếu hơn. `Grep`, `Glob` và `DiskBackend::ls` liệt kê tên bằng lượt
-đi của `ignore` (gitignore, type và glob cần nó), vốn đọc thư mục theo tên, nên
-một danh sách có thể đến từ thư mục mà một lệnh đang chạy đã hoán đổi thành
-symlink tới thư mục host. Một tên được liệt kê chỉ được tìm hoặc trả về sau khi
+đi của `ignore` (type và glob cần nó), vốn đọc thư mục theo tên, nên một danh
+sách có thể đến từ thư mục mà một lệnh đang chạy đã hoán đổi thành symlink tới
+thư mục host. Lượt đi không đọc tệp ignore: `fs/ignore_files.rs` đọc chúng từ
+descriptor gốc (không symlink trên đường đi hay ở cuối, tệp thường tới 1 MiB; tệp
+khác bị bỏ qua không một lời) và loại các mục chúng loại trừ. Thứ tự ưu tiên giữ
+như lượt đi: mẫu glob thắng mọi tệp ignore, rồi đến quy tắc `.ignore` khớp gần
+nhất, rồi quy tắc `.gitignore` khớp gần nhất, từ thư mục gốc workspace đi xuống, kể
+cả các thư mục phía trên một thư mục con được tìm. `.git/info/exclude` và tệp
+ignore toàn cục của host không được đọc. Một tên được liệt kê chỉ được tìm hoặc trả về sau khi
 được mở lại từ descriptor gốc mà không cho phép symlink nào, từng descriptor một,
 nên không có giới hạn độ sâu. Tên không qua được bước đó (không đọc được hoặc
 không tìm kiếm được, đã mất, bị hoán đổi) không bao giờ được nêu tên trong đầu ra
 hay lỗi nào: `Grep` và `Glob` kết thúc bằng một dòng cho biết có bao nhiêu mục bị
 bỏ ra, và một thư mục không đọc được tính là một. Hết descriptor là một lỗi,
 không phải câu trả lời rỗng. Không được bảo vệ: tên nào tồn tại trong một thư mục
-đã bị hoán đổi. `Glob` chỉ báo một tên được liệt kê nếu nó cũng là tệp thường tại
-đường dẫn đó bên dưới thư mục gốc, nên một bên gọi đoán một tên, tạo nó trong
-workspace và đua một phép hoán đổi có thể biết thư mục host cũng có nó hay không
-(tên và sự tồn tại, không phải nội dung). Để đóng điều này phải đi các thư mục
-bằng descriptor thay cho lượt đi của `ignore`, tức là viết lại bộ duyệt, khoảng
-350 dòng cùng thứ tự ưu tiên gitignore, type và glob, và chưa làm.
+đã bị hoán đổi. `Glob`, `Grep` và `ls` chỉ báo một tên được liệt kê nếu nó cũng là
+tệp thường tại đường dẫn đó bên dưới thư mục gốc, nên một bên gọi đoán một tên, tạo
+nó trong workspace và đua một phép hoán đổi có thể biết thư mục host cũng có nó
+hay không (tên và sự tồn tại, không phải nội dung) qua bất kỳ cái nào trong ba.
+Để đóng điều này phải đi các thư mục bằng descriptor thay cho lượt đi của
+`ignore`, tức là viết lại bộ duyệt, và chưa làm.
 
 Không được che: hard link (một tên thứ hai trong thư mục gốc cho tệp nằm ngoài
 sẽ đọc ra tệp đó; một lần ghi thay tên và để nguyên nội dung của tệp kia), mount
 nằm trong thư mục gốc, và việc chính thư mục gốc bị di chuyển hay thay thế
 (descriptor vẫn ở thư mục mà `new` đã mở). Lượt đi chỉ dùng các lời gọi POSIX `*at`
 qua `rustix`, nên không có nhánh dự phòng chỉ dành cho Linux để duy trì; nó chưa
-được build hay kiểm thử trên macOS. Một FIFO tên `.gitignore` làm `Glob` hoặc
-`Grep` bị chặn (crate `ignore` mở nó theo đường dẫn).
+được build hay kiểm thử trên macOS.
 
 ### Bash
 

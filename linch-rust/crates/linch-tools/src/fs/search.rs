@@ -8,12 +8,13 @@ use std::path::{Component, Path};
 
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkMatch};
-use ignore::overrides::OverrideBuilder;
+use ignore::overrides::{Override, OverrideBuilder};
 use ignore::types::TypesBuilder;
 use ignore::{DirEntry, WalkBuilder};
 use tokio_util::sync::CancellationToken;
 
 use super::beneath::{exhausted, stamp_of_stat};
+use super::ignore_files::IgnoreFiles;
 use super::local::is_hidden;
 use super::{
     FsError, GlobHit, GlobHits, GlobQuery, GrepFile, GrepHits, GrepLine, GrepMode, GrepQuery,
@@ -38,14 +39,14 @@ pub(super) fn grep(
     let matcher = matcher(query)?;
     let limit = fs.search_limit();
     let mut searcher = searcher(query, limit);
-    let mut walk = walker(&target, false);
-    if let Some(glob) = &query.glob {
-        let overrides = OverrideBuilder::new(&target)
+    let overrides = match &query.glob {
+        Some(glob) => OverrideBuilder::new(&target)
             .add(glob)
             .and_then(|builder| builder.build())
-            .map_err(invalid)?;
-        walk.overrides(overrides);
-    }
+            .map_err(invalid)?,
+        None => Override::empty(),
+    };
+    let (mut walk, rules) = walker(fs, &target, false, overrides);
     if let Some(name) = &query.file_type {
         let types = TypesBuilder::new()
             .add_defaults()
@@ -58,6 +59,7 @@ pub(super) fn grep(
     let mut lines = 0;
     let mut opener = fs.opener();
     for entry in walk.build() {
+        rules.check()?;
         if stop.is_cancelled() {
             return Err(FsError::Cancelled);
         }
@@ -122,6 +124,7 @@ pub(super) fn grep(
             break;
         }
     }
+    rules.check()?;
     Ok(hits)
 }
 
@@ -152,11 +155,11 @@ pub(super) fn glob(
         .add(&query.pattern)
         .and_then(|builder| builder.build())
         .map_err(invalid)?;
-    let mut walk = walker(&dir, dotted);
-    walk.overrides(overrides);
+    let (walk, rules) = walker(fs, &dir, dotted, overrides);
     let mut found = GlobHits::default();
     let mut opener = fs.opener();
     for entry in walk.build() {
+        rules.check()?;
         if stop.is_cancelled() {
             return Err(FsError::Cancelled);
         }
@@ -174,19 +177,27 @@ pub(super) fn glob(
             modified: Some(stamp_of_stat(&stat).modified),
         });
     }
+    rules.check()?;
     Ok(found)
 }
 
-/// The walker both searches share: sorted, symlinks not followed, the
-/// host's global gitignore not read, `.gitignore` honoured outside git too.
-fn walker(dir: &Path, hidden: bool) -> WalkBuilder {
+/// The walker both searches share, with the rules that drive it: sorted,
+/// symlinks not followed, `.ignore` and `.gitignore` honoured outside git too
+/// but read from the root descriptor (see [`IgnoreFiles`]), the host's global
+/// ignore file not read.
+fn walker(
+    fs: &LocalFs,
+    dir: &Path,
+    hidden: bool,
+    overrides: Override,
+) -> (WalkBuilder, IgnoreFiles) {
+    let rules = IgnoreFiles::new(fs.opener(), fs.root(), overrides.clone(), !hidden);
     let mut walk = WalkBuilder::new(dir);
-    walk.hidden(!hidden)
-        .follow_links(false)
-        .git_global(false)
-        .require_git(false)
+    walk.follow_links(false)
+        .overrides(overrides)
         .sort_by_file_name(|a, b| a.cmp(b));
-    walk
+    rules.install(&mut walk);
+    (walk, rules)
 }
 
 /// The path of a walked regular file. Directories and symlinks yield `None`,
