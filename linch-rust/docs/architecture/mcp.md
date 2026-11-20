@@ -94,6 +94,10 @@ host (`crates/linch-mcp/src/codes.rs`):
 | `mcp_tool_error` | The server ran the tool and returned `isError: true` |
 | `mcp_protocol_error` | A JSON-RPC error, or a response this client does not support (`input_required`, a task) |
 
+The text of a JSON-RPC error is `MCP server "<name>" rejected the call (code N):
+<message>`; the code now comes before the message, so a message cut at 30 000
+bytes keeps the code.
+
 ## Lifecycle
 
 `McpServer::connect(config, registry)` (`crates/linch-mcp/src/server.rs:97`)
@@ -101,7 +105,11 @@ validates the config, makes one attempt (connect, subscribe, list) within
 `attempt_timeout`, routes calls to the new connection, then registers the
 tools, so a tool is never visible before it can be called (`server.rs:355`).
 A failed first attempt is `McpError::Connect` and registers nothing; it is
-not retried.
+not retried. Its `ConnectError` is one of `Spawn`, `Handshake`, `Listen`,
+`ListTools`, `ListTooLarge` (the first tool of the listing is over 4 MiB),
+`Timeout` and `HttpClient` (the HTTP client could not be built); the last two
+variants, `ListTooLarge` and `HttpClient`, are new, so an exhaustive `match`
+on `ConnectError` needs two more arms.
 
 `ServerStatus` (`server.rs:42`): `Connected`, `Reconnecting`, `Unavailable`
 (every reconnect attempt failed; the tools stay registered and fail with

@@ -93,6 +93,10 @@ Mọi lỗi là một `ToolOutputError` mà model đọc được; mã dành cho
 | `mcp_tool_error` | Server đã chạy tool và trả về `isError: true` |
 | `mcp_protocol_error` | Một lỗi JSON-RPC, hoặc một response mà client này không hỗ trợ (`input_required`, một task) |
 
+Văn bản của một lỗi JSON-RPC là `MCP server "<tên>" rejected the call (code N):
+<thông điệp>`; mã nay đứng trước thông điệp, nên một thông điệp bị cắt ở 30 000
+byte vẫn giữ mã.
+
 ## Vòng đời
 
 `McpServer::connect(config, registry)` (`crates/linch-mcp/src/server.rs:97`)
@@ -100,7 +104,10 @@ xác thực cấu hình, thực hiện một lần thử (kết nối, subscribe
 `attempt_timeout`, chuyển hướng các lời gọi tới kết nối mới, rồi đăng ký
 các tool, nên một tool không bao giờ hiển thị trước khi nó có thể được gọi (`server.rs:355`).
 Lần thử đầu tiên thất bại là `McpError::Connect` và không đăng ký gì; nó không
-được thử lại.
+được thử lại. `ConnectError` của nó là một trong `Spawn`, `Handshake`, `Listen`,
+`ListTools`, `ListTooLarge` (tool đầu tiên của lần liệt kê vượt 4 MiB), `Timeout` và
+`HttpClient` (không dựng được client HTTP); hai biến thể `ListTooLarge` và `HttpClient`
+là mới, nên một `match` đầy đủ trên `ConnectError` cần thêm hai nhánh.
 
 `ServerStatus` (`server.rs:42`): `Connected`, `Reconnecting`, `Unavailable`
 (mọi lần thử kết nối lại đều thất bại; các tool vẫn được đăng ký và thất bại với
