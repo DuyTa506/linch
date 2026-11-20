@@ -347,6 +347,9 @@ fn an_expansion_in_command_position_is_unparsed() {
     ] {
         assert_eq!(bash(&allow_all, command), "allow", "{command:?}");
     }
+    // A blank after `>&` is unparsed syntax: no allow rule covers it.
+    assert_eq!(bash(&allow_echo(), "echo hi >& 2"), "ask");
+    assert_eq!(bash(&allow_all, "echo hi >& 2"), "ask");
 }
 
 #[test]
@@ -769,6 +772,27 @@ fn a_deny_rule_covers_a_command_behind_a_brace_in_old_arithmetic() {
     );
     for command in OLD_ARITHMETIC {
         assert_ne!(bash(&engine, command), "allow", "{command:?}");
+    }
+}
+
+#[test]
+fn an_allow_rule_does_not_cover_a_redirect_to_a_file_spelled_like_a_descriptor() {
+    assert_eq!(bash(&allow_echo(), "echo hi >&2"), "allow");
+    assert_eq!(bash(&allow_echo(), "echo hi >&-"), "allow");
+    assert_eq!(bash(&allow_echo(), "echo hi >&M"), "ask");
+    let allow_all = flat(PermissionMode::Default, vec![bash_rule("*", Allow)]);
+    for command in [
+        "echo hi >&2file",
+        "echo hi >&1M",
+        "echo hi 1>&2file",
+        "echo hi >&2-M",
+        "echo hi >&2\"file\"",
+        "echo hi >&-file",
+        "echo hi >&2-",
+    ] {
+        assert_eq!(bash(&allow_echo(), command), "ask", "{command:?}");
+        // The allow-all rule treats them like any other file redirect.
+        assert_eq!(bash(&allow_all, command), "allow", "{command:?}");
     }
 }
 

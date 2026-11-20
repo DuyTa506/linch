@@ -416,9 +416,10 @@ fn command_is_not_in_the_text(segment: &str) -> bool {
 }
 
 /// Whether `segment` opens a file for writing with a redirection (`>`, `>>`,
-/// `>|`, `<>`, with or without a descriptor number). Descriptor duplication
-/// (`2>&1`, `>&2`, `>&-`) and `/dev/null`, `/dev/stdout` and `/dev/stderr`
-/// are not files.
+/// `>|`, `<>`, with or without a descriptor number). `>&` followed by exactly
+/// digits or `-` (`2>&1`, `>&2`, `>&-`) duplicates a descriptor, and
+/// `/dev/null`, `/dev/stdout` and `/dev/stderr` are not files; any other word
+/// after `>&` is one.
 pub fn redirects_to_file(segment: &str) -> bool {
     let b = segment.as_bytes();
     let mut quote: Option<u8> = None;
@@ -442,9 +443,15 @@ pub fn redirects_to_file(segment: &str) -> bool {
                 end += 1;
             }
             if c == b'>' && b.get(end) == Some(&b'&') {
-                // `>&2`, `>&-`: duplicates a descriptor.
-                i = end + 1;
-                continue;
+                // `>&2` and `>&-` duplicate a descriptor; `>&2file` and
+                // `>& 2` name a file.
+                let word = &segment[end + 1..];
+                let word = &word[..word_end(word)];
+                if word == "-" || (!word.is_empty() && word.bytes().all(|d| d.is_ascii_digit())) {
+                    i = end + 1 + word.len();
+                    continue;
+                }
+                end += 1;
             }
             let rest = trim_blanks(&segment[end..]);
             let target = unquote(&rest[..word_end(rest)]);

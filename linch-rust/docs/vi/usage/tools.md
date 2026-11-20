@@ -503,7 +503,8 @@ Cách các rule kết hợp:
   hướng đầu ra vào một tệp (`echo x > file`, `>>`, `2>file`, `<>`): lệnh đó sẽ
   hỏi. Vì vậy rule allow cho `echo` hay `git *` không cho `echo x > file` hay
   `git log > file` đi qua, còn rule allow-all `*` cho phép `pytest -q > test.log`
-  như mọi lệnh khác. Nhân bản descriptor (`2>&1`, `>&2`, `>&-`) và `/dev/null`,
+  như mọi lệnh khác. `>&` theo sau đúng bởi chữ số hoặc `-` (`2>&1`, `>&2`, `>&-`) nhân bản descriptor
+  và không phải tệp, `/dev/null`,
   `/dev/stdout`, `/dev/stderr` không phải tệp. Rule khớp đầu tiên của một đoạn
   quyết định đoạn đó có phải allow-all hay không. Cú pháp mà bộ tách lệnh không
   mô hình hóa được (`&>`, `>|`) không bao giờ được cho phép, kể cả bởi `*`. Rule
