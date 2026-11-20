@@ -532,8 +532,14 @@ silently instead:
   tenant sets none, else the lesser of the two caps (a tenant that sets
   `max_corrections` may lower it, not raise it). A rule naming a tool the
   agent lacks refuses the open (`OpenError`), never dropped; the tenant's
-  error for any policy problem (`BuildError::Policy`, `data.kind` `policy`) is one fixed sentence that
-  does not name the tool or echo a pattern, as the operator wrote the rule
+  error for a policy problem that can involve the operator's rules read with
+  its own (`BuildError::Policy`, `data.kind` `policy`: a tool the agent lacks,
+  a cycle, a check that does not compile, a `tool_choice` that defeats the
+  rules) is one fixed sentence that does not name the tool or echo a pattern,
+  as the operator wrote the rule; the original text goes to the server log
+  (`warn`, with the tenant's name) and never to the client. A defect in the
+  text of the tenant's own rule or gate (a blank gate name, `min_calls` of 0,
+  a gate that asks for nothing) keeps its message
   (the server config refuses a `required_policy` whose check does not compile).
   The rules bind the model's call order only: a client's host tool under a
   required name, a `pre_tool_use` hook, a `post_tool_use` replacement or a

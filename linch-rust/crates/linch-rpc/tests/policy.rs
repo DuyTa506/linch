@@ -342,3 +342,21 @@ async fn a_required_policy_the_agent_cannot_meet_refuses_the_open() {
         other => panic!("{other:?}"),
     }
 }
+
+/// A tenant under a required policy that gets its own rule wrong, with
+/// nothing of the operator's in the message, is still told what to fix.
+#[tokio::test]
+async fn a_tenants_own_policy_mistake_is_still_named() {
+    let remote = Rpc::remote(acme(Allowlists::new().required_policy(Some(operators()))));
+    let own = json!({"gates": [{"name": "mine"}]});
+    let error = (remote
+        .call(method::AGENT_OPEN, remote_config(vec![], Some(own)))
+        .await)
+        .unwrap_err();
+    let message = match &error {
+        linch_rpc::ClientError::Rpc(object) => object.message.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert!(message.contains("mine"), "{message}");
+    assert_eq!(code_of(error), code::BUILD_INVALID);
+}

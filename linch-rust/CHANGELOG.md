@@ -11,7 +11,7 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 - One provider response holds at most 32 MiB (`MAX_RESPONSE_BYTES`) and 4096 tool calls (`MAX_RESPONSE_TOOL_CALLS`); a stream that passes either fails with `StreamError::ResponseTooLarge` or `TooManyToolCalls`.
 - `mcp_urls` entries are matched on origin and path: an entry with a path allows that path and what lies below it, one without allows every path of its origin (`provider_base_urls` still allows its path alone).
 - `eval.run` takes at most 256 cases from a tenant (`-32602` beyond that), and its runs are claimed under the server id instead of `linch` (`run_eval_as`).
-- A tenant's `agent.open` error for a reliability-policy problem (`BuildError::Policy`, marked `data.kind` `policy`) is one fixed sentence when the tenant has a `required_policy`, whatever the wording of the core message; before it matched two phrases of that text.
+- A tenant's `agent.open` error for a reliability-policy problem that can involve the operator's rules read with its own (`BuildError::Policy`, marked `data.kind` `policy`: a tool the agent lacks, a cycle, a check that does not compile, a `tool_choice` that defeats the rules) is one fixed sentence when the tenant has a `required_policy`, whatever the wording of the core message, and the original text is logged on the server with the tenant's name; before it matched two phrases of that text. A defect in the text of the tenant's own rule or gate (`BuildError::Invalid`) keeps its message.
 
 ## 0.2.0 - 2026-11-19
 

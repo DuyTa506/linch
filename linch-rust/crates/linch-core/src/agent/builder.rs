@@ -510,7 +510,7 @@ impl AgentBuilder {
                 };
                 let named = final_tool.as_ref().map(|tool| tool.name.as_str());
                 if let Some(problem) = policy.problem(offered, named) {
-                    return Err(BuildError::Policy(problem));
+                    return Err(problem.into());
                 }
                 let choice = self.spec.tool_choice.as_ref();
                 if let Some(problem) = choice.and_then(|c| policy.choice_problem(c, named)) {
