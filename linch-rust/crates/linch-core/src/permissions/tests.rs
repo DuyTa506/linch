@@ -948,6 +948,27 @@ fn a_glob_deny_rule_covers_words_separated_by_other_blanks_or_a_redirect() {
 }
 
 #[test]
+fn a_deny_rule_covers_a_command_behind_a_redirect_before_an_option_argument() {
+    let touch = flat(
+        PermissionMode::SkipDangerous,
+        vec![bash_rule("touch *", Deny)],
+    );
+    for command in [
+        "env -u X touch M",
+        "env 2>&1 -u X touch M",
+        "env -u 2>&1 X touch M",
+        "env -iu >/dev/null X touch M",
+        "env -u > /dev/null X touch M",
+        "time -o 2>&1 f touch M",
+        "exec -a 2>&1 n touch M",
+    ] {
+        assert_eq!(bash(&touch, command), "deny", "{command:?}");
+    }
+    let bare = flat(PermissionMode::SkipDangerous, vec![bash_rule("rm", Deny)]);
+    assert_eq!(bash(&bare, "env -u 2>&1 rm make"), "allow");
+}
+
+#[test]
 fn unparsed_floor_beats_a_generic_allow_in_any_layer_order() {
     let rules = vec![tool("Bash", Allow), bash_rule("rm -rf *", Deny)];
     let engine = flat(PermissionMode::SkipDangerous, rules);

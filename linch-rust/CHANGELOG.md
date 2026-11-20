@@ -6,6 +6,7 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ## Unreleased
 
+- A redirection between a wrapper option (`env -u`, `time -o`, `exec -a`) and its argument no longer makes the argument the command for deny and ask rules.
 - Bash deny and ask rules always match the words of a segment normalised (blanks collapsed, redirections dropped wherever they appear), so `git push *` covers `git  push origin`, `git<TAB>push origin` and `git 2>&1 push origin`.
 - Bash deny and ask rules match each word unquoted while keeping word boundaries, so `git push *` covers `git 'push' origin main` and `rm -rf *` covers `rm '-rf' build`, and a quoted argument stays one word; the docs list `nice`, `nohup`, `setsid`, `timeout` and `xargs` as wrappers a name-based rule does not cover.
 - Bash deny and ask rules read the options and `NAME=value` words of `env`, `time`, `exec` and `command` unquoted, accept bundled short options (`env -iu NAME`, `exec -la NAME`) and unique prefixes of long options (`env --uns NAME`), and no longer take the argument of such an option for the command.

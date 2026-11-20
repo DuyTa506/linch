@@ -374,10 +374,17 @@ fn strip_prefix(segment: &str) -> Command<'_> {
     let mut rest = trim_blanks(segment);
     // The wrapper whose options are being read, and the text from it on.
     let mut wrapper: Option<(String, &str)> = None;
+    // Whether the next word that is not a redirection is an option argument.
+    let mut argument = false;
     loop {
         let end = word_end(rest);
         let word = &rest[..end];
-        let operator = word.trim_start_matches(|c: char| c.is_ascii_digit());
+        let redirection = redirection_len(word);
+        if argument && redirection == 0 {
+            argument = false;
+            rest = trim_blanks(&rest[end..]);
+            continue;
+        }
         if is_array_assignment(word) || is_fd_redirection(word) {
             return Command {
                 text: rest,
@@ -403,7 +410,7 @@ fn strip_prefix(segment: &str) -> Command<'_> {
         {
             match wrapper_option(wrapper, &name) {
                 WrapperOption::Plain => {}
-                WrapperOption::Takes => skip = 2,
+                WrapperOption::Takes => argument = true,
                 WrapperOption::Split => {
                     return Command {
                         text: rest,
@@ -417,11 +424,8 @@ fn strip_prefix(segment: &str) -> Command<'_> {
                     };
                 }
             }
-        } else if operator.starts_with(['<', '>']) {
-            // A bare operator (`>`, `2>&`) takes the next word as its target.
-            if operator.trim_start_matches(['<', '>', '&', '|']).is_empty() {
-                skip = 2;
-            }
+        } else if redirection > 0 {
+            skip = redirection;
         } else {
             return Command {
                 text: rest,
