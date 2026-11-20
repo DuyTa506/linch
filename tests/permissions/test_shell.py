@@ -148,6 +148,8 @@ def test_ansi_c_quoting_cannot_hide_a_segment() -> None:
         ("then ! { rm x", "rm x"),
         ("time -p command -- rm x", "rm x"),
         ("env -i X=1 rm x", "rm x"),
+        ("env -u 2>&1 X rm x", "rm x"),
+        ("env -iu > /dev/null X rm x", "rm x"),
         (">log 2>&1 rm x", "rm x"),
         ("> log < in rm x", "rm x"),
         ("2>&1 rm x", "rm x"),

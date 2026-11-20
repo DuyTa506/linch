@@ -324,3 +324,23 @@ def test_a_quoted_argument_stays_one_word_for_a_glob_deny_rule(command: str) -> 
     rules: list[PermissionRule] = [BashRule("* --force", "deny")]
     assert _bash(rules, command, "skip-dangerous") == "allow"
     assert _bash(rules, "git 'push' '--force'", "skip-dangerous") == "deny"
+
+
+# Source: `a_deny_rule_covers_a_command_behind_a_redirect_before_an_option_argument`.
+@pytest.mark.parametrize(
+    "command",
+    [
+        "env -u X touch M",
+        "env 2>&1 -u X touch M",
+        "env -u 2>&1 X touch M",
+        "env -iu >/dev/null X touch M",
+        "env -u > /dev/null X touch M",
+        "time -o 2>&1 f touch M",
+        "exec -a 2>&1 n touch M",
+    ],
+)
+def test_a_deny_rule_covers_a_command_behind_a_redirect_before_an_option_argument(
+    command: str,
+) -> None:
+    assert _deny_touch(command) == "deny"
+    assert _bash([BashRule("rm", "deny")], "env -u 2>&1 rm make", "skip-dangerous") == "allow"

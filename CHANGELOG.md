@@ -30,6 +30,9 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
   word is matched unquoted (`\rm`, `r""m`) while arguments stay as written, so a deny rule
   `* --force` does not match a commit message that contains `--force`. Allow rules still match
   the segment as written. Regex patterns follow the same rule.
+- After a wrapper option that takes an argument (`env -u`, `time -o`, `exec -a`), Bash deny and ask
+  rules skip redirection words before reading the argument, so `env -u 2>&1 X touch M` is read as
+  `touch M`.
 - A `${` followed by a blank, tab or `|`, inside or outside double quotes, makes the command
   unparsed for Bash rules, since bash 5.3 reads `${ cmd; }` and `${| cmd; }` as command
   substitutions.

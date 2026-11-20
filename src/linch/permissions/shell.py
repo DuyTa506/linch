@@ -359,14 +359,33 @@ def _wrapper_option(wrapper: str, option: str) -> str:
     return "plain" if equals and kind == "takes" else kind
 
 
+def _redirection_len(word: str) -> int:
+    """Return how many words the redirection that ``word`` starts takes.
+
+    0 when it is not one, 2 for a bare operator (``>``, ``2>&``) whose target is the next
+    word, otherwise 1.
+    """
+    operator = word.lstrip(_DIGITS)
+    if not operator.startswith(("<", ">")):
+        return 0
+    return 2 if operator.lstrip("<>&|") == "" else 1
+
+
 def _strip_prefix(segment: str) -> tuple[str, bool]:
     """Return the segment from its command word on and whether that command is opaque."""
     rest = trim_blanks(segment)
     # The wrapper whose options are being read, and the text from it on.
     wrapper: tuple[str, str] | None = None
+    # Whether the next word that is not a redirection is an option argument.
+    argument = False
     while True:
-        word = rest[: _word_end(rest)]
-        operator = word.lstrip(_DIGITS)
+        end = _word_end(rest)
+        word = rest[:end]
+        redirection = _redirection_len(word)
+        if argument and redirection == 0:
+            argument = False
+            rest = trim_blanks(rest[end:])
+            continue
         if _is_array_assignment(word) or _is_fd_redirection(word):
             return rest, True
         plain_assignment = _is_assignment(word)
@@ -383,15 +402,13 @@ def _strip_prefix(segment: str) -> tuple[str, bool]:
         elif wrapper is not None and name.startswith("-"):
             kind = _wrapper_option(wrapper[0], name)
             if kind == "takes":
-                skip = 2
+                argument = True
             elif kind == "split":
                 return rest, True
             elif kind == "query":
                 return wrapper[1], False
-        elif operator.startswith(("<", ">")):
-            # A bare operator (`>`, `2>&`) takes the next word as its target.
-            if operator.lstrip("<>&|") == "":
-                skip = 2
+        elif redirection > 0:
+            skip = redirection
         else:
             return rest, name in ("function", "coproc")
         for _ in range(skip):
