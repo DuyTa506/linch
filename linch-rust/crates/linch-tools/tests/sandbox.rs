@@ -10,6 +10,7 @@ mod common;
 use std::net::TcpListener;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -252,6 +253,45 @@ async fn a_command_cannot_enter_a_new_namespace() {
         let threads = "python3 -c \"import threading; t = threading.Thread(target=print, args=('thread',)); t.start(); t.join()\"";
         assert_eq!(text(run(&tool, threads).await), "thread\n[exit code 0]");
     }
+}
+
+/// System V IPC objects are checked by user id, which is the server's, and
+/// Landlock does not cover them: a command could remove or attach to a
+/// queue or segment another program of that user made.
+#[tokio::test]
+async fn a_command_cannot_remove_a_system_v_queue_made_outside() {
+    let ws = Workspace::new();
+    let Some(backend) = sandbox(&ws, SandboxPolicy::default()) else {
+        return;
+    };
+    let Ok(made) = Command::new("ipcmk").arg("-Q").output() else {
+        return eprintln!("skipped: no ipcmk");
+    };
+    let made = String::from_utf8_lossy(&made.stdout).into_owned();
+    let Some(id) = made
+        .trim()
+        .rsplit(' ')
+        .next()
+        .filter(|id| id.parse::<u32>().is_ok())
+    else {
+        return eprintln!("skipped: ipcmk said {made:?}");
+    };
+    // The kernel's table; `ipcs -i` exits 0 for a missing id.
+    let exists = || {
+        let table = std::fs::read_to_string("/proc/sysvipc/msg").unwrap_or_default();
+        let mut rows = table.lines().skip(1);
+        rows.any(|row| row.split_whitespace().nth(1) == Some(id))
+    };
+    assert!(exists(), "the queue {id} was made");
+    let tool = Bash::in_backend(&backend);
+    let said = any(run(&tool, &format!("ipcrm -q {id}; echo rc=$?")).await);
+    let removed = !exists();
+    let _ = Command::new("ipcrm").args(["-q", id]).status();
+    assert!(
+        said.contains("rc=1"),
+        "ipcrm of queue {id} answered: {said}"
+    );
+    assert!(!removed, "queue {id} is gone though ipcrm answered: {said}");
 }
 
 #[tokio::test]

@@ -107,6 +107,13 @@ tenant trong lúc chạy; khi không còn chỗ, job chờ.
 
 Một client stdio không có tenant và không có giới hạn.
 
+Một tenant không có `max_schedules` lẫn `max_queued_jobs` không bao giờ migrate cơ sở
+dữ liệu, nhưng các lời gọi đọc vẫn dùng được để nó dọn những gì nó đã tạo: `schedule.list`,
+`schedule.delete`, `job.list` và `job.get` đọc các bảng của worker khi chúng tồn tại, ở bất kỳ
+migration nào, và chỉ trả lời như một namespace rỗng khi các bảng không tồn tại. Nếu một
+lời gọi đọc thất bại vì các bảng cũ hơn của server, câu trả lời là một `StoreUnavailable`
+(`-32014`) chung, không nêu bảng, cột hay migration nào.
+
 ## Agent nào chạy nền được
 
 Agent bạn lập lịch cần các store Postgres, không có host tool hay callback, và không có

@@ -15,6 +15,18 @@ use serde::{Deserialize, Serialize};
 /// ids of the runs the workflow's agent calls make.
 pub const MAX_WORKFLOW_ID_BYTES: usize = 256;
 
+/// Fewest distinct call keys a tenant's workflow may keep counters for in
+/// one drive, whatever its `max_records` (a larger `max_records` raises it
+/// to that): a call that failed or suspended journals nothing but keeps its
+/// key, which is a few hundred bytes. Past it a call with a new key is
+/// refused (`-32005`, `kind: call_keys`); replays are never refused.
+///
+/// The same number bounds the steps a tenant's workflow has begun with
+/// `workflow.step.begin` and not completed or abandoned, which the server
+/// keeps a ticket for: past it `workflow.step.begin` is refused (`-32005`,
+/// `kind: pending_steps`). A local connection has neither bound.
+pub const MAX_CALL_KEYS: usize = 10_000;
+
 /// A spending cap shared by every agent call of one workflow.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -211,6 +223,27 @@ pub struct WorkflowStepBegun {
     /// absent for a replayed step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ticket: Option<String>,
+}
+
+/// Params of `workflow.step.abandon`: give back a ticket whose function
+/// failed in the client, so the step is not pending any more. The step
+/// journals nothing and runs again on the next drive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowStepAbandonParams {
+    /// The workflow.
+    pub run_id: String,
+    /// The ticket `workflow.step.begin` gave.
+    pub ticket: String,
+}
+
+/// Result of `workflow.step.abandon`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowStepAbandoned {
+    /// Whether the ticket was pending: `false` for one already completed or
+    /// abandoned, or never given, so giving a ticket back twice is harmless.
+    pub abandoned: bool,
 }
 
 /// Params of `workflow.step.complete`. The result is `{}`.

@@ -88,6 +88,7 @@ impl From<FsError> for ToolOutputError {
             FsError::TooLarge { .. } => "too_large",
             FsError::Changed { .. } | FsError::ChangedWhileReading { .. } => "changed",
             FsError::InvalidQuery(_) => "invalid_query",
+            FsError::TimedOut { .. } => "timed_out",
             FsError::Cancelled => "cancelled",
             FsError::Io { .. } => "io",
         };

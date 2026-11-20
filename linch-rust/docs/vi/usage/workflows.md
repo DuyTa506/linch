@@ -98,7 +98,19 @@ từ chối lần nữa. Hãy đặt `pricing` hoặc giới hạn `max_tokens`.
 
 `parallel`, `settled` và `pipeline` chạy trong client. Mỗi nhánh đếm các lời gọi
 của riêng nó, dưới đường dẫn nhánh của nó, nên các nhánh đến lời gọi của mình
-theo thứ tự khác khi resume vẫn tìm thấy record của chính chúng.
+theo thứ tự khác khi resume vẫn tìm thấy record của chính chúng. Trên một kết nối
+tenant, `name`, `branch` của một lời gọi và `key` của một interrupt, những thứ server
+giữ, dài tối đa 256 byte, như id của workflow (`-32602` nếu vượt); một `key` chỉ được
+băm (của step, của lời gọi agent) thì không bị chặn, kết nối cục bộ cũng vậy.
+
+Một step mà function của nó raise sẽ trả ticket lại: `wf.step` gửi
+`workflow.step.abandon` trước khi raise lại, nên một workflow bắt các step thất bại
+(để fallback, hoặc trong một fan-out `settled`) không bao giờ hết chỗ. Trên một kết nối
+tenant, một workflow cũng giữ tối đa 10.000 step đang chờ (cùng con số với call key
+ở trên, hoặc `max_records` nếu lớn hơn; `-32005`, `kind: pending_steps`), không tính
+vào `max_records`, nên một client không bao giờ trả ticket (client có từ trước lời gọi
+này) không thể ghim bộ nhớ; kết nối cục bộ không có mức trần này, và một fan-out rộng
+bao nhiêu cũng có thể đang chạy. Server bỏ mọi ticket khi kết nối kết thúc.
 
 ## Replay hoạt động thế nào
 
@@ -226,8 +238,15 @@ lên và đặt các mức trần:
 | `max_workflows` | 4 | Số workflow tenant drive cùng lúc, qua mọi kết nối của nó (`-32005`, `kind: workflows`) |
 | `max_records` | 10000 | Số record journal của một workflow, tính cả replay (`-32005`, `kind: journal_records`); được kiểm tra trước khi một lời gọi tiêu tiền |
 | `max_fan_out` | 8 | Số lời gọi agent của một workflow đang chạy cùng lúc (`-32005`, `kind: agent_calls_in_flight`); client hạ `max_concurrency` của nó xuống mức này |
-| `max_record_bytes` | 1 MiB | Giá trị JSON của một record |
+| `max_record_bytes` | 1 MiB | Giá trị JSON của một record, và payload của một interrupt (mà status đã lưu của workflow giữ), bị từ chối với `kind: bytes_in_an_interrupt_payload` |
 | `max_tokens`, `max_cost_usd` | không có | Một mức trần cho `budget` của workflow; workflow không có budget sẽ nhận nó, và workflow xin nhiều hơn bị từ chối (`-32004`, `kind: workflow_budget`) |
+
+Dù `max_records` là bao nhiêu, server giữ bộ đếm cho tối đa 10.000 call key khác
+nhau trong mỗi lần drive một workflow (nhiều hơn nếu `max_records` lớn hơn): một
+lời gọi thất bại, hay một interrupt đã suspend, không ghi journal gì nhưng vẫn giữ
+key của nó. Vượt mức đó thì lời gọi với một key mới bị từ chối (`-32005`, `kind:
+call_keys`); lời gọi replay một record thì không bao giờ bị từ chối. Các key này
+không tính vào `max_records`.
 
 Mỗi lời gọi agent đang chạy cũng chiếm một chỗ trong `max_runs` của tenant. Mỗi
 workflow giữ một kết nối cơ sở dữ liệu trong suốt thời gian hold của nó, nên

@@ -364,12 +364,24 @@ class WorkflowContext:
         if begun["replayed"]:
             return begun.get("value")
         timeout = timeout_ms if timeout_ms is not None else self._step_timeout_ms
-        value = await _attempts(name, fn, timeout, retry)
-        # The value a replay would give: encoding refuses NaN and non-JSON.
-        value = json.loads(json.dumps(value, allow_nan=False))
-        await self._call(
-            "workflow.step.complete", {"ticket": begun["ticket"], "value": value}, branch=False
-        )
+        ticket = begun["ticket"]
+        try:
+            value = await _attempts(name, fn, timeout, retry)
+            # The value a replay would give: encoding refuses NaN and non-JSON.
+            value = json.loads(json.dumps(value, allow_nan=False))
+        except BaseException:
+            # `fn` failed (or was cancelled): give the ticket back, so the
+            # step does not stay pending for the rest of the drive. A server
+            # that predates `workflow.step.abandon` just keeps it until the
+            # workflow finishes.
+            with contextlib.suppress(LinchError):
+                await asyncio.shield(
+                    self._conn.request(
+                        "workflow.step.abandon", {"run_id": self._run_id, "ticket": ticket}
+                    )
+                )
+            raise
+        await self._call("workflow.step.complete", {"ticket": ticket, "value": value}, branch=False)
         return value
 
     async def interrupt(self, key: str, payload: Any = None) -> Any:
