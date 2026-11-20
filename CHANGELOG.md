@@ -9,6 +9,15 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
 
 ### Fixed
 
+- Bash rules treat more shell syntax as unparsed: such a command can still be denied or asked, and
+  is never allowed by a Bash rule. This adds `&>`, `|&`, `&` after an escaped or quoted `<` or `>`,
+  `>&` onto a file, an unquoted `#` at the start of a word, here-documents, `>|`, a `${...}` inside
+  double quotes whose body holds a quote, a backslash or a nested `${`, a `$` expansion, brace
+  expansion, `function` or `coproc` in command position, `a[0]=1`, a `{name}>` redirection and
+  `env -S`. A deny rule that follows a non-matching deny rule now also denies such a command.
+  Words are separated by space and tab only, and inside double quotes a backslash is kept before
+  any character except `$`, backtick, `"`, `\` and newline, so a pattern such as `cat "a\nb"`
+  matches only that text.
 - The compaction summary no longer loses early content. The summary request ended with the
   folded history's last user message, which the model answered ("Acknowledged. Received log
   excerpt 2...") instead of summarizing. It now ends with one user message carrying a guard

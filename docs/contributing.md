@@ -414,6 +414,7 @@ src/linch/permissions/keys.py
 src/linch/permissions/principal.py
 src/linch/permissions/rules.py
 src/linch/permissions/ruleset.py
+src/linch/permissions/shell.py
 src/linch/pricing.py
 src/linch/profiles.py
 src/linch/providers/__init__.py
@@ -572,6 +573,8 @@ tests/observability/test_trace_id.py
 tests/permissions/test_principal_roles.py
 tests/permissions/test_rules.py
 tests/permissions/test_ruleset.py
+tests/permissions/test_shell.py
+tests/permissions/test_shell_rules.py
 tests/providers/test_anthropic_provider.py
 tests/providers/test_client_loop_affinity.py
 tests/providers/test_deepseek_provider.py

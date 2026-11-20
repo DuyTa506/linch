@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import fnmatch
 import re
 from pathlib import Path
 from typing import Any, Literal, TypeAlias, cast
+
+from .shell import has_unparsed_construct, pattern_matches, split_composite, trim_blanks
 
 RuleDecision = Literal["allow", "deny", "ask", "passthrough"]
 BashPattern: TypeAlias = str | dict[str, str]
@@ -255,7 +256,7 @@ def match_path_rule(
 
 
 def match_bash_rule(rule: BashRule, command_segment: str) -> bool:
-    segment = command_segment.strip()
+    segment = trim_blanks(command_segment)
     if isinstance(rule.pattern, list):
         return any(_match_bash_pattern(pattern, segment) for pattern in rule.pattern)
     return _match_bash_pattern(rule.pattern, segment)
@@ -263,12 +264,7 @@ def match_bash_rule(rule: BashRule, command_segment: str) -> bool:
 
 def _match_bash_pattern(pattern: str | dict[str, str], segment: str) -> bool:
     if isinstance(pattern, str):
-        if fnmatch.fnmatch(segment, pattern):
-            return True
-        return _tokens_start_with(
-            tokenize_shell_prefix(segment),
-            tokenize_shell_prefix(pattern),
-        )
+        return pattern_matches(pattern, segment)
     try:
         compiled = re.compile(pattern["regex"])
         return compiled.search(segment) is not None
@@ -290,17 +286,16 @@ def evaluate_bash_rules(
         The matched decision, an ask floor for unparsed commands, or ``None``
         when the rules abstain.
     """
-    if _contains_unparsed_shell_construct(command):
-        stripped = command.strip()
+    if has_unparsed_construct(command):
         if any(
-            rule.decision == "deny" and _match_unparsed_bash_rule(rule, stripped) for rule in rules
+            rule.decision == "deny" and _match_unparsed_bash_rule(rule, command) for rule in rules
         ):
             return "deny"
         if any(rule.decision in {"allow", "ask", "deny"} for rule in rules):
             return "ask"
         return None
 
-    segments = [s for s in split_composite_command(command) if s.strip() != ""]
+    segments = [s for s in split_composite(command) if trim_blanks(s) != ""]
     if not segments:
         return None
     all_allowed = True
@@ -316,88 +311,6 @@ def evaluate_bash_rules(
     if saw_ask:
         return "ask"
     return "allow" if all_allowed else None
-
-
-def tokenize_shell_prefix(input_str: str) -> list[str]:
-    tokens: list[str] = []
-    current = ""
-    quote: str | None = None
-    in_token = False
-    i = 0
-    while i < len(input_str):
-        char = input_str[i]
-        if quote == "'":
-            if char == "'":
-                quote = None
-            else:
-                current += char
-            i += 1
-            continue
-        if quote == '"':
-            if char == '"':
-                quote = None
-            elif char == "\\" and i + 1 < len(input_str):
-                i += 1
-                current += input_str[i]
-            else:
-                current += char
-            i += 1
-            continue
-        if char.isspace():
-            if in_token:
-                tokens.append(current)
-                current = ""
-                in_token = False
-            i += 1
-            continue
-        in_token = True
-        if char == "'" or char == '"':
-            quote = char
-        elif char == "\\" and i + 1 < len(input_str):
-            i += 1
-            current += input_str[i]
-        else:
-            current += char
-        i += 1
-    if in_token:
-        tokens.append(current)
-    return tokens
-
-
-def split_composite_command(input_str: str) -> list[str]:
-    segments: list[str] = []
-    start = 0
-    quote: str | None = None
-    escaped = False
-    i = 0
-    while i < len(input_str):
-        char = input_str[i]
-        if escaped:
-            escaped = False
-            i += 1
-            continue
-        if quote != "'" and char == "\\":
-            escaped = True
-            i += 1
-            continue
-        if quote is not None:
-            if char == quote:
-                quote = None
-            i += 1
-            continue
-        if char == "'" or char == '"':
-            quote = char
-            i += 1
-            continue
-        op_len = _composite_operator_length(input_str, i)
-        if op_len > 0:
-            segments.append(input_str[start:i])
-            i += op_len
-            start = i
-        else:
-            i += 1
-    segments.append(input_str[start:])
-    return segments
 
 
 def _path_input_for_tool(tool: str, input: dict[str, Any], cwd: str) -> str | None:
@@ -471,72 +384,7 @@ def _normalize_for_glob(value: str) -> str:
 
 
 def _match_unparsed_bash_rule(rule: BashRule, command: str) -> bool:
-    if isinstance(rule.pattern, list):
-        return any(_match_bash_pattern(pattern, command) for pattern in rule.pattern)
-    return _match_bash_pattern(rule.pattern, command)
-
-
-def _contains_unparsed_shell_construct(command: str) -> bool:
-    """Return whether a command contains shell syntax this parser cannot model."""
-    quote: str | None = None
-    escaped = False
-    i = 0
-    while i < len(command):
-        char = command[i]
-        if escaped:
-            if char in "\r\n":
-                return True
-            escaped = False
-            i += 1
-            continue
-        if quote != "'" and char == "\\":
-            escaped = True
-            i += 1
-            continue
-        if quote == "'":
-            if char == "'":
-                quote = None
-            i += 1
-            continue
-        if quote == '"':
-            if char == '"':
-                quote = None
-                i += 1
-                continue
-            if char == "`" or command[i : i + 2] == "$(":
-                return True
-            i += 1
-            continue
-        if char == "'" or char == '"':
-            quote = char
-            i += 1
-            continue
-        if char in "\r\n" or char == "`":
-            return True
-        if command[i : i + 2] == "$(":
-            return True
-        if command[i : i + 2] in {"<(", ">("}:
-            return True
-        if char in "()":
-            return True
-        if char == "&":
-            next_char = command[i + 1 : i + 2]
-            previous_char = command[i - 1 : i]
-            if next_char == ">" or previous_char in {"<", ">"}:
-                i += 1
-                continue
-            if next_char == "&":
-                i += 2
-                continue
-            return True
-        i += 1
-    return escaped or quote is not None
-
-
-def _tokens_start_with(tokens: list[str], prefix: list[str]) -> bool:
-    if not prefix or len(prefix) > len(tokens):
-        return False
-    return all(tokens[i] == prefix[i] for i in range(len(prefix)))
+    return match_bash_rule(rule, command)
 
 
 def _first_matching_bash_decision(
@@ -564,15 +412,3 @@ def _validate_role(role: str | None, name: str) -> str | None:
     if not role.strip():
         raise ValueError(f"{name} must be a non-empty string")
     return role
-
-
-def _composite_operator_length(input_str: str, index: int) -> int:
-    char = input_str[index : index + 1]
-    if not char:
-        return 0
-    next_char = input_str[index + 1 : index + 2]
-    if (char == "&" and next_char == "&") or (char == "|" and next_char == "|"):
-        return 2
-    if char == ";" or char == "|":
-        return 1
-    return 0

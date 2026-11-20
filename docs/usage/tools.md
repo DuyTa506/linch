@@ -689,6 +689,21 @@ The three rule types target different things:
 | `PathRule` | File paths (glob) | `*`/`?` do **not** cross `/`; `**` does. Anchored regex match. |
 | `BashRule` | Bash command | String patterns use fnmatch and token-prefix matching; `{"regex": "..."}` patterns use `re.search`. |
 
+How Bash rules read a command:
+
+- A composite command is split at unquoted `;`, `&&`, `||` and `|`, and each
+  segment takes the first rule that matches it. Words are separated by space and
+  tab only, and inside double quotes a backslash is dropped only before `$`,
+  backtick, `"`, `\` and newline, as in bash.
+- A command the splitter cannot model can be denied or asked by rules but never
+  allowed by one. That covers `$(...)` and backticks, a background `&` or `&>`,
+  `|&`, `>&file`, a `#` comment, a here-document (`<<`, `<<-`), `>|`, a newline,
+  a `${...}` in double quotes whose body holds a quote or a backslash, `env -S`,
+  and a command position that is a `$` expansion, a brace expansion
+  (`{rm,-rf}`), `function`, `coproc`, an array assignment (`a[0]=1`) or a
+  `{fd}>file` redirection. A here-string (`<<<`) and a descriptor duplication
+  (`2>&1`, `>&2`, `<&3`, `>&-`) are modelled.
+
 When no rule matches, read-scoped tools and the four task tools are allowed in
 every mode. The remaining defaults are:
 

@@ -687,6 +687,21 @@ Ba loại rule nhắm đến các đối tượng khác nhau:
 | `PathRule` | Đường dẫn tệp (glob) | `*`/`?` **không** đi qua `/`; `**` thì có. Khớp regex có neo. |
 | `BashRule` | Lệnh Bash | Pattern string dùng fnmatch và token-prefix matching; pattern `{"regex": "..."}` dùng `re.search`. |
 
+Cách Bash rule đọc một lệnh:
+
+- Lệnh ghép được tách tại `;`, `&&`, `||` và `|` không nằm trong dấu nháy, và
+  mỗi đoạn lấy rule khớp đầu tiên. Từ chỉ được phân tách bằng dấu cách và tab;
+  trong dấu nháy kép, dấu `\` chỉ bị bỏ trước `$`, dấu backtick, `"`, `\` và
+  xuống dòng, như trong bash.
+- Một lệnh mà bộ tách không mô hình hóa được có thể bị rule từ chối hoặc hỏi,
+  nhưng không bao giờ được rule cho phép. Gồm `$(...)` và backtick, `&` chạy nền
+  hoặc `&>`, `|&`, `>&file`, chú thích `#`, here-document (`<<`, `<<-`), `>|`,
+  xuống dòng, `${...}` trong dấu nháy kép có chứa dấu nháy hoặc `\`, `env -S`,
+  và vị trí lệnh là một khai triển `$`, khai triển ngoặc (`{rm,-rf}`),
+  `function`, `coproc`, phép gán phần tử mảng (`a[0]=1`) hoặc chuyển hướng
+  `{fd}>file`. Here-string (`<<<`) và nhân đôi descriptor (`2>&1`, `>&2`, `<&3`,
+  `>&-`) được mô hình hóa.
+
 Khi không rule nào khớp, tool scope read và bốn task tool được cho phép ở mọi
 mode. Các mặc định còn lại là:
 
