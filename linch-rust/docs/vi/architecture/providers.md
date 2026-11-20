@@ -355,7 +355,9 @@ cho biết response đã hoàn tất chưa; `close` xử lý một body kết th
   chưa kết thúc, không được vượt `MAX_EVENT_BYTES` (16 MiB, `sse.rs:25`; event
   thật lớn nhất là event kết thúc của Responses, lặp lại toàn bộ output, khoảng
   2 MiB cho một câu trả lời 128 000 token), và một byte không phải UTF-8 làm
-  lời gọi thất bại ngay khi được đọc. Cả hai là lỗi `Transport`;
+  lời gọi thất bại ngay khi được đọc. Cả hai là lỗi `Transport` và đều đến sau các
+  event mà cùng chunk đó đã hoàn tất trước lỗi, nên kết quả không phụ thuộc vào chỗ
+  chunk kết thúc;
 - kiểm tra cancel token trước mỗi lần đọc và cho lần đọc chạy đua với nó;
 - khi response đã hoàn tất, yield những gì đang xếp hàng kể cả khi một lệnh hủy
   đến, để phần kết thúc và usage của nó không bị mất (`sse.rs:242`);

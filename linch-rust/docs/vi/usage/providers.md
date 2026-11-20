@@ -518,7 +518,8 @@ adapter có timeout kết nối 30 giây và timeout đọc giữa các lần đ
 600 giây); không có hạn chót cho cả một lời gọi. Hai giới hạn khác áp dụng cho
 một response dạng stream: một event giữ tối đa 16 MiB (tính từ cuối event trước,
 gồm cả một dòng không có điểm kết thúc), và một body không phải UTF-8 hợp lệ làm
-lời gọi thất bại tại byte sai đầu tiên; cả hai kết thúc lời gọi bằng lỗi
+lời gọi thất bại tại byte sai đầu tiên, sau khi mọi event mà body đã hoàn tất trước
+lỗi đó được giao đi (nên kết quả không phụ thuộc vào chỗ mạng cắt chunk); cả hai kết thúc lời gọi bằng lỗi
 `transport`, loại lỗi được thử lại. Văn bản lỗi mà provider gửi trong stream bị
 cắt còn 500 ký tự, giống một body lỗi HTTP, sau khi key của provider, các giá trị
 header và cache salt đã được loại khỏi nó.

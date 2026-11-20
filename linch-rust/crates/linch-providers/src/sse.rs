@@ -23,6 +23,15 @@ use crate::request::ErrorScrub;
 /// body that never ends an event.
 pub(crate) const MAX_EVENT_BYTES: usize = 16 * 1024 * 1024;
 
+/// Why a body cannot be framed into events.
+#[derive(Debug, Error)]
+enum FrameError {
+    #[error("an event stream passed {MAX_EVENT_BYTES} bytes without the end of an event")]
+    TooLarge,
+    #[error("the event stream is not valid UTF-8")]
+    NotUtf8,
+}
+
 /// One response's wire format, fed one SSE event at a time.
 pub(crate) trait Decoder: Send + 'static {
     /// Translate one non-blank `data:` payload into `out`. Returns `true`
@@ -38,15 +47,6 @@ pub(crate) trait Decoder: Send + 'static {
     fn close(&mut self, out: &mut VecDeque<ProviderEvent>) -> Result<(), ProviderError>;
 }
 
-/// Why a body cannot be framed into events.
-#[derive(Debug, Error)]
-enum FrameError {
-    #[error("an event stream passed {MAX_EVENT_BYTES} bytes without the end of an event")]
-    TooLarge,
-    #[error("the event stream is not valid UTF-8")]
-    NotUtf8,
-}
-
 /// The `data:` lines of the event being read.
 #[derive(Default)]
 struct Pending {
@@ -60,11 +60,12 @@ impl Pending {
     fn line(&mut self, line: &str) {
         let (field, value) = line.split_once(':').unwrap_or((line, ""));
         if field == "data" {
+            let value = value.strip_prefix(' ').unwrap_or(value);
             if self.any {
                 self.data.push('\n');
             }
             self.any = true;
-            self.data.push_str(value.strip_prefix(' ').unwrap_or(value));
+            self.data.push_str(value);
         }
     }
 
@@ -78,7 +79,9 @@ impl Pending {
 /// or CR, a leading byte order mark is dropped, and a blank line ends an
 /// event. The buffer is read through a cursor and compacted once per
 /// chunk, so the cost is linear in the bytes, and it never holds more than
-/// [`MAX_EVENT_BYTES`] of one event.
+/// [`MAX_EVENT_BYTES`] of one event. The events a chunk completes before a
+/// failure in it (a byte that is not UTF-8, or the bound) are handed over
+/// before the error, so the result does not depend on where chunks end.
 #[derive(Default)]
 struct Framer {
     buf: Vec<u8>,
@@ -101,15 +104,24 @@ struct Framer {
 impl Framer {
     const BOM: &'static [u8] = b"\xef\xbb\xbf";
 
-    /// Add one body chunk; the data of each event it ends goes to `out`.
+    /// Add one body chunk; the data of each event it ends goes to `out`,
+    /// also when the chunk fails.
     fn push(&mut self, chunk: &[u8], out: &mut VecDeque<String>) -> Result<(), FrameError> {
         self.buf.extend_from_slice(chunk);
-        match std::str::from_utf8(&self.buf[self.valid..]) {
-            Ok(_) => self.valid = self.buf.len(),
-            Err(err) if err.error_len().is_none() => self.valid += err.valid_up_to(),
-            Err(_) => return Err(FrameError::NotUtf8),
-        }
+        let bad = match std::str::from_utf8(&self.buf[self.valid..]) {
+            Ok(_) => {
+                self.valid = self.buf.len();
+                false
+            }
+            Err(err) => {
+                self.valid += err.valid_up_to();
+                err.error_len().is_some()
+            }
+        };
         self.read_lines(out)?;
+        if bad {
+            return Err(FrameError::NotUtf8);
+        }
         self.buf.drain(..self.start);
         self.scanned -= self.start;
         self.valid -= self.start;
@@ -148,11 +160,11 @@ impl Framer {
                 }
                 self.skip_lf = false;
             }
-            let Some(at) = self.buf[self.scanned..]
+            let Some(at) = self.buf[self.scanned..self.valid]
                 .iter()
                 .position(|byte| matches!(byte, b'\n' | b'\r'))
             else {
-                self.scanned = self.buf.len();
+                self.scanned = self.valid;
                 return Ok(());
             };
             let end = self.scanned + at;
@@ -180,6 +192,8 @@ struct State<S, D> {
     framer: Framer,
     /// The data of events framed but not yet decoded.
     frames: VecDeque<String>,
+    /// Why framing stopped; the error follows the events framed before it.
+    framing: Option<FrameError>,
     /// The byte stream has ended and the framer has been flushed.
     ended: bool,
     decoder: D,
@@ -191,8 +205,9 @@ struct State<S, D> {
 
 /// Drive `decoder` over an SSE byte stream until the response completes,
 /// an error or `cancel`. One event may hold [`MAX_EVENT_BYTES`]; a stream
-/// that passes it, or that is not UTF-8, fails with a `Transport` error.
-/// Error text is scrubbed of the secrets `scrub` names and cut to
+/// that passes it, or that is not UTF-8, fails with a `Transport` error after
+/// the events framed before the fault. Error text is scrubbed of the
+/// secrets `scrub` names and cut to
 /// [`MAX_ERROR_CHARS`](crate::request::MAX_ERROR_CHARS), in that order, and
 /// nothing is yielded after an error.
 pub(crate) fn events<D, S, B, E>(
@@ -211,6 +226,7 @@ where
         bytes: Box::pin(bytes),
         framer: Framer::default(),
         frames: VecDeque::new(),
+        framing: None,
         ended: false,
         decoder,
         pending: VecDeque::new(),
@@ -255,6 +271,10 @@ where
                 }
                 Err(err) => err,
             }
+        } else if let Some(err) = state.framing.take() {
+            ProviderError::Transport {
+                message: err.to_string(),
+            }
         } else if state.ended {
             state.done = true;
             match state.decoder.close(&mut state.pending) {
@@ -266,28 +286,20 @@ where
                 None => ProviderError::Cancelled,
                 Some(None) => {
                     state.ended = true;
-                    match state.framer.finish(&mut state.frames) {
-                        Ok(()) => continue,
-                        Err(err) => transport(err),
-                    }
+                    state.framing = state.framer.finish(&mut state.frames).err();
+                    continue;
                 }
-                Some(Some(Err(err))) => transport(err),
+                Some(Some(Err(err))) => ProviderError::Transport {
+                    message: err.to_string(),
+                },
                 Some(Some(Ok(chunk))) => {
-                    match state.framer.push(chunk.as_ref(), &mut state.frames) {
-                        Ok(()) => continue,
-                        Err(err) => transport(err),
-                    }
+                    state.framing = state.framer.push(chunk.as_ref(), &mut state.frames).err();
+                    continue;
                 }
             }
         };
         let failure = state.scrub.error(failure);
         return Some(Err(stop(state, failure)));
-    }
-}
-
-fn transport(err: impl Display) -> ProviderError {
-    ProviderError::Transport {
-        message: err.to_string(),
     }
 }
 

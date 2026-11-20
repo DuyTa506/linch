@@ -1,6 +1,7 @@
 //! The SSE loop: framing grammar, the bound on one event, and the cut on
 //! in-stream error text.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -9,7 +10,7 @@ use futures::{Stream, StreamExt};
 use linch_core::{Message, Provider, ProviderError, ProviderEvent, ProviderRequest};
 use tokio_util::sync::CancellationToken;
 
-use super::{Decoder, MAX_EVENT_BYTES, events};
+use super::{Decoder, Framer, MAX_EVENT_BYTES, events};
 use crate::openai_compat::stream::{ReasoningField, Translator};
 use crate::request::MAX_ERROR_CHARS;
 use crate::test_server::serve_once;
@@ -413,4 +414,159 @@ async fn a_responses_error_event_is_cut_like_an_http_error_body() {
         "the in-stream error text is {} bytes",
         message(err).len()
     );
+}
+
+// ---- framing is independent of where chunks end
+
+/// What the framer yields for `pieces`: the data of each event, in order,
+/// and the error that ended the framing, if any. Events completed before
+/// a failure are kept, as the loop delivers them before the error.
+fn framed_until_error(pieces: &[&[u8]]) -> (Vec<String>, Option<String>) {
+    let mut framer = Framer::default();
+    let mut out = VecDeque::new();
+    let mut frames = Vec::new();
+    for piece in pieces {
+        let result = framer.push(piece, &mut out);
+        frames.extend(out.drain(..));
+        if let Err(err) = result {
+            return (frames, Some(err.to_string()));
+        }
+    }
+    let result = framer.finish(&mut out);
+    frames.extend(out.drain(..));
+    (frames, result.err().map(|err| err.to_string()))
+}
+
+/// `body` whole and cut in two at every position gives one result.
+fn assert_same_at_every_split(body: &[u8], step: usize) -> (Vec<String>, Option<String>) {
+    let whole = framed_until_error(&[body]);
+    for cut in (0..=body.len()).step_by(step) {
+        assert_eq!(
+            framed_until_error(&[&body[..cut], &body[cut..]]),
+            whole,
+            "{:?} cut at {cut}",
+            String::from_utf8_lossy(body)
+        );
+    }
+    whole
+}
+
+#[test]
+fn the_events_before_a_bad_byte_are_delivered_however_the_body_is_cut() {
+    let (frames, error) = assert_same_at_every_split(b"data: a\n\ndata: b\n\n\xffdata: c\n\n", 1);
+    assert_eq!(frames, ["a", "b"]);
+    assert!(error.is_some());
+    // The bad byte inside a line that has not ended, and at the very end.
+    let (frames, error) = assert_same_at_every_split(b"data: a\n\ndata: b\xffc\n\n", 1);
+    assert_eq!((frames, error.is_some()), (vec!["a".to_owned()], true));
+    let (frames, error) = assert_same_at_every_split(b"data: a\n\n\xff", 1);
+    assert_eq!((frames, error.is_some()), (vec!["a".to_owned()], true));
+    // A character that the body ends in the middle of.
+    let (frames, error) = assert_same_at_every_split(b"data: a\n\ndata: \xe2\x82", 1);
+    assert_eq!((frames, error.is_some()), (vec!["a".to_owned()], true));
+}
+
+#[test]
+fn the_events_before_the_bound_are_delivered_however_the_body_is_cut() {
+    let mut body = b"data: a\n\ndata: b\n\ndata: ".to_vec();
+    body.resize(body.len() + MAX_EVENT_BYTES, b'x');
+    let whole = framed_until_error(&[&body]);
+    assert_eq!(whole.0, ["a", "b"]);
+    assert!(whole.1.is_some());
+    for cut in [0, 1, 8, 9, 10, 17, 18, 24, 1024, 1 << 20, body.len() - 1] {
+        assert_eq!(
+            framed_until_error(&[&body[..cut], &body[cut..]]),
+            whole,
+            "cut at {cut}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_loop_delivers_the_events_before_the_bound_and_then_the_error() {
+    let mut body = b"data: a\n\ndata: b\n\ndata: ".to_vec();
+    body.resize(body.len() + MAX_EVENT_BYTES, b'x');
+    let items: Vec<_> = events(
+        pieces(&body, body.len()),
+        Echo,
+        CancellationToken::new(),
+        None::<ApiKey>,
+    )
+    .collect()
+    .await;
+    assert_eq!(items.len(), 3, "{items:?}");
+    assert!(items[..2].iter().all(Result::is_ok));
+    assert!(items[2].is_err());
+}
+
+fn chat_body() -> String {
+    "data: {\"model\":\"m\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n\
+     data: {\"model\":\"m\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+     data: [DONE]\n\n"
+        .to_owned()
+}
+
+#[tokio::test]
+async fn a_complete_response_is_not_failed_by_a_bad_byte_after_its_end_marker() {
+    let mut body = chat_body().into_bytes();
+    body.push(0xff);
+    let bytes = futures::stream::iter([Ok::<_, std::io::Error>(body)]);
+    let items: Vec<_> = events(bytes, chat(), CancellationToken::new(), None::<ApiKey>)
+        .collect()
+        .await;
+    assert!(items.iter().all(Result::is_ok), "{items:?}");
+    assert!(matches!(
+        items.last(),
+        Some(Ok(ProviderEvent::MessageEnd(_)))
+    ));
+}
+
+#[tokio::test]
+async fn a_response_gives_the_same_items_wherever_a_bad_byte_chunk_ends() {
+    let mut body = chat_body().into_bytes();
+    let complete = body.len();
+    body.extend_from_slice(b"data: x\n\n\xff");
+    let run = |pieces: Vec<Vec<u8>>| async move {
+        let bytes = futures::stream::iter(pieces.into_iter().map(Ok::<_, std::io::Error>));
+        events(bytes, chat(), CancellationToken::new(), None::<ApiKey>)
+            .map(|item| format!("{item:?}"))
+            .collect::<Vec<_>>()
+            .await
+    };
+    let whole = run(vec![body.clone()]).await;
+    for cut in [1, 20, complete - 1, complete, complete + 5, body.len() - 1] {
+        let pieces = vec![body[..cut].to_vec(), body[cut..].to_vec()];
+        assert_eq!(run(pieces).await, whole, "cut at {cut}");
+    }
+}
+
+// ---- every adapter's fixtures frame the same at every split
+
+const FIXTURES: [&str; 12] = [
+    include_str!("../../tests/fixtures/anthropic_text_thinking.sse"),
+    include_str!("../../tests/fixtures/anthropic_parallel_tools.sse"),
+    include_str!("../../tests/fixtures/anthropic_edge.sse"),
+    include_str!("../../tests/fixtures/deepseek_text_thinking.sse"),
+    include_str!("../../tests/fixtures/deepseek_parallel_tools.sse"),
+    include_str!("../../tests/fixtures/openai_chat_tools.sse"),
+    include_str!("../../tests/fixtures/responses_text.sse"),
+    include_str!("../../tests/fixtures/responses_reasoning_tools.sse"),
+    include_str!("../../tests/fixtures/gemini_text_thinking.sse"),
+    include_str!("../../tests/fixtures/gemini_parallel_calls.sse"),
+    include_str!("../../tests/fixtures/vllm_reasoning_tools.sse"),
+    include_str!("../../tests/fixtures/llamacpp_reasoning_tools.sse"),
+];
+
+#[test]
+fn the_recorded_streams_of_every_wire_frame_the_same_at_every_two_way_split() {
+    for (n, fixture) in FIXTURES.iter().enumerate() {
+        for (ends, step) in [("\n", 1), ("\r\n", 5), ("\r", 5)] {
+            let body = fixture.replace('\n', ends).into_bytes();
+            let (frames, error) = assert_same_at_every_split(&body, step);
+            assert!(
+                error.is_none() && !frames.is_empty(),
+                "fixture {n}: {error:?}"
+            );
+        }
+    }
 }
