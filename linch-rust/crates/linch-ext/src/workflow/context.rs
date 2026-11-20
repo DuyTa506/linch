@@ -175,13 +175,15 @@ impl WorkflowContext {
         let seen = journal.counters.get(&key).copied();
         let occurrence = seen.unwrap_or_default();
         let cached = journal.records.get(&(key.clone(), occurrence)).cloned();
-        if let Some(max) = self.inner.max_records {
-            if seen.is_none() && cached.is_none() && journal.counters.len() as u64 >= max {
-                return Err(WorkflowError::LimitExceeded {
-                    what: "journal records",
-                    max,
-                });
-            }
+        if let Some(max) = self.inner.max_records
+            && seen.is_none()
+            && cached.is_none()
+            && journal.counters.len() as u64 >= max
+        {
+            return Err(WorkflowError::LimitExceeded {
+                what: "journal records",
+                max,
+            });
         }
         journal.counters.insert(key.clone(), occurrence + 1);
         Ok((key, occurrence, cached))
