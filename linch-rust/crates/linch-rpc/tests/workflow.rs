@@ -943,10 +943,10 @@ async fn a_workflow_is_resumed_only_by_the_principal_it_started_with() {
 /// A test of the workflow calls ends in a few seconds or fails: a call that
 /// is never answered is a defect, not a slow test.
 async fn within<F: std::future::Future>(future: F) -> F::Output {
-    let limit = Duration::from_secs(20);
+    let limit = Duration::from_secs(60);
     tokio::time::timeout(limit, future)
         .await
-        .expect("the test did not finish in 20 s")
+        .expect("the test did not finish in 60 s")
 }
 
 /// A tenant on a memory-journal agent with `max_records` records, its
@@ -1123,23 +1123,57 @@ async fn a_workflow_holds_a_bounded_number_of_pending_steps() {
     .await;
 }
 
-/// Interrupts that suspend journal nothing but still count their keys
-/// (replaced by the key cap in its own test below).
+/// An agent call that fails journals nothing and a suspended interrupt
+/// journals nothing: neither uses up `max_records`, which counts records.
 #[tokio::test]
-async fn interrupts_that_suspend_count_their_keys_against_max_records() {
+async fn failed_agent_calls_and_suspended_interrupts_do_not_use_up_the_journal() {
     within(async {
         let (rpc, _) = capped_tenant(4).await;
+        for number in 0..4 {
+            // The scripted provider has no turn left, so the call fails.
+            let params = json!({"run_id": "w", "prompt": format!("p{number}")});
+            let failed = rpc.call(method::WORKFLOW_AGENT, params).await;
+            assert!(failed.is_err(), "control: the agent call fails");
+        }
         for number in 0..4 {
             let params = json!({"run_id": "w", "key": format!("k{number}")});
             let asked = rpc.call(method::WORKFLOW_INTERRUPT, params).await.unwrap();
             assert_eq!(asked["suspended"], json!(true));
         }
-        let params = json!({"run_id": "w", "key": "k4"});
+        let params = json!({"run_id": "w", "name": "report"});
+        let begun = rpc.call(method::WORKFLOW_STEP_BEGIN, params).await;
+        assert!(
+            begun.is_ok(),
+            "the journal holds 0 of 4 records and the next step is refused: {}",
+            begun.unwrap_err()
+        );
+    })
+    .await;
+}
+
+/// What those calls keep (one counter key each) is bounded on its own:
+/// `MAX_CALL_KEYS` distinct keys, past which a call with a new key is
+/// refused; keys that replay a record never are.
+#[tokio::test]
+async fn a_workflow_holds_a_bounded_number_of_call_keys() {
+    within(async {
+        let (mut rpc, _) = capped_tenant(linch_rpc::protocol::MAX_CALL_KEYS as u64).await;
+        for number in 0..linch_rpc::protocol::MAX_CALL_KEYS {
+            if number % 256 == 0 {
+                rpc.drain_notifications().await;
+            }
+            let params = json!({"run_id": "w", "key": format!("k{number}")});
+            rpc.call(method::WORKFLOW_INTERRUPT, params).await.unwrap();
+        }
+        let params = json!({"run_id": "w", "key": "one-more"});
         let (kind, data) = code_of_call(rpc.call(method::WORKFLOW_INTERRUPT, params).await);
         assert_eq!(
             (kind, data["kind"].clone()),
-            (code::LIMIT_REACHED, json!("journal_records"))
+            (code::LIMIT_REACHED, json!("call_keys"))
         );
+        // A key already used is not a new one.
+        let params = json!({"run_id": "w", "key": "k0"});
+        rpc.call(method::WORKFLOW_INTERRUPT, params).await.unwrap();
     })
     .await;
 }

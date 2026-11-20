@@ -21,6 +21,13 @@ pub const MAX_WORKFLOW_ID_BYTES: usize = 256;
 /// with `workflow.step.abandon` when its function fails never reaches it.
 pub const MAX_PENDING_STEPS: usize = 1024;
 
+/// Fewest distinct call keys a tenant's workflow may keep counters for in
+/// one drive, whatever its `max_records` (a larger `max_records` raises it
+/// to that): a call that failed or suspended journals nothing but keeps its
+/// key, which is a few hundred bytes. Past it a call with a new key is
+/// refused (`-32005`, `kind: call_keys`); replays are never refused.
+pub const MAX_CALL_KEYS: usize = 10_000;
+
 /// A spending cap shared by every agent call of one workflow.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

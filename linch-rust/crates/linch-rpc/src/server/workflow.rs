@@ -33,12 +33,12 @@ use crate::access::{Tenant, WorkflowCaps};
 use crate::error::{ErrorObject, chain, code, invalid_params};
 use crate::message::Notification;
 use crate::protocol::{
-    MAX_PENDING_STEPS, MAX_WORKFLOW_ID_BYTES, WorkflowAgentParams, WorkflowAgentResult,
-    WorkflowBudget, WorkflowCancelParams, WorkflowCancelled, WorkflowEventParams,
-    WorkflowFinishParams, WorkflowFinished, WorkflowInterruptParams, WorkflowInterrupted,
-    WorkflowLimits, WorkflowStartParams, WorkflowStarted, WorkflowStatus, WorkflowStatusParams,
-    WorkflowStepAbandonParams, WorkflowStepAbandoned, WorkflowStepBeginParams, WorkflowStepBegun,
-    WorkflowStepCompleteParams, method,
+    MAX_CALL_KEYS, MAX_PENDING_STEPS, MAX_WORKFLOW_ID_BYTES, WorkflowAgentParams,
+    WorkflowAgentResult, WorkflowBudget, WorkflowCancelParams, WorkflowCancelled,
+    WorkflowEventParams, WorkflowFinishParams, WorkflowFinished, WorkflowInterruptParams,
+    WorkflowInterrupted, WorkflowLimits, WorkflowStartParams, WorkflowStarted, WorkflowStatus,
+    WorkflowStatusParams, WorkflowStepAbandonParams, WorkflowStepAbandoned,
+    WorkflowStepBeginParams, WorkflowStepBegun, WorkflowStepCompleteParams, method,
 };
 
 /// The journal an agent's workflows use: its Postgres database (migrated
@@ -169,6 +169,8 @@ impl Server {
         }));
         if let Some(caps) = &caps {
             options.max_records = Some(caps.max_records);
+            let records = usize::try_from(caps.max_records).unwrap_or(usize::MAX);
+            options.max_call_keys = Some(MAX_CALL_KEYS.max(records));
             options.max_record_bytes = Some(caps.max_record_bytes);
         }
         options.live_gate = Some(live_gate(self.0.tenant.clone(), caps));

@@ -299,10 +299,11 @@ async fn caps_on_records_and_their_size_refuse_before_a_call_spends() {
 }
 
 #[tokio::test]
-async fn calls_that_journal_nothing_are_counted_against_max_records() {
+async fn calls_that_journal_nothing_are_counted_against_max_call_keys_not_max_records() {
     let store = Arc::new(MemoryJournalStore::default());
     let mut capped = options(&store, "w1", &Recorder::default());
-    capped.max_records = Some(3);
+    capped.max_records = Some(1);
+    capped.max_call_keys = Some(3);
     let session = WorkflowSession::open(&capped).await.unwrap();
     let wf = session.context();
     for number in 0..3 {
@@ -316,7 +317,13 @@ async fn calls_that_journal_nothing_are_counted_against_max_records() {
     }
     let refused = wf.interrupt::<serde_json::Value>("k3", json!({})).await;
     assert!(
-        matches!(refused, Err(WorkflowError::LimitExceeded { max: 3, .. })),
+        matches!(
+            &refused,
+            Err(WorkflowError::LimitExceeded {
+                what: "call keys",
+                max: 3
+            })
+        ),
         "{refused:?}"
     );
     // A key already used is not a new one.
@@ -325,6 +332,53 @@ async fn calls_that_journal_nothing_are_counted_against_max_records() {
         matches!(again, Err(WorkflowError::Suspended(_))),
         "{again:?}"
     );
+}
+
+#[tokio::test]
+async fn a_replay_is_never_refused_by_max_call_keys() {
+    let store = Arc::new(MemoryJournalStore::default());
+    let first = options(&store, "w1", &Recorder::default());
+    run_workflow(first, |wf: WorkflowContext| async move {
+        for number in 0..5 {
+            wf.step(&format!("s{number}"), || async {
+                Ok::<_, std::io::Error>(number)
+            })
+            .await?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let mut again = options(&store, "w1", &Recorder::default());
+    again.max_call_keys = Some(2);
+    let replayed = run_workflow(again, |wf: WorkflowContext| async move {
+        let mut sum = 0;
+        for number in 0..5 {
+            sum += wf
+                .step(&format!("s{number}"), || async {
+                    Ok::<_, std::io::Error>(99)
+                })
+                .await?;
+        }
+        // A new key past the cap is refused.
+        let new = wf
+            .step("new", || async { Ok::<_, std::io::Error>(1) })
+            .await;
+        assert!(
+            matches!(
+                new,
+                Err(WorkflowError::LimitExceeded {
+                    what: "call keys",
+                    ..
+                })
+            ),
+            "{new:?}"
+        );
+        Ok(sum)
+    })
+    .await
+    .unwrap();
+    assert_eq!(replayed, 0 + 1 + 2 + 3 + 4);
 }
 
 #[tokio::test]

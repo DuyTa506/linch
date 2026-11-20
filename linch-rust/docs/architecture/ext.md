@@ -255,12 +255,15 @@ drives a `WorkflowSession` (`crates/linch-ext/src/workflow/engine.rs`):
 - `WorkflowBudget` is checked before each live call against what the
   finished calls spent, replays included (`agent.rs:286`), so one running
   call can overshoot. `max_records` is checked before a call spends
-  (`context.rs`, `check_room`) against the records and, when a call has a
-  key the run has not used, the keys counted so far, so the context's memory
-  is bounded by it; `max_record_bytes` is checked when a record is written.
-  With no `max_records` nothing is counted. A step begun with `step_begin`
-  holds nothing in the context: the host keeps its ticket, and the RPC
-  server caps the tickets it holds (`MAX_PENDING_STEPS`).
+  (`context.rs`, `check_room`) against the records, and `max_record_bytes`
+  when a record is written. The counters (one per call key and branch) are
+  bounded by `WorkflowOptions::max_call_keys`: a call with a new key and no
+  record to replay is refused past it (`LimitExceeded`, `what: "call keys"`),
+  which keeps calls that journal nothing (failed, suspended) from growing
+  them; the RPC server sets it for a tenant to `MAX_CALL_KEYS` (10,000) or
+  `max_records` if larger, and `None` is no cap. A step begun with
+  `step_begin` holds nothing in the context: the host keeps its ticket, and
+  the RPC server caps the tickets it holds (`MAX_PENDING_STEPS`).
 - `LiveGate` (`context.rs:24`) is asked before each call that would run
   live, never for a replay; the server counts calls in flight and takes the
   tenant's run place there.

@@ -233,10 +233,17 @@ lên và đặt các mức trần:
 | Mức trần | Mặc định | Nó giới hạn gì |
 |---|---|---|
 | `max_workflows` | 4 | Số workflow tenant drive cùng lúc, qua mọi kết nối của nó (`-32005`, `kind: workflows`) |
-| `max_records` | 10000 | Số record journal của một workflow, tính cả replay, và các lời gọi khác key mà kết nối đã dùng (`-32005`, `kind: journal_records`); được kiểm tra trước khi một lời gọi tiêu tiền, nên lượng server giữ cho một workflow bị chặn bởi nó |
+| `max_records` | 10000 | Số record journal của một workflow, tính cả replay (`-32005`, `kind: journal_records`); được kiểm tra trước khi một lời gọi tiêu tiền |
 | `max_fan_out` | 8 | Số lời gọi agent của một workflow đang chạy cùng lúc (`-32005`, `kind: agent_calls_in_flight`); client hạ `max_concurrency` của nó xuống mức này |
 | `max_record_bytes` | 1 MiB | Giá trị JSON của một record |
 | `max_tokens`, `max_cost_usd` | không có | Một mức trần cho `budget` của workflow; workflow không có budget sẽ nhận nó, và workflow xin nhiều hơn bị từ chối (`-32004`, `kind: workflow_budget`) |
+
+Dù `max_records` là bao nhiêu, server giữ bộ đếm cho tối đa 10.000 call key khác
+nhau trong mỗi lần drive một workflow (nhiều hơn nếu `max_records` lớn hơn): một
+lời gọi thất bại, hay một interrupt đã suspend, không ghi journal gì nhưng vẫn giữ
+key của nó. Vượt mức đó thì lời gọi với một key mới bị từ chối (`-32005`, `kind:
+call_keys`); lời gọi replay một record thì không bao giờ bị từ chối. Các key này
+không tính vào `max_records`.
 
 Mỗi lời gọi agent đang chạy cũng chiếm một chỗ trong `max_runs` của tenant. Mỗi
 workflow giữ một kết nối cơ sở dữ liệu trong suốt thời gian hold của nó, nên
