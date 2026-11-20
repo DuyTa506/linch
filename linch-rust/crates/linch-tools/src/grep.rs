@@ -9,7 +9,7 @@ use linch_core::{
 use serde_json::json;
 
 use crate::fs::{ExecutionFs, GrepHits, GrepMode, GrepQuery};
-use crate::input::{flag, invalid, optional_count, optional_string, schema, string};
+use crate::input::{flag, invalid, left_out_note, optional_count, optional_string, schema, string};
 
 /// Entries returned when the call gives no `head_limit`.
 const DEFAULT_HEAD_LIMIT: u64 = 250;
@@ -143,6 +143,9 @@ impl Tool for Grep {
         // After the cap, so the cap never hides it.
         if !hits.skipped.is_empty() {
             text.push_str(&skipped_note(&hits.skipped));
+        }
+        if hits.left_out > 0 {
+            text.push_str(&left_out_note(hits.left_out));
         }
         Ok(ToolOutput::new(text))
     }

@@ -326,8 +326,21 @@ status: final
 - **Kích thước của `Edit`.** Một `Edit` mà kết quả vượt 10 MiB (giới hạn của
   `Read`) bị từ chối với mã `too_large` trước khi kết quả được dựng, và tệp giữ
   nguyên; điều này giới hạn `replace_all` như `edit_file` đã bị giới hạn.
-- **Giới hạn phạm vi.** Đường dẫn là tương đối so với workspace. `..`, đường dẫn
-  tuyệt đối nằm ngoài nó và symlink dẫn ra ngoài đều bị từ chối.
+- **Giới hạn phạm vi.** Đường dẫn là tương đối so với workspace. Đường dẫn trèo
+  lên trên nó bằng `..` (kể cả khi quay lại vào trong), đường dẫn tuyệt đối nằm
+  ngoài nó (được kiểm tra mà không nhìn xem ở đó có gì) và symlink dẫn ra ngoài đều
+  bị từ chối, kể cả khi một process khác hoán đổi một thư mục thành symlink trong
+  lúc lệnh gọi chạy. Một đường dẫn đi xuống tối đa 128 thư mục, và mỗi thư mục trên
+  đó, kể cả thư mục gốc của workspace, phải đọc được. `Grep` và `Glob` kết thúc
+  bằng một dòng cho biết có bao nhiêu mục chúng không đọc được và đã bỏ ra (không
+  bao giờ nêu tên). Hard link tới tệp ngoài workspace không được che, tên trong
+  một thư mục mà một lệnh đang chạy đã hoán đổi cũng vậy
+  ([Giới hạn truy cập](../architecture/tools.md#giới-hạn-truy-cập)).
+- **Tệp ignore.** `Grep` và `Glob` tuân theo các tệp `.ignore` và `.gitignore` từ
+  thư mục gốc workspace đi xuống, không phải các tệp nằm trên nó, cũng không phải
+  `.git/info/exclude` hay tệp ignore toàn cục của host. Vì vậy một workspace nằm
+  trong một repository sẽ tìm cả trong `target/` và `node_modules/` trừ khi nó có
+  tệp ignore riêng: hãy đặt các mẫu đó vào một `.ignore` trong workspace.
 - **`Bash` mặc định không bị giới hạn phạm vi.** Với backend `local` mặc định, nó
   bắt đầu trong workspace nhưng có thể chạm tới mọi thứ mà user của server chạm
   được; `execution` chạy nó trong một sandbox hoặc container thay vào đó

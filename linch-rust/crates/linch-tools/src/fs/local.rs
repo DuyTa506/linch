@@ -1,18 +1,27 @@
 //! [`LocalFs`]: the execution world's files on this host, confined to a root.
 
-use std::ffi::OsStr;
-use std::fs::{self, File, Metadata, Permissions};
+use std::borrow::Cow;
+use std::ffi::{OsStr, OsString};
+use std::fs::{self, File};
 use std::io::{self, Read as _, Write as _};
-use std::os::unix::fs::PermissionsExt;
+use std::os::fd::OwnedFd;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use rustix::fs::{
+    AtFlags, Mode, OFlags, fchmod, fstat, mkdirat, open, openat, renameat, statat, unlinkat,
+};
+use rustix::io::Errno;
 use tokio_util::sync::CancellationToken;
 
+use super::beneath::{self, Links, Located, Opener, is_file, open_file, stamp_of_stat};
 use super::search;
 use super::{
-    ExecutionFs, FileContent, FileInfo, FileStamp, FsError, GlobHit, GlobQuery, GrepHits, GrepQuery,
+    ExecutionFs, FileContent, FileInfo, FileStamp, FsError, GlobHits, GlobQuery, GrepHits,
+    GrepQuery,
 };
 use crate::read::MAX_READ_BYTES;
 
@@ -24,14 +33,28 @@ const SEARCH_TIME_LIMIT: Duration = Duration::from_secs(30);
 
 /// Files on this host under one root directory.
 ///
-/// Every path is resolved with symlinks followed and must stay under the
-/// root; `..`, absolute paths and symlinks that lead out
-/// are refused with [`FsError::Escape`]. The check guards path arguments,
-/// not a concurrent process swapping symlinks between the check and the
-/// use. Blocking file work runs on tokio's blocking pool.
+/// The root is opened once and every path is walked from that descriptor,
+/// one name at a time, never following a symlink out of the root. `..`,
+/// absolute paths outside the root and symlinks that lead out are refused
+/// with [`FsError::Escape`]. A symlink inside the root whose target stays
+/// inside it is followed, an absolute target included if it spells the
+/// canonical root. A concurrent process that swaps a directory or a file for
+/// a symlink between two steps of a call cannot move the call out of the
+/// root: the swapped name is refused where it is next opened.
+///
+/// Not covered: hard links (a second name for a file outside the root is a
+/// file inside it), mounts inside the root, and a process that moves the
+/// root directory itself (the descriptor stays on the directory it opened).
+/// Blocking file work runs on tokio's blocking pool.
 #[derive(Debug, Clone)]
 pub struct LocalFs {
     root: PathBuf,
+    /// The root as it was given to [`Self::new`], made absolute, when that
+    /// differs from the canonical root (the root was reached through a
+    /// symlink).
+    spelled: Option<PathBuf>,
+    /// The root directory, opened once; every walk starts here.
+    root_fd: Arc<OwnedFd>,
     /// Most bytes of one file a search holds in memory.
     search_limit: u64,
     /// Longest a Grep call runs before it stops with `timed_out`.
@@ -40,7 +63,7 @@ pub struct LocalFs {
 
 impl LocalFs {
     /// Confine to `root`, which must be an existing directory. The root is
-    /// canonicalized once here.
+    /// canonicalized and opened once here.
     ///
     /// Blocking: call it before the runtime starts or from a blocking task.
     pub fn new(root: impl AsRef<Path>) -> Result<Self, FsError> {
@@ -50,8 +73,16 @@ impl LocalFs {
         if !root.is_dir() {
             return Err(FsError::NotADirectory { path: shown });
         }
+        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let root_fd =
+            open(&root, flags, Mode::empty()).map_err(|error| io_error(&shown, error.into()))?;
+        let spelled = std::path::absolute(given)
+            .ok()
+            .filter(|spelled| *spelled != root);
         Ok(Self {
             root,
+            spelled,
+            root_fd: Arc::new(root_fd),
             search_limit: MAX_READ_BYTES,
             search_time_limit: SEARCH_TIME_LIMIT,
         })
@@ -87,47 +118,40 @@ impl LocalFs {
         &self.root
     }
 
-    /// The real path `path` names, checked to be under the root.
+    /// Where `path` leads, walked from the root descriptor.
     ///
-    /// The longest existing prefix is canonicalized; the rest may only hold
-    /// plain names, so it cannot contain a symlink or climb with `..`.
-    pub(crate) fn resolve(&self, path: &str) -> Result<PathBuf, FsError> {
-        let escape = || FsError::Escape {
-            path: path.to_owned(),
-        };
-        let full = self.root.join(path);
-        let parts: Vec<Component<'_>> = full.components().collect();
-        let mut split = parts.len();
-        let base = loop {
-            let prefix: PathBuf = parts[..split].iter().collect();
-            match fs::canonicalize(&prefix) {
-                Ok(real) => break real,
-                Err(error) if error.kind() == io::ErrorKind::NotFound && split > 1 => split -= 1,
-                Err(error) if error.kind() == io::ErrorKind::NotADirectory => {
-                    return Err(FsError::NotADirectory {
-                        path: path.to_owned(),
-                    });
-                }
-                Err(error) => return Err(io_error(path, error)),
-            }
-        };
-        let mut real = base;
-        for (index, part) in parts[split..].iter().enumerate() {
-            let Component::Normal(name) = part else {
-                return Err(escape());
-            };
-            real.push(name);
-            // The first missing name is either absent or a dangling symlink;
-            // writing through a dangling symlink would create its target.
-            if index == 0 && fs::symlink_metadata(&real).is_ok() {
-                return Err(escape());
-            }
+    /// The deepest directory that exists is held open in the result and the
+    /// rest may only hold plain names, so a missing part cannot contain a
+    /// symlink or climb with `..`.
+    pub(super) fn locate(&self, path: &str) -> Result<Located, FsError> {
+        let relative = self.relative(Path::new(path), path)?;
+        beneath::locate(&self.root_fd, &self.root, &relative, path, Links::Follow)
+    }
+
+    /// Every regular file under the root, as real paths. Blocking.
+    pub(crate) fn files(&self) -> Result<Vec<PathBuf>, FsError> {
+        search::files(self)
+    }
+
+    /// Opens the files a search found by name, through the root descriptor.
+    pub(crate) fn opener(&self) -> Opener {
+        Opener::new(&self.root_fd, &self.root)
+    }
+
+    /// `given` as a path below the root. An absolute path is below it only
+    /// if it starts with the canonical root or with the root as it was given
+    /// to [`Self::new`]; it is refused otherwise, whether or not anything
+    /// exists there, so the answer says nothing about the host. The walk that
+    /// follows starts at the root descriptor, so this only translates a name.
+    fn relative<'a>(&self, given: &'a Path, shown: &str) -> Result<Cow<'a, Path>, FsError> {
+        if !given.is_absolute() {
+            return Ok(Cow::Borrowed(given));
         }
-        if real.starts_with(&self.root) {
-            Ok(real)
-        } else {
-            Err(escape())
-        }
+        let inside = given.strip_prefix(&self.root).ok().or_else(|| {
+            let spelled = self.spelled.as_deref()?;
+            given.strip_prefix(spelled).ok()
+        });
+        inside.map(Cow::Borrowed).ok_or_else(|| escape(shown))
     }
 
     /// Workspace path of a real path under the root.
@@ -148,35 +172,49 @@ impl LocalFs {
     }
 
     fn stat_blocking(&self, path: &str) -> Result<FileInfo, FsError> {
-        let real = self.resolve(path)?;
-        let shown = self.workspace_path(&real);
-        let stamp = match fs::metadata(&real) {
-            Ok(meta) if meta.is_file() => Some(stamp_of(&meta)?),
-            Ok(_) => return Err(FsError::NotAFile { path: shown }),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => return Err(io_error(&shown, error)),
+        let at = self.locate(path)?;
+        let shown = at.workspace_path();
+        let stamp = match &at.leaf {
+            _ if at.tail.is_empty() => return Err(FsError::NotAFile { path: shown }),
+            Some(stat) if is_file(stat) => Some(stamp_of_stat(stat)),
+            Some(_) => return Err(FsError::NotAFile { path: shown }),
+            None => None,
         };
         Ok(FileInfo { path: shown, stamp })
     }
 
     fn read_blocking(&self, path: &str, max_bytes: u64) -> Result<FileContent, FsError> {
-        let real = self.resolve(path)?;
-        let shown = self.workspace_path(&real);
-        // Checked before opening: opening a FIFO would block.
-        let meta = fs::metadata(&real).map_err(|error| io_error(path, error))?;
-        if !meta.is_file() {
-            return Err(FsError::NotAFile { path: shown });
-        }
+        let at = self.locate(path)?;
+        let shown = at.workspace_path();
+        let missing = || FsError::NotFound {
+            path: path.to_owned(),
+        };
+        let not_a_file = || FsError::NotAFile {
+            path: shown.clone(),
+        };
         let too_large = || FsError::TooLarge {
             path: shown.clone(),
             limit: max_bytes,
         };
-        let file = File::open(&real).map_err(|error| io_error(&shown, error))?;
-        let open = file.metadata().map_err(|error| io_error(&shown, error))?;
-        if open.len() > max_bytes {
+        if at.tail.is_empty() {
+            return Err(not_a_file());
+        }
+        let (Some(name), Some(leaf)) = (at.entry(), &at.leaf) else {
+            return Err(missing());
+        };
+        // Checked before opening; the open does not block on a FIFO either.
+        if !is_file(leaf) {
+            return Err(not_a_file());
+        }
+        let file = open_file(&at.dir, name, &shown)?;
+        let open = fstat(&file).map_err(|error| io_error(&shown, error.into()))?;
+        if !is_file(&open) {
+            return Err(not_a_file());
+        }
+        let stamp = stamp_of_stat(&open);
+        if stamp.len > max_bytes {
             return Err(too_large());
         }
-        let stamp = stamp_of(&open)?;
         let mut bytes = Vec::new();
         file.take(max_bytes.saturating_add(1))
             .read_to_end(&mut bytes)
@@ -184,8 +222,9 @@ impl LocalFs {
         if bytes.len() as u64 > max_bytes {
             return Err(too_large());
         }
-        let after = fs::metadata(&real).map_err(|error| io_error(&shown, error))?;
-        if stamp_of(&after)? != stamp || bytes.len() as u64 != stamp.len {
+        let after = statat(&*at.dir, name, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|error| io_error(&shown, error.into()))?;
+        if stamp_of_stat(&after) != stamp || bytes.len() as u64 != stamp.len {
             return Err(FsError::ChangedWhileReading { path: shown });
         }
         Ok(FileContent {
@@ -201,45 +240,58 @@ impl LocalFs {
         content: &[u8],
         expect: Option<FileStamp>,
     ) -> Result<FileStamp, FsError> {
-        let real = self.resolve(path)?;
-        let shown = self.workspace_path(&real);
+        let at = self.locate(path)?;
+        let shown = at.workspace_path();
         let fail = |error: io::Error| io_error(&shown, error);
-        let (Some(parent), Some(_)) = (real.parent(), real.file_name()) else {
+        let Some((name, parents)) = at.tail.split_last() else {
             return Err(FsError::NotAFile { path: shown });
         };
-        if real == self.root {
-            return Err(FsError::NotAFile { path: shown });
+        let current = match &at.leaf {
+            Some(stat) if is_file(stat) => Some(*stat),
+            Some(_) => return Err(FsError::NotAFile { path: shown }),
+            None => None,
+        };
+        if let Some(expected) = expect
+            && current.as_ref().map(stamp_of_stat) != Some(expected)
+        {
+            return Err(FsError::Changed { path: shown });
         }
-        let current = match fs::metadata(&real) {
-            Ok(meta) if meta.is_file() => Some(meta),
-            Ok(_) => return Err(FsError::NotAFile { path: shown }),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => return Err(fail(error)),
-        };
-        if let Some(expected) = expect {
-            let now = current.as_ref().map(stamp_of).transpose()?;
-            if now != Some(expected) {
-                return Err(FsError::Changed { path: shown });
+        let mut dir = Arc::clone(&at.dir);
+        for part in parents {
+            dir = Arc::new(make_dir(&dir, part, &shown)?);
+        }
+        let (temp_name, mut temp) = create_temp(&dir).map_err(fail)?;
+        let written = (|| -> io::Result<()> {
+            temp.write_all(content)?;
+            if let Some(stat) = &current {
+                // An existing file keeps its exact mode (not masked).
+                fchmod(&temp, Mode::from_raw_mode(stat.st_mode))?;
             }
+            Ok(renameat(&*dir, &temp_name, &*dir, name.as_os_str())?)
+        })();
+        if let Err(error) = written {
+            let _ = unlinkat(&*dir, &temp_name, AtFlags::empty());
+            return Err(fail(error));
         }
-        fs::create_dir_all(parent).map_err(fail)?;
-        // A new file gets 0666 masked by the umask, like any created file.
-        let mut temp = tempfile::Builder::new()
-            .prefix(".linch-")
-            .suffix(".tmp")
-            .permissions(Permissions::from_mode(0o666))
-            .tempfile_in(parent)
-            .map_err(fail)?;
-        temp.write_all(content).map_err(fail)?;
-        if let Some(meta) = current {
-            // An existing file keeps its exact mode (not masked).
-            temp.as_file()
-                .set_permissions(meta.permissions())
-                .map_err(fail)?;
+        let stat = statat(&*dir, name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|error| fail(error.into()))?;
+        Ok(stamp_of_stat(&stat))
+    }
+
+    /// Remove the regular file at `path`; a missing file or a directory is
+    /// left alone.
+    pub(crate) fn remove_file_blocking(&self, path: &str) -> Result<(), FsError> {
+        let at = self.locate(path)?;
+        let (Some(name), Some(leaf)) = (at.entry(), &at.leaf) else {
+            return Ok(());
+        };
+        if !is_file(leaf) {
+            return Ok(());
         }
-        temp.persist(&real).map_err(|error| fail(error.error))?;
-        let meta = fs::metadata(&real).map_err(fail)?;
-        stamp_of(&meta)
+        match unlinkat(&*at.dir, name, AtFlags::empty()) {
+            Ok(()) | Err(Errno::NOENT) => Ok(()),
+            Err(error) => Err(io_error(&at.workspace_path(), error.into())),
+        }
     }
 
     async fn blocking<T: Send + 'static>(
@@ -253,6 +305,52 @@ impl LocalFs {
             Err(_) => Err(FsError::Cancelled),
         }
     }
+
+    /// Run [`Self::remove_file_blocking`] on the blocking pool.
+    pub(crate) async fn remove_file(&self, path: &str) -> Result<(), FsError> {
+        let path = path.to_owned();
+        self.blocking(move |fs| fs.remove_file_blocking(&path))
+            .await
+    }
+}
+
+/// Create the directory `name` in `dir` if it is missing and open it.
+fn make_dir(dir: &Arc<OwnedFd>, name: &OsStr, shown: &str) -> Result<OwnedFd, FsError> {
+    match mkdirat(&**dir, name, Mode::from_raw_mode(0o777)) {
+        Ok(()) | Err(Errno::EXIST) => {}
+        Err(error) => return Err(io_error(shown, error.into())),
+    }
+    beneath::open_dir(dir, name).map_err(|error| match error {
+        Errno::LOOP => escape(shown),
+        Errno::NOTDIR => FsError::NotADirectory {
+            path: shown.to_owned(),
+        },
+        other => io_error(shown, other.into()),
+    })
+}
+
+/// A new temporary file beside its target, mode 0666 masked by the umask
+/// like any created file. The name is unique by `O_EXCL`, not by luck.
+fn create_temp(dir: &OwnedFd) -> io::Result<(OsString, File)> {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    for _ in 0..16 {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.subsec_nanos());
+        let name = format!(
+            ".linch-{:x}{:x}{:x}.tmp",
+            std::process::id(),
+            nanos,
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        match openat(dir, &name, flags, Mode::from_raw_mode(0o666)) {
+            Ok(fd) => return Ok((name.into(), File::from(fd))),
+            Err(Errno::EXIST) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(io::ErrorKind::AlreadyExists.into())
 }
 
 #[async_trait]
@@ -296,7 +394,7 @@ impl ExecutionFs for LocalFs {
         &self,
         query: &GlobQuery,
         cancel: &CancellationToken,
-    ) -> Result<Vec<GlobHit>, FsError> {
+    ) -> Result<GlobHits, FsError> {
         let query = query.clone();
         let stop = cancel.child_token();
         let _guard = stop.clone().drop_guard();
@@ -305,16 +403,10 @@ impl ExecutionFs for LocalFs {
     }
 }
 
-/// The stamp of a file's metadata.
-pub(super) fn stamp_of(meta: &Metadata) -> Result<FileStamp, FsError> {
-    let modified = meta.modified().map_err(|error| FsError::Io {
-        path: String::new(),
-        source: error,
-    })?;
-    Ok(FileStamp {
-        modified,
-        len: meta.len(),
-    })
+fn escape(path: &str) -> FsError {
+    FsError::Escape {
+        path: path.to_owned(),
+    }
 }
 
 /// `error` on `path`, with a missing file reported as [`FsError::NotFound`].

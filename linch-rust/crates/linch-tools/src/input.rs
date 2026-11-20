@@ -101,3 +101,13 @@ impl From<ReadFirst> for ToolOutputError {
         coded(error.to_string(), READ_FIRST_CODE)
     }
 }
+
+/// The line a search adds when it left entries out: the count only, since a
+/// name that could not be read from the workspace may not be one of its.
+pub(crate) fn left_out_note(count: usize) -> String {
+    if count == 1 {
+        "\n… (1 entry could not be read and was left out)".to_owned()
+    } else {
+        format!("\n… ({count} entries could not be read and were left out)")
+    }
+}

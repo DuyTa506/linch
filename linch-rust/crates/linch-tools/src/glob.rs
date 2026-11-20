@@ -7,7 +7,7 @@ use linch_core::{JsonObject, Tool, ToolContext, ToolOutput, ToolResult, ToolScop
 use serde_json::json;
 
 use crate::fs::{ExecutionFs, GlobQuery};
-use crate::input::{optional_string, schema, string};
+use crate::input::{left_out_note, optional_string, schema, string};
 
 /// Most paths returned.
 const MAX_RESULTS: usize = 1000;
@@ -76,9 +76,14 @@ impl Tool for Glob {
             pattern: string(&input, "pattern")?.to_owned(),
             path: optional_string(&input, "path")?.map(str::to_owned),
         };
-        let mut hits = self.fs.glob(&query, &ctx.cancel).await?;
+        let found = self.fs.glob(&query, &ctx.cancel).await?;
+        let (mut hits, left_out) = (found.hits, found.left_out);
         if hits.is_empty() {
-            return Ok(ToolOutput::new("No matches found."));
+            let mut text = "No matches found.".to_owned();
+            if left_out > 0 {
+                text.push_str(&left_out_note(left_out));
+            }
+            return Ok(ToolOutput::new(text));
         }
         hits.sort_by(|a, b| {
             b.modified
@@ -96,6 +101,9 @@ impl Tool for Glob {
             text.push_str(&format!(
                 "\n… (truncated to {MAX_RESULTS} of {total} results)"
             ));
+        }
+        if left_out > 0 {
+            text.push_str(&left_out_note(left_out));
         }
         Ok(ToolOutput::new(text))
     }
