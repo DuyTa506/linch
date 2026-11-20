@@ -708,9 +708,12 @@ trước. Mọi thứ còn lại nằm ở [Scheduler](./scheduler.md#để-mode
 văn bản nằm trong kho, không phải trên đĩa: ghi chú nháp, kế hoạch, và cả các kết
 quả tool quá lớn cho cuộc hội thoại. Với `offload_threshold_tokens`, một kết quả
 (chuỗi, giá trị có cấu trúc hoặc lỗi) được ước tính trên số token đó sẽ được ghi vào
-`/offload/<session>/<tool>_<tool_use_id>.txt` và model nhận vài dòng đầu cùng đường dẫn
-(tên đã bị chiếm trong session đó, do nhà cung cấp lặp lại call id, được thêm `_2`, `_3`;
-ký tự ngoài chữ, chữ số, `_`, `-` và `.` trong một id được ghi thành `%XX`):
+`/offload/<session>/<tool>_<tool_use_id>_<digest>.txt` và model nhận vài dòng đầu cùng
+đường dẫn. Digest là 16 chữ số hex của SHA-256 của văn bản được lưu, nên một nhà cung cấp
+lặp lại call id (`call_0` trong mọi response) không bao giờ làm kết quả này ghi đè kết quả
+khác, và cùng một kết quả lần nữa là cùng một tệp. Một id dài, rỗng hoặc chứa ký tự ngoài
+chữ, chữ số, `_`, `-` và `.` được rút thành vài ký tự đọc được đầu tiên, một dấu `~` và
+digest của cả id, để một đoạn đường dẫn luôn ngắn trên mọi backend:
 
 ```python
 import asyncio
@@ -732,7 +735,7 @@ config: AgentConfig = {
         "id": "scripted",
         "turns": [
             tool_turn("c1", "export_logs", {"service": "api"}),
-            tool_turn("c2", "read_file", {"path": "/offload/s1/export_logs_c1.txt", "offset": 1999}),
+            tool_turn("c2", "read_file", {"path": "/offload/s1/export_logs_c1_97b1a5182a18162f.txt", "offset": 1999}),
             text_turn("Read the tail."),
         ],
     },
@@ -754,7 +757,7 @@ asyncio.run(main())
 ```
 
 ```text
-export_logs: 380 chars, ends 'd the rest, or ls("/offload/s1") to list offloaded results.]'
+export_logs: 414 chars, ends 'd the rest, or ls("/offload/s1") to list offloaded results.]'
 read_file: 27 chars, ends 'api line 1999\napi line 2000'
 ```
 

@@ -8,7 +8,7 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 - **Sandbox IPC.** The `sandbox` seccomp filter refuses System V shared memory, message queue and semaphore calls and POSIX message queue calls with `EPERM`; Landlock does not cover them, and their objects are checked by the server's user id.
 
-- **Offload paths.** An offloaded tool result is written to `/offload/<session>/<tool>_<call id>.txt`, and a name already taken gets `_2`, `_3`, so two sessions on a shared backend, or a provider that repeats call ids, no longer overwrite each other's file; a call id with `/` or `..` is escaped instead of leaving the result inline.
+- **Offload paths.** An offloaded tool result is written to `/offload/<session>/<tool>_<call id>_<digest>.txt`, where the digest is of the stored text, so two sessions on a shared backend, or a provider that repeats call ids, no longer overwrite each other's file and no backend call is made to find a free name; a session or call id that is long, empty or holds `/`, `..` or non-ASCII bytes becomes a short segment of readable characters, `~` and a digest, instead of leaving the result inline; the loop guard still stops a model that repeats a call whose result is offloaded after three calls.
 
 - **`Grep` memory.** A `Grep` pattern may compile to at most 10 MiB (a larger one is an `invalid_query`) and one matcher's lazy DFA cache is capped at 32 MiB, down from the library's 100 MiB and 1000 MiB.
 

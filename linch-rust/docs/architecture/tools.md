@@ -495,16 +495,14 @@ each session a fresh memory backend (call `forget` when it ends), and
 `vfs::PROMPT` (`tools.rs:24`) teaches the model the virtual filesystem; the
 host adds it to the system prompt when it offers these tools.
 
-`ResultOffload` (`crates/linch-tools/src/vfs/offload.rs:87`) is a
+`ResultOffload` (`crates/linch-tools/src/vfs/offload.rs:88`) is a
 `post_tool_use` hook. A result estimated above `threshold_tokens` (four bytes
-per token) is written whole to `/offload/{session}/{tool}_{tool_use_id}.txt` (ids escaped
-to one path segment, `%XX` for bytes outside `[A-Za-z0-9_.-]`; a taken name gets
-`_2`, `_3`, so two sessions on a shared backend, or a provider that repeats call ids
-across turns, never overwrite a logged pointer's file) and
+per token) is written whole to `/offload/{session}/{tool}_{tool_use_id}_{digest}.txt`
+(`linch_core::vfs::offload_path`) and
 replaced by its first 10 lines (at most 2000 bytes; the pointer says "cut at
 2000 bytes" when the bytes ended the preview) and a pointer the model can
-follow with `read_file`. Three kinds are covered (`offload.rs:152`,
-`offload.rs:190`):
+follow with `read_file`. Three kinds are covered (`offload.rs:165`,
+`offload.rs:203`):
 
 - A string is stored as it is.
 - A structured value is sized by its compact canonical JSON, stored as
@@ -517,8 +515,24 @@ follow with `read_file`. Three kinds are covered (`offload.rs:152`,
   which errors are retried does not change), and the `details` gain the sizes
   and the path when they are an object or absent.
 
+The name is made without asking the backend: `digest` is 16 hex digits of the
+SHA-256 of the stored text, and each of session, tool and call id is one path
+segment, kept as it is when it is at most 48 bytes of `[A-Za-z0-9_.-]` (not only
+dots) and otherwise cut to at most 32 readable bytes, `~` and 16 hex digits of
+its own SHA-256 (an empty session id is the digest of the empty string, so the
+directory is never missing). `~` is outside the plain set, so the two forms
+never meet, and no file name is longer than 120 bytes. Because the text
+is in the name, two results are one file only when they are the same text: a
+provider that repeats call ids across turns, two agents on a shared backend,
+and a retry after a crash can write one name concurrently and each write is
+the same text, so a logged pointer never names a different result. There is no
+`exists` probe, so a repeated id costs no extra backend call. The loop guard
+strips the path from a pointer with `linch_core::vfs::without_offload_path`, in
+the same module as the naming, so a stuck model repeating a call whose result is
+offloaded still trips after three calls whatever the names.
+
 The four virtual filesystem tools are never offloaded, so reading an
-offloaded file back is never offloaded again (`offload.rs:254`). `read_file`
+offloaded file back is never offloaded again (`offload.rs:267`). `read_file`
 returns at most 16384 bytes of one line per call (`tools.rs:277`), ending a
 cut line with the call that continues it (`byte_offset`), so one huge line
 pages like many short ones; a file with no longer line reads byte for byte as
@@ -528,9 +542,10 @@ it is stored.
   session log and later requests hold the pointer, not the payload.
 - The backend write finishes before the hook answers, so a logged pointer
   names a written file when the backend is durable. A crash between the write
-  and the tool end leaves an unreferenced file; a retry of the call writes the
-  same path (`offload.rs:12-20`).
-- The hook fails open (`offload.rs:245`): a storage failure shows in the hook
+  and the tool end leaves an unreferenced file; a retry that yields the
+  same text writes the same path, and a different text writes a new file
+  (`offload.rs:12-21`).
+- The hook fails open (`offload.rs:259`): a storage failure shows in the hook
   record and the original result goes to the model.
 - Its policy id `linch.vfs.offload`, version 2, is part of the run contract.
   The version moves when what the hook covers does, and `read_file`'s schema

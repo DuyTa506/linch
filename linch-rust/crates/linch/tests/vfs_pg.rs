@@ -12,6 +12,25 @@ use sqlx::{AssertSqlSafe, PgPool};
 const DSN_VAR: &str = "LINCH_TEST_PG_DSN";
 const MODEL: &str = "scripted-model";
 
+/// Where the offload of `Read` of `file` under `root` goes: the path names a
+/// digest of the text the tool returns, so run the tool to get it.
+async fn read_offload_path(root: &std::path::Path, file: &str) -> String {
+    let fs = std::sync::Arc::new(linch::tools::LocalFs::new(root).unwrap());
+    let read = linch::tools::Read::new(fs, std::sync::Arc::new(linch::tools::ReadTracker::new()));
+    let ctx = linch::ToolContext::new(
+        "s1".into(),
+        "r1".into(),
+        "call_1",
+        None,
+        tokio_util::sync::CancellationToken::new(),
+        None,
+    );
+    let input = json!({"file_path": file}).as_object().cloned().unwrap();
+    let output = linch::Tool::execute(&read, input, ctx).await.unwrap();
+    let text = output.value.as_str().unwrap().to_owned();
+    linch::tools::vfs::offload_path("/offload", "s1", "Read", "call_1", &text)
+}
+
 /// A fresh schema `p10a_<pid>_<name>` and a DSN whose connections use it.
 struct TestDb {
     admin: PgPool,
@@ -139,7 +158,7 @@ async fn a_minified_line_is_offloaded_into_postgres_and_paged_back_by_byte() {
         .unwrap();
         config.open()
     };
-    let path = "/offload/s1/Read_call_1.txt";
+    let path = read_offload_path(workspace.path(), "min.json").await;
     let turns = vec![
         call("call_1", "Read", json!({"file_path": "min.json"})),
         text("Read."),
@@ -195,19 +214,16 @@ async fn an_offloaded_result_outlives_the_agent_and_stays_out_of_the_workspace()
         .unwrap();
         config.open()
     };
+    let path = read_offload_path(workspace.path(), "big.txt").await;
     let turns = vec![
         call("call_1", "Read", json!({"file_path": "big.txt"})),
         text("Read."),
     ];
     let opened = open(turns).await.unwrap();
     let pointer = tool_result(opened.agent(), "s1").await;
-    assert!(pointer.contains("/offload/s1/Read_call_1.txt"), "{pointer}");
+    assert!(pointer.contains(&path), "{pointer}");
     opened.close().await;
-    let path = "/offload/s1/Read_call_1.txt";
-    assert_eq!(
-        db.files().await,
-        [("p10a-tenant".to_owned(), path.to_owned())]
-    );
+    assert_eq!(db.files().await, [("p10a-tenant".to_owned(), path.clone())]);
     let names: Vec<_> = std::fs::read_dir(workspace.path()).unwrap().collect();
     assert_eq!(
         names.len(),

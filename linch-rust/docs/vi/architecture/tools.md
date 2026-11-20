@@ -481,15 +481,13 @@ mỗi session một backend bộ nhớ mới (gọi `forget` khi nó kết thúc
 `vfs::PROMPT` (`tools.rs:24`) dạy model về hệ thống tệp ảo; host
 thêm nó vào system prompt khi cung cấp các tool này.
 
-`ResultOffload` (`crates/linch-tools/src/vfs/offload.rs:87`) là một hook
+`ResultOffload` (`crates/linch-tools/src/vfs/offload.rs:88`) là một hook
 `post_tool_use`. Một kết quả ước lượng vượt `threshold_tokens` (bốn byte cho mỗi token)
-được ghi nguyên vẹn vào `/offload/{session}/{tool}_{tool_use_id}.txt` (id được escape
-thành một đoạn đường dẫn, `%XX` cho byte ngoài `[A-Za-z0-9_.-]`; tên đã bị chiếm được thêm
-`_2`, `_3`, nên hai session dùng chung một backend, hay một nhà cung cấp lặp lại call id
-qua các lượt, không bao giờ ghi đè tệp mà một con trỏ đã ghi log trỏ tới) và được thay bằng 10 dòng đầu
+được ghi nguyên vẹn vào `/offload/{session}/{tool}_{tool_use_id}_{digest}.txt`
+(`linch_core::vfs::offload_path`) và được thay bằng 10 dòng đầu
 (tối đa 2000 byte; con trỏ ghi "cut at 2000 bytes" khi số byte kết thúc phần xem trước) cùng
-một con trỏ mà model có thể theo bằng `read_file`. Ba loại được phủ (`offload.rs:152`,
-`offload.rs:190`):
+một con trỏ mà model có thể theo bằng `read_file`. Ba loại được phủ (`offload.rs:165`,
+`offload.rs:203`):
 
 - Một chuỗi được lưu nguyên.
 - Một giá trị có cấu trúc được ước lượng theo JSON chính tắc gọn của nó, lưu dưới dạng JSON định
@@ -501,8 +499,22 @@ một con trỏ mà model có thể theo bằng `read_file`. Ba loại được 
   trước hook, nên lỗi nào được thử lại không đổi), và `details` có thêm các kích thước và đường
   dẫn khi nó là một đối tượng hoặc vắng mặt.
 
+Tên được tạo mà không hỏi backend: `digest` là 16 chữ số hex của SHA-256 của văn bản được
+lưu, và mỗi thứ trong session, tool và call id là một đoạn đường dẫn, giữ nguyên khi dài tối
+đa 48 byte gồm `[A-Za-z0-9_.-]` (không chỉ toàn dấu chấm), còn lại được cắt thành tối đa 32
+byte đọc được, `~` và 16 chữ số hex SHA-256 của chính nó (session id rỗng là digest của chuỗi
+rỗng, nên thư mục không bao giờ thiếu). `~` nằm ngoài tập ký tự thường nên hai dạng không bao
+giờ trùng nhau, và không tên tệp nào dài quá 120 byte. Vì văn bản nằm trong tên, hai kết quả
+chỉ là một tệp khi chúng là cùng một văn bản: một nhà cung cấp lặp lại call id qua các lượt,
+hai agent trên một backend dùng chung, và một lần thử lại sau sự cố có thể ghi cùng một tên
+đồng thời và mỗi lần ghi là cùng một văn bản, nên một con trỏ đã ghi log không bao giờ trỏ tới
+kết quả khác. Không có lời thăm dò `exists`, nên một id lặp lại không tốn thêm lời gọi backend.
+Loop guard bóc đường dẫn khỏi con trỏ bằng `linch_core::vfs::without_offload_path`, cùng module
+với việc đặt tên, nên một model bị kẹt lặp lại một lời gọi có kết quả bị chuyển ra ngoài vẫn
+dừng sau ba lần gọi dù tên là gì.
+
 Bốn tool hệ thống tệp ảo không bao giờ được chuyển ra ngoài, nên đọc lại một tệp đã chuyển ra
-ngoài không bao giờ bị chuyển ra ngoài lần nữa (`offload.rs:254`). `read_file` trả về tối đa
+ngoài không bao giờ bị chuyển ra ngoài lần nữa (`offload.rs:267`). `read_file` trả về tối đa
 16384 byte của một dòng mỗi lần gọi (`tools.rs:277`), và kết thúc một dòng bị cắt bằng lời gọi để
 đọc tiếp (`byte_offset`), nên một dòng rất dài được phân trang như nhiều dòng ngắn; một tệp không
 có dòng nào dài hơn được đọc đúng từng byte như khi lưu.
@@ -511,9 +523,9 @@ có dòng nào dài hơn được đọc đúng từng byte như khi lưu.
   session log và các request sau đều giữ con trỏ, không giữ payload.
 - Việc ghi vào backend hoàn tất trước khi hook trả lời, nên một con trỏ đã được ghi log
   nêu tên một tệp đã được ghi khi backend là bền vững. Một sự cố giữa lúc ghi
-  và phần kết thúc của tool để lại một tệp không được tham chiếu; một lần thử lại lời gọi
-  ghi cùng đường dẫn đó (`offload.rs:12-20`).
-- Hook fail open (`offload.rs:245`): một lỗi lưu trữ hiện trong hook
+  và phần kết thúc của tool để lại một tệp không được tham chiếu; một lần thử lại cho
+  cùng văn bản ghi cùng đường dẫn đó, còn văn bản khác thì ghi một tệp mới (`offload.rs:12-21`).
+- Hook fail open (`offload.rs:259`): một lỗi lưu trữ hiện trong hook
   record và kết quả gốc đi tới model.
 - Policy id `linch.vfs.offload`, phiên bản 2, của nó là một phần của run contract. Phiên bản
   đổi khi phạm vi hook phủ đổi, và schema của `read_file` cũng nằm trong contract, nên một run đã

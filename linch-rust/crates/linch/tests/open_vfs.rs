@@ -25,6 +25,25 @@ fn text(text: &str) -> Value {
     json!(TurnBuilder::new(MODEL).text(text).build())
 }
 
+/// Where the offload of `Read` of `file` under `root` goes: the path names a
+/// digest of the text the tool returns, so run the tool to get it.
+async fn read_offload_path(root: &std::path::Path, file: &str) -> String {
+    let fs = Arc::new(linch::tools::LocalFs::new(root).unwrap());
+    let read = linch::tools::Read::new(fs, Arc::new(linch::tools::ReadTracker::new()));
+    let ctx = linch::ToolContext::new(
+        "s1".into(),
+        "r1".into(),
+        "call_1",
+        None,
+        tokio_util::sync::CancellationToken::new(),
+        None,
+    );
+    let input = json!({"file_path": file}).as_object().cloned().unwrap();
+    let output = linch::Tool::execute(&read, input, ctx).await.unwrap();
+    let text = output.value.as_str().unwrap().to_owned();
+    linch::tools::vfs::offload_path("/offload", "s1", "Read", "call_1", &text)
+}
+
 /// A scripted config allowing writes, with `extra` fields on top.
 fn config(turns: Vec<Value>, extra: Value) -> AgentConfig {
     let mut value = json!({
@@ -105,12 +124,13 @@ async fn an_offloaded_result_reads_back_through_read_file() {
     let dir = tempfile::tempdir().unwrap();
     let body: Vec<String> = (1..=200).map(|n| format!("line {n}")).collect();
     std::fs::write(dir.path().join("big.txt"), body.join("\n")).unwrap();
+    let path = read_offload_path(dir.path(), "big.txt").await;
     let turns = vec![
         call("call_1", "Read", json!({"file_path": "big.txt"})),
         call(
             "call_2",
             "read_file",
-            json!({"path": "/offload/s1/Read_call_1.txt", "offset": 150, "limit": 1}),
+            json!({"path": path, "offset": 150, "limit": 1}),
         ),
         text("Read it."),
     ];
@@ -123,8 +143,7 @@ async fn an_offloaded_result_reads_back_through_read_file() {
     let (read, back) = (&ends[0], &ends[1]);
     assert_eq!((read.tool.as_str(), read.is_error), ("Read", false));
     assert!(
-        read.text
-            .contains("offloaded to '/offload/s1/Read_call_1.txt'"),
+        read.text.contains(&format!("offloaded to '{path}'")),
         "{}",
         read.text
     );

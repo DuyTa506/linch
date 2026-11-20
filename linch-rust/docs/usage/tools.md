@@ -706,10 +706,13 @@ text files that live in the stores, not on disk: scratch notes, plans, and
 tool results too large for the conversation. With
 `offload_threshold_tokens`, a result estimated above that many tokens (a
 string, a structured value or an error) is written to
-`/offload/<session>/<tool>_<tool_use_id>.txt` and the model gets its first lines
-and the path (a name already taken in that session, from a provider that repeats
-call ids, gets `_2`, `_3`; characters other than letters, digits, `_`, `-` and
-`.` in an id are written as `%XX`):
+`/offload/<session>/<tool>_<tool_use_id>_<digest>.txt` and the model gets its
+first lines and the path. The digest is 16 hex digits of the SHA-256 of the
+stored text, so a provider that repeats call ids (`call_0` in every response)
+never makes one result replace another, and the same result again is the same
+file. An id that is long, empty or holds anything but letters, digits, `_`, `-`
+and `.` is shortened to its first readable characters, a `~` and a digest of
+the whole id, so a path segment stays short on every backend:
 
 ```python
 import asyncio
@@ -731,7 +734,7 @@ config: AgentConfig = {
         "id": "scripted",
         "turns": [
             tool_turn("c1", "export_logs", {"service": "api"}),
-            tool_turn("c2", "read_file", {"path": "/offload/s1/export_logs_c1.txt", "offset": 1999}),
+            tool_turn("c2", "read_file", {"path": "/offload/s1/export_logs_c1_97b1a5182a18162f.txt", "offset": 1999}),
             text_turn("Read the tail."),
         ],
     },
@@ -753,7 +756,7 @@ asyncio.run(main())
 ```
 
 ```text
-export_logs: 380 chars, ends 'd the rest, or ls("/offload/s1") to list offloaded results.]'
+export_logs: 414 chars, ends 'd the rest, or ls("/offload/s1") to list offloaded results.]'
 read_file: 27 chars, ends 'api line 1999\napi line 2000'
 ```
 
