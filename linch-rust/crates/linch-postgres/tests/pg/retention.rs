@@ -2,6 +2,8 @@
 //! write of a session, and a not-found that is not "pruned" unless a
 //! retention pass said so (the pass itself is `linch-worker`'s).
 
+use std::time::Duration;
+
 use linch_core::{
     Commit, LogEntry, Message, MessageEntry, RunId, RunStatus, RunStore, SessionId, SessionStore,
     StoreError,
@@ -134,6 +136,81 @@ async fn a_pruned_run_id_cannot_be_created_again() {
     assert!(
         matches!(missing, Err(StoreError::NotFound { pruned: true, .. })),
         "{missing:?}"
+    );
+}
+
+/// A `create` that arrives while the pruner's delete of the same id is
+/// still open (the run row is there, its tombstone not yet visible) must
+/// not start a second run once the delete commits: the id is pruned.
+///
+/// The pruner deletes the run and writes its tombstone in one statement
+/// (`linch-worker/src/retention.rs`, `DELETE_RUNS`); the transaction here
+/// runs the same two writes and commits only after the create is waiting.
+#[tokio::test]
+async fn a_create_racing_the_prune_of_its_id_is_refused() {
+    let Some(db) = TestDb::migrated("ret_create_race").await else {
+        return;
+    };
+    let store = PgRunStore::new(db.pool.clone());
+    let run = new_run("ns", "r1", 0);
+    let id = run.run_id.clone();
+    store.create(run).await.unwrap();
+    let lease = store.claim("ns", &id, "a").await.unwrap();
+    let ended = Commit {
+        status: Some(RunStatus::Completed),
+        ..Commit::default()
+    };
+    store.commit(&lease, ended).await.unwrap();
+    // The pruner's batch, not yet committed.
+    let mut pruner = db.pool.begin().await.unwrap();
+    let pruned = sqlx::query(
+        "WITH gone AS (DELETE FROM linch_runs WHERE namespace = 'ns' AND run_id = 'r1' \
+                       AND status IN ('completed', 'failed', 'aborted') \
+                       RETURNING namespace, run_id) \
+         INSERT INTO linch_pruned_runs (namespace, run_id) \
+         SELECT namespace, run_id FROM gone ON CONFLICT DO NOTHING",
+    )
+    .execute(&mut *pruner)
+    .await
+    .unwrap();
+    assert_eq!(pruned.rows_affected(), 1);
+    // The retried create of the caller-chosen id.
+    let retried = {
+        let store = store.clone();
+        tokio::spawn(async move { store.create(new_run("ns", "r1", 0)).await })
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while sqlx::query_scalar::<_, i32>(
+        "SELECT pid FROM pg_locks \
+         WHERE NOT granted AND pg_backend_pid() = ANY(pg_blocking_pids(pid))",
+    )
+    .fetch_optional(&mut *pruner)
+    .await
+    .unwrap()
+    .is_none()
+    {
+        assert!(
+            std::time::Instant::now() < deadline && !retried.is_finished(),
+            "the create never waited on the pruner"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    pruner.commit().await.unwrap();
+    let retried = retried.await.unwrap();
+    let (rows, tombstones): (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM linch_runs WHERE run_id = 'r1'), \
+                (SELECT count(*) FROM linch_pruned_runs WHERE run_id = 'r1')",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let status = store.load("ns", &id).await.map(|record| record.status);
+    db.finish().await;
+    assert!(
+        matches!(retried, Err(StoreError::Conflict { .. })) && rows == 0,
+        "a create that raced the prune of its id answered {:?}: {rows} run row(s) beside \
+         {tombstones} tombstone(s), load says {status:?}",
+        retried.map(|record| record.status)
     );
 }
 

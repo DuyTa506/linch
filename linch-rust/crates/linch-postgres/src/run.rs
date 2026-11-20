@@ -422,16 +422,23 @@ impl PgRunStore {
             Err(error) if session_busy(&error) => return Ok(Insert::Busy(error)),
             Err(error) => return Err(backend(error)),
         };
-        if inserted == 0 {
-            let pruned: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM linch_pruned_runs \
-                 WHERE namespace = $1 AND run_id = $2)",
-            )
-            .bind(&run.namespace)
-            .bind(run.run_id.as_str())
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(backend)?;
+        // The statement above read the tombstone in its own snapshot. A
+        // pruner that deletes this id (the run row and its tombstone in one
+        // statement) and commits while the insert waits on that delete is
+        // missed by the snapshot, and the insert then goes through. Read the
+        // tombstone again, as a new statement, which sees what the pruner
+        // committed. The pruner only deletes ended runs, so the reverse
+        // order (this insert first, then the delete) cannot happen.
+        let pruned: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM linch_pruned_runs \
+             WHERE namespace = $1 AND run_id = $2)",
+        )
+        .bind(&run.namespace)
+        .bind(run.run_id.as_str())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(backend)?;
+        if pruned || inserted == 0 {
             let what = if pruned {
                 "was pruned by retention and its id cannot be used again"
             } else {

@@ -16,7 +16,7 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 - A Postgres run claim of a run that has no row ends its transaction before it reads the pruning tombstones, so it no longer needs a second pool connection (a pool of one answered `NotFound` only after the 30 s acquire timeout).
 - A lease renewal that arrives after the release is `LeaseLost` and no longer leases the run again; the epoch fence is unchanged.
 - A job heartbeat that arrives after the attempt released or failed the job answers `false` and no longer hides the job for a visibility timeout.
-- `create` of a run id that retention pruned (its tombstone is still kept) answers `Conflict`, like an existing id, instead of starting a second run.
+- `create` of a run id that retention pruned (its tombstone is still kept) answers `Conflict` (`RunExists`, -32023, `was pruned by retention and its id cannot be used again`), like an existing id, instead of starting a second run, also when the `create` overlaps the pruner's delete of the same id.
 - In Rust, `Debug` and serializing a provider `base_url` show its user name, password and query as `redacted`, as for an MCP URL; `to_value_with_secrets` keeps them for the wire. Both the MCP and the provider URL also drop their fragment, and a URL that has no host (`user:token@gw:8443/v1` parses as scheme `user`) is shown as `[redacted]`.
 
 ## 0.2.0 - 2026-11-19

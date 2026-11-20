@@ -196,7 +196,9 @@ pub enum StoreError {
 pub trait RunStore: Send + Sync {
     /// Create a run with its first checkpoint and events, in one write.
     ///
-    /// Refuses, writing nothing, with `Conflict` when the run id exists and
+    /// Refuses, writing nothing, with `Conflict` when the run id exists or
+    /// retention pruned it (its tombstone keeps the id from being used
+    /// again, also against a `create` that overlaps the delete), and
     /// with [`StoreError::SessionBusy`] when the namespace already holds a
     /// run of the same session that is not terminal. The check and the
     /// insert are one atomic step, so of two creates racing on one session
