@@ -52,7 +52,7 @@ async fn send(socket: &mut Socket, id: u64, method: &str, params: Value) {
     socket
         .send(Message::Text(request.to_string().into()))
         .await
-        .unwrap();
+        .unwrap_or_else(|error| panic!("sending {method}: {error}"));
 }
 
 async fn recv(socket: &mut Socket) -> Option<Value> {
@@ -274,6 +274,51 @@ async fn a_websocket_that_stops_answering_pings_is_dropped_and_frees_its_place()
         json!({"cancelled": false})
     );
     drop(silent);
+    server.stop().await;
+}
+
+/// A client that stays connected but reads nothing while a run streams tens
+/// of megabytes to it blocks the server's writer inside the socket. The ping
+/// that cannot be sent ends the connection, and the blocked writer is given
+/// up after the write stall timeout, so the place is free again.
+#[tokio::test]
+async fn a_websocket_that_stops_reading_mid_stream_is_dropped_and_frees_its_place() {
+    let text = json!({"http": "127.0.0.1:0",
+                      "liveness": {"ping_interval_ms": 200, "pong_timeout_ms": 3000},
+                      "tenants": {"acme": {"tokens": [{"value": TOKEN}],
+                                           "allow": {"max_connections": 1,
+                                                     "scripted_provider": true}}}});
+    let (server, listening) = running(&ServerConfig::from_json(&text.to_string()).unwrap()).await;
+    let address = listening.http.unwrap();
+    let bearer = format!("Bearer {TOKEN}");
+    let mut stuck = connect(address, Some(&bearer)).await.unwrap();
+    send(
+        &mut stuck,
+        1,
+        "agent.open",
+        scripted(&"x".repeat(12 * 1024 * 1024)),
+    )
+    .await;
+    let opened = recv(&mut stuck).await.unwrap();
+    let agent = opened["result"]["agent"].clone();
+    let start = json!({"agent": agent, "session_id": "s1", "prompt": "hi"});
+    send(&mut stuck, 2, "run.start", start).await;
+    // Held open and never read again: the run's output fills the socket.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let replacement = loop {
+        match connect(address, Some(&bearer)).await {
+            Ok(socket) => break socket,
+            Err(Error::Http(response)) if response.status() == StatusCode::TOO_MANY_REQUESTS => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "a connection whose client reads nothing keeps its place"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(error) => panic!("{error}"),
+        }
+    };
+    drop((stuck, replacement));
     server.stop().await;
 }
 

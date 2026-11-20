@@ -242,6 +242,10 @@ request từ server; và tenant của nó, là `None` đối với client cục 
    đã đọc kết thúc, drop mọi run tại chỗ nó đang đứng (một run bền vững vẫn
    resume được), làm các request đang chờ của server thất bại, rồi đóng các MCP server
    của mọi agent. Writer xả hết hàng đợi và kết nối trả về.
+   Việc chờ không vô hạn: một writer không đưa thêm được gì tới transport trong
+   `WRITE_STALL_TIMEOUT` (5 s; `connection.rs`, đếm theo byte trên byte stream và theo
+   message trên message transport) bị abort và hàng đợi của nó bị bỏ, nên một client
+   không bao giờ đọc không giữ được chỗ tenant của kết nối.
 
 ### Thứ tự
 

@@ -634,8 +634,15 @@ run's lease is renewed by a task of its own, so no other server can take the
 run over while the connection lives ([Run leases](./stores.md#run-leases)).
 A WebSocket that reads nothing cannot take a ping either: it is ended when a
 ping cannot be sent within `pong_timeout_ms`, and its runs are dropped as above.
-There is no write timeout on a Unix socket or stdio: a local client that never
-reads again holds its runs until it closes.
+There is no write timeout on a Unix socket or stdio while the connection runs:
+a local client that never reads again holds its runs until it closes. Once the
+connection is ending (SIGTERM or SIGINT, or its input ended) the server waits
+for its queued output only while the client keeps reading: when nothing more
+reaches the transport for 5 s (`WRITE_STALL_TIMEOUT`, a constant, not a
+setting) it drops the queue and the transport, and the connection's tenant
+place and the server's shutdown no longer wait for that client. A client that
+reads slowly but steadily is not cut. On a WebSocket whose ping cannot be sent
+the same 5 s follows the end of the connection.
 
 **A client that is busy but alive must keep its event loop running.** The
 pong comes from the client's WebSocket code, which runs on its event loop. A

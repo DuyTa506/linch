@@ -607,8 +607,13 @@ Một client vẫn kết nối nhưng **ngừng đọc** (buffer socket và hàn
 riêng, nên không server nào khác tiếp quản được run khi kết nối còn sống ([Run
 leases](./stores.md#run-leases)). Một WebSocket không đọc gì cũng không nhận được ping: nó bị kết
 thúc khi một ping không gửi được trong `pong_timeout_ms`, và các run của nó bị bỏ như trên. Unix
-socket và stdio không có write timeout: một client cục bộ không bao giờ đọc lại giữ các run của
-nó cho đến khi đóng.
+socket và stdio không có write timeout khi kết nối đang chạy: một client cục bộ không bao giờ đọc
+lại giữ các run của nó cho đến khi đóng. Khi kết nối đang kết thúc (SIGTERM hoặc SIGINT, hoặc
+input của nó đã hết), server chỉ chờ output đã xếp hàng chừng nào client còn đọc: khi không có gì
+thêm tới transport trong 5 s (`WRITE_STALL_TIMEOUT`, một hằng số, không phải setting) nó bỏ hàng
+đợi và transport, và chỗ của tenant cùng việc tắt server không còn chờ client đó. Một client đọc
+chậm nhưng đều đặn không bị cắt. Với WebSocket có ping không gửi được, 5 s này bắt đầu sau khi
+kết nối kết thúc.
 
 **Một client đang bận nhưng còn sống phải giữ cho event loop của nó chạy.** Pong đến từ code
 WebSocket của client, chạy trên event loop của nó. Một client Python có loop bị chặn lâu hơn

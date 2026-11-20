@@ -242,6 +242,11 @@ requests; and its tenant, `None` for a local client.
    already read finish, drops every run where it stands (a durable run stays
    resumable), fails the waiting server requests, then closes every agent's
    MCP servers. The writer drains the queue and the connection returns.
+   The wait is not unbounded: a writer that gets nothing more to the
+   transport for `WRITE_STALL_TIMEOUT` (5 s; `connection.rs`, counted by
+   bytes on a byte stream and by message on a message transport) is aborted
+   and its queue dropped, so a client that never reads cannot hold the
+   connection's tenant place.
 
 ### Ordering
 

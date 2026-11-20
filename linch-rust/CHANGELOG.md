@@ -6,6 +6,7 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ## Unreleased
 
+- A connection that is ending (SIGTERM, SIGINT or end of input) gives up its writer after 5 s without output reaching the client and drops the queue, so a client that does not read no longer holds its tenant place or the server's shutdown; a client that reads slowly but steadily is not cut.
 - `run.events` answers one page (`limit`, `max_bytes`, default 1000 envelopes and 4 MiB) and names `next_after_seq` while more follow, so a long run no longer exceeds the message size; `Agent.events` in the Python client follows the pages.
 
 ## 0.2.0 - 2026-11-19
