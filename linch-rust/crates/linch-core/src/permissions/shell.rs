@@ -220,6 +220,11 @@ fn word_end(text: &str) -> usize {
     b.len()
 }
 
+/// `word` with its quotes and backslashes removed.
+fn unquote(word: &str) -> String {
+    tokenize(word).concat()
+}
+
 /// Whether `word` is `NAME=value` or `NAME+=value`.
 fn is_assignment(word: &str) -> bool {
     let name = word.split('=').next().unwrap_or("");
@@ -236,7 +241,8 @@ const RESERVED: &[&str] = &[
 /// Commands that run their arguments as a command, and may take options.
 const WRAPPERS: &[&str] = &["time", "exec", "command", "builtin", "env"];
 
-/// `segment` without the words in front of its command: `NAME=value`
+/// `segment` without the words in front of its command, which may be quoted
+/// or escaped (`\env`): `NAME=value`
 /// assignments, redirections (`>f`, `2>&1`, `< in`), reserved words
 /// (`if`, `then`, `else`, `elif`, `do`, `while`, `until`, `!`, `{`) and the
 /// wrappers `time`, `exec`, `command`, `builtin` and `env` with their
@@ -252,9 +258,15 @@ pub fn strip_command_prefix(segment: &str) -> &str {
         let word = &rest[..end];
         let operator = word.trim_start_matches(|c: char| c.is_ascii_digit());
         let mut skip = 1;
-        if is_assignment(word) {
-        } else if RESERVED.contains(&word) || WRAPPERS.contains(&word) {
-            options = WRAPPERS.contains(&word);
+        let assignment = is_assignment(word);
+        let name = if assignment {
+            String::new()
+        } else {
+            unquote(word)
+        };
+        if assignment {
+        } else if RESERVED.contains(&name.as_str()) || WRAPPERS.contains(&name.as_str()) {
+            options = WRAPPERS.contains(&name.as_str());
         } else if options && word.starts_with('-') {
         } else if operator.starts_with(['<', '>']) {
             // A bare operator (`>`, `2>&`) takes the next word as its target.

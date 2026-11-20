@@ -6,6 +6,7 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ## Unreleased
 
+- Bash deny and ask rules also see a command behind a quoted or escaped `env`, `command`, `exec`, `builtin`, `time` or reserved word (`\env rm`, `"time" rm`).
 - A `${...}` inside double quotes whose body holds a quote, a backslash or a nested `${` counts as syntax the splitter cannot model, so a bash allow rule no longer covers the commands that follow it.
 - Bash deny and ask rules also match a command spelled with quotes or escapes (`\rm`, `r""m`) and a command behind leading `NAME=value` words, redirections, reserved words (`if`, `then`, `do`, `!`, `{`) and `time`, `exec`, `command`, `builtin`, `env`; a `$` expansion in command position counts as syntax the splitter cannot model.
 - Bash permission rules: `&>`, a `&` after an escaped or quoted `<`/`>`, a `#` comment, here-documents, `>|` and `>&` onto anything but a descriptor count as syntax the splitter cannot model, so allow rules no longer cover them; a backslash inside double quotes is kept before bytes other than `$`, backtick, `"`, `\` and newline.

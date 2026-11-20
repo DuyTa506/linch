@@ -526,6 +526,23 @@ fn a_quote_in_a_parameter_pattern_outside_double_quotes_does_not_hide_a_command(
 }
 
 #[test]
+fn a_deny_rule_covers_a_command_behind_a_quoted_wrapper() {
+    let engine = flat(PermissionMode::SkipDangerous, vec![bash_rule("rm *", Deny)]);
+    for command in [
+        "env rm -rf build",
+        "\\env rm -rf build",
+        "e\"\"nv rm -rf build",
+        "'command' rm -rf build",
+        "\\command rm -rf build",
+        "\\exec rm -rf build",
+        "\"time\" rm -rf build",
+        "env \\env rm -rf build",
+    ] {
+        assert_eq!(bash(&engine, command), "deny", "{command:?}");
+    }
+}
+
+#[test]
 fn unparsed_floor_beats_a_generic_allow_in_any_layer_order() {
     let rules = vec![tool("Bash", Allow), bash_rule("rm -rf *", Deny)];
     let engine = flat(PermissionMode::SkipDangerous, rules);
