@@ -417,6 +417,46 @@ async fn an_mcp_http_url_must_share_an_allowed_origin() {
 }
 
 #[tokio::test]
+async fn an_mcp_http_url_with_a_path_allows_that_path_and_below() {
+    let address = hangs_up().await;
+    let urls = strings(&[&format!("http://{address}/allowed")]);
+    let rpc = Rpc::remote(acme(|allow| allow.mcp_urls(&urls).unwrap()));
+    let open = |path: &str| {
+        let url = format!("http://{address}{path}");
+        config(
+            json!({"mcp_servers": [{"name": "remote", "reconnect": {"attempts": 0},
+                                       "transport": {"type": "http", "url": url}}]}),
+        )
+    };
+    // Other paths, a longer name that starts like the entry, the origin's
+    // root, dot segments that climb out, and an escape that a server may
+    // decode into one.
+    let outside = [
+        "/internal",
+        "/allowedx",
+        "/",
+        "/allowed/../internal",
+        "/allowed/%2e%2e/internal",
+        "/allowed/%2E%2E%2Finternal",
+    ];
+    for path in outside {
+        let kind = refused(&rpc, open(path)).await;
+        assert_eq!(kind.as_deref(), Some("mcp_url"), "{path}");
+    }
+    // The listed path and what lies below it pass admission (the server
+    // then hangs up), with or without a trailing slash.
+    for path in [
+        "/allowed",
+        "/allowed/",
+        "/allowed/sub",
+        "/allowed/sub/deeper",
+    ] {
+        let error = rpc.call(method::AGENT_OPEN, open(path)).await.unwrap_err();
+        assert_eq!(refusal(error).0, code::MCP_UNAVAILABLE, "{path}");
+    }
+}
+
+#[tokio::test]
 async fn a_store_pool_may_not_exceed_the_tenants_max_pool_connections() {
     let address = hangs_up().await;
     let dsn = format!("postgres://acme@{address}/linch?sslmode=disable");

@@ -130,7 +130,7 @@ token twice is refused. A tenant only a worker serves needs no token.
 | `workspace_roots` | none | Directories a `workspace`, a `project_root` or a `config_dir` may be or lie under |
 | `postgres_dsns` | none | Postgres targets a store DSN may use: host, port or socket, database, user, startup options and TLS files must all match one entry, and its `sslmode` must be the entry's or stricter |
 | `mcp_commands` | none | MCP stdio servers, `{"command", "args", "env"}`: the command and argument list must match exactly, and the transport may set only the `env` names listed |
-| `mcp_urls` | none | Endpoints an MCP HTTP transport may name, matched like `provider_base_urls` |
+| `mcp_urls` | none | Endpoints an MCP HTTP transport may name, matched on scheme, host, port and path: an entry with a path (`https://mcp.internal/mcp`) allows that path and what lies below it (`/mcp/sse`, not `/mcpx`; a trailing slash is ignored); one with none (`https://mcp.internal`) allows every path on that origin. A URL with an escape in its path is refused under an entry that has a path. `provider_base_urls` stays exact: its path entry allows that path alone |
 | `max_schedules` | none: no schedules | Schedules the tenant may keep in each database ([Scheduler](./scheduler.md#what-a-tenant-may-schedule)); without it an agent with `schedule_tools` is refused |
 | `min_schedule_interval_ms` | 60000 | The shortest time between two fires of its schedules |
 | `tool_cache` | `false` | `spec.tool_cache`, which keeps results in the server's memory or database for the tenant's namespace; bounded to 1024 entries, a one-hour ttl, 1 MiB a result and 32 tools. The agent also needs `spec.redaction` over tool results, and the entries serve only the session that stored them |

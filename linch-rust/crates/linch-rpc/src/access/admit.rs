@@ -213,7 +213,7 @@ impl Tenant {
                     }
                 }
                 McpTransportConfig::Http { url, .. } => {
-                    (!allows(&allow.mcp_origins, url)).then_some("mcp_url")
+                    (!allows(&allow.mcp_endpoints, url)).then_some("mcp_url")
                 }
             };
             if let Some(kind) = refusal {
