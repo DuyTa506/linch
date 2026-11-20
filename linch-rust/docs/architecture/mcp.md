@@ -62,8 +62,10 @@ On connect, and on every relist, each listed tool becomes one registration
 - **Schema.** The server's `inputSchema`; a missing `type` or `properties`
   defaults to an empty object schema.
 - **Result** (`crates/linch-mcp/src/result.rs:15`). Text blocks join with
-  newlines into the output value. Images go to `metadata.images` and leave
-  `[image]` in the text; audio, binary resources and other blocks leave a
+  newlines into the output value. Images go to `metadata.images` (at most 8, and
+  4 MiB of base64 data in all; a later one is left out and the text says
+  `[image omitted: over the size limit]`) and leave `[image]` in the text;
+  audio, binary resources and other blocks leave a
   placeholder. With no blocks, `structuredContent` is used, else
   `(no content)`. An `isError` result becomes a `ToolOutputError` with code
   `mcp_tool_error` and the same text.
@@ -183,7 +185,8 @@ What one server can make the client hold or wait for
 | One connect, resubscribe or relist attempt | `attempt_timeout` (30 s) | `server.rs:241`, `server.rs:285` |
 | One tool call | `call_timeout` (300 s) | `tool.rs:264` |
 | Cancels waiting on one connection | 64; later ones are dropped | `tool.rs:29` |
-| Result text | 30 000 bytes, cut on a character boundary | `result.rs:10` |
+| Result text, and the text of a tool error (a JSON-RPC error's message included) | 30 000 bytes, cut on a character boundary | `result.rs:10`, `tool.rs` (`coded`) |
+| Images kept from one result | 8, and 4 MiB of base64 data in all; the rest are left out | `result.rs` (`MAX_IMAGES`, `MAX_IMAGE_BYTES`) |
 | Tool argument summary | 80 characters | `tool.rs:23` |
 | Stdio close | 10 s, then `SIGKILL` | `connector.rs:34` |
 

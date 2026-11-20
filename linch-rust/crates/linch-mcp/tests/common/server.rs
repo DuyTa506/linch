@@ -178,6 +178,10 @@ impl ServerHandler for TestServer {
                 self.0.cancelled.notify_one();
                 CallToolResult::success(vec![])
             }
+            // A JSON-RPC error with a megabyte of text.
+            "rpc_error" => {
+                return Err(ErrorData::internal_error("e".repeat(1024 * 1024), None));
+            }
             other => {
                 return Err(ErrorData::invalid_params(
                     format!("unknown tool {other}"),

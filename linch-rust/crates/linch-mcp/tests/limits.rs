@@ -94,3 +94,21 @@ async fn cancels_waiting_on_a_stalled_server_are_capped() {
     drop(server);
     duplex.kill();
 }
+
+/// A JSON-RPC error's message reaches the model and the session log like a
+/// result's text, so it is cut like one.
+#[tokio::test]
+async fn a_json_rpc_error_message_is_capped_like_result_text() {
+    let (server, _duplex, registry) =
+        connect(Fixture::new(vec![tool("rpc_error", "Fails.")])).await;
+    let error = call(&registry, "mcp__t__rpc_error", text_input("x"))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code.as_deref(), Some(codes::PROTOCOL_ERROR));
+    assert!(
+        error.message.len() <= 31_000,
+        "the tool error text is {} bytes",
+        error.message.len()
+    );
+    server.disconnect().await;
+}

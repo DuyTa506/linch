@@ -9,18 +9,47 @@ use crate::codes;
 /// Longest result text, in bytes: Python's `OUTPUT_CAP`.
 const OUTPUT_CAP: usize = 30_000;
 
+/// Most images kept in `metadata.images` from one result; later ones are
+/// left out.
+const MAX_IMAGES: usize = 8;
+
+/// Most image data kept from one result, in bytes of the base64 text. An
+/// image that would pass it is left out.
+const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
+
+/// `text`, cut at [`OUTPUT_CAP`] bytes on a character boundary with a note
+/// when it was longer.
+pub(crate) fn capped(mut text: String) -> String {
+    if text.len() > OUTPUT_CAP {
+        let mut cut = OUTPUT_CAP;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+        text.push_str(&format!("\n… (output capped at {OUTPUT_CAP} bytes)"));
+    }
+    text
+}
+
 /// Map one result: the text blocks become the output, images go to
 /// `metadata.images`, and an `isError` result becomes a [`ToolOutputError`]
-/// carrying the same text. The text is cut at [`OUTPUT_CAP`].
+/// carrying the same text. The text is cut at [`OUTPUT_CAP`], and the images
+/// kept are at most [`MAX_IMAGES`] and [`MAX_IMAGE_BYTES`] in all.
 pub(crate) fn tool_result(result: CallToolResult) -> ToolResult {
     let mut parts = Vec::new();
     let mut images = Vec::new();
+    let mut image_bytes = 0usize;
     for block in &result.content {
         parts.push(match block {
             ContentBlock::Text(text) => text.text.clone(),
             ContentBlock::Image(image) => {
-                images.push(json!({"mime_type": image.mime_type, "data": image.data}));
-                "[image]".to_owned()
+                if images.len() < MAX_IMAGES && image_bytes + image.data.len() <= MAX_IMAGE_BYTES {
+                    image_bytes += image.data.len();
+                    images.push(json!({"mime_type": image.mime_type, "data": image.data}));
+                    "[image]".to_owned()
+                } else {
+                    "[image omitted: over the size limit]".to_owned()
+                }
             }
             ContentBlock::Audio(_) => "[audio content omitted]".to_owned(),
             ContentBlock::Resource(resource) => match &resource.resource {
@@ -38,19 +67,11 @@ pub(crate) fn tool_result(result: CallToolResult) -> ToolResult {
     {
         parts.push(structured.to_string());
     }
-    let mut text = if parts.is_empty() {
+    let text = capped(if parts.is_empty() {
         "(no content)".to_owned()
     } else {
         parts.join("\n")
-    };
-    if text.len() > OUTPUT_CAP {
-        let mut cut = OUTPUT_CAP;
-        while !text.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        text.truncate(cut);
-        text.push_str(&format!("\n… (output capped at {OUTPUT_CAP} bytes)"));
-    }
+    });
 
     if result.is_error == Some(true) {
         return Err(ToolOutputError {
@@ -125,6 +146,23 @@ mod tests {
         let error = tool_result(CallToolResult::error(vec![ContentBlock::text(long)])).unwrap_err();
         assert!(error.message.ends_with(note), "{}", error.message);
         assert!(error.message.len() <= 30_000 + note.len());
+    }
+
+    #[test]
+    fn images_are_bounded_in_count_and_total_size() {
+        let data = "A".repeat(1024 * 1024);
+        let many: Vec<ContentBlock> = (0..20)
+            .map(|_| ContentBlock::image(data.clone(), "image/png"))
+            .collect();
+        let output = tool_result(CallToolResult::success(many)).unwrap();
+        let kept = output.metadata["images"].as_array().unwrap();
+        let bytes: usize = kept
+            .iter()
+            .map(|image| image["data"].as_str().unwrap().len())
+            .sum();
+        assert!(kept.len() <= 8, "{} images kept", kept.len());
+        assert!(bytes <= 4 * 1024 * 1024, "{bytes} image bytes kept");
+        assert!(!kept.is_empty(), "the first images are kept");
     }
 
     #[test]
