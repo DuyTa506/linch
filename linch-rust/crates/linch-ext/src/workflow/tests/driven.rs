@@ -378,7 +378,7 @@ async fn a_replay_is_never_refused_by_max_call_keys() {
     })
     .await
     .unwrap();
-    assert_eq!(replayed, 0 + 1 + 2 + 3 + 4);
+    assert_eq!(replayed, 10);
 }
 
 #[tokio::test]
