@@ -42,6 +42,7 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use tokio_util::sync::CancellationToken;
 
 use crate::ApiKey;
+use crate::request::ErrorScrub;
 
 mod http;
 pub(crate) mod payload;
@@ -228,12 +229,12 @@ impl Provider for Gemini {
         .await
         .map_err(|err| self.options.request.scrub_error(err))?;
         let translator = stream::Translator::new(request.model, key.clone());
-        Ok(self.options.request.scrub_stream(stream::events(
+        Ok(stream::events(
             response.bytes_stream(),
             translator,
             cancel,
-            key.clone(),
-        )))
+            ErrorScrub::new(Some(key.clone()), &self.options.request),
+        ))
     }
 }
 

@@ -28,7 +28,11 @@ the [architecture providers page](../architecture/providers.md).
 
 `base_url` replaces the provider's endpoint. Any other field is refused at open
 with a `ProtocolError` (code -32602), so a config can never carry an
-`api_key`.
+`api_key`. In Rust, `Debug` and serializing an `AgentConfig` show a
+`base_url`'s user name, password and query as `redacted` (`https://redacted:redacted@gw/v1?redacted`)
+and drop its fragment, like an MCP URL, and `to_value_with_secrets` keeps them for the wire; a URL
+with none of the four is written as given, and one that has no host (`user:token@gw:8443/v1`
+parses as scheme `user`) is written as `[redacted]`. Put a token in the server's environment where you can.
 
 ### Request settings
 
@@ -107,7 +111,7 @@ replaces it for every model. Absent, it is Python Linch's:
 | `openai-chat` | `gpt-5.5` and `gpt-5.4` 400000, `o1` 200000, else 128000 |
 | `deepseek`, `scripted` | 128000 |
 | `vllm`, `sglang` | Asked when the agent opens: the model's `max_model_len` on `GET /v1/models` (a server with one model answers for any name), else 128000 |
-| `llamacpp` | Asked when the agent opens: `n_ctx` on `GET /props`, else 128000 |
+| `llamacpp` | Asked when the agent opens: `n_ctx` on `GET {base_url}/props`, else 128000. The probe stays under `base_url` (it never asks the parent of a `/v1` base), and a stock llama.cpp serves `/props` at its root only, so behind a `/v1` base set `context_window` |
 
 A server is asked once, for at most 2 seconds, with the same key as its calls;
 one that does not answer leaves 128000 and the open goes on.
@@ -519,7 +523,17 @@ provider refuses as longer than the model's context window (`context_length`)
 is never retried: with `spec.compaction` the run shortens it and calls again
 ([Memory](./memory.md#when-the-prompt-does-not-fit)). A cancelled call ends the run
 `aborted`. Each adapter has a 30 s connect timeout and a read timeout between
-reads (300 s or 600 s); there is no deadline on a whole call.
+reads (300 s or 600 s); there is no deadline on a whole call. Two other
+limits apply to a streamed response: one event may hold at most 16 MiB (from
+the end of the last event, a line with no end included), and a body that is
+not valid UTF-8 fails at the first bad byte; both end the call with a
+`stream` error, which is not retried (the next call would meet the same
+body, and a run that does not retry does not fail over either), after every
+event that the body completed
+before the fault has been delivered (so the result does not depend on where
+the network cut the chunks). Error text a provider sends inside a
+stream is cut to 500 characters, like an HTTP error body, after the provider
+key, header values and the cache salt are removed from it.
 
 Two [`spec`](./agent.md#spec) fields shape this:
 

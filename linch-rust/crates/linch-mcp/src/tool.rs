@@ -16,7 +16,7 @@ use tokio::sync::{Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::codes;
-use crate::result::tool_result;
+use crate::result::{capped, tool_result};
 use crate::server::ServerStatus;
 
 /// Longest argument summary in [`Tool::summarize`], in characters.
@@ -117,8 +117,8 @@ impl Link {
             ),
             ServiceError::McpError(error) => coded(
                 format!(
-                    "MCP server {server:?} rejected the call: {} (code {})",
-                    error.message, error.code.0
+                    "MCP server {server:?} rejected the call (code {}): {}",
+                    error.code.0, error.message
                 ),
                 codes::PROTOCOL_ERROR,
             ),
@@ -318,9 +318,11 @@ impl Drop for Abandon {
     }
 }
 
+/// A tool error. The message is cut like result text, since some of it
+/// (a JSON-RPC error's message) is the server's.
 fn coded(message: impl Into<String>, code: &str) -> ToolOutputError {
     ToolOutputError {
-        message: message.into(),
+        message: capped(message.into()),
         code: Some(code.to_owned()),
         details: None,
     }

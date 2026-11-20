@@ -23,6 +23,7 @@ pub const CAPABILITIES: &[&str] = &[
     "run_steer",
     "schedule",
     "workflow",
+    "workflow_step_abandon",
 ];
 
 /// The execution backends this build implements, in config order. Whether

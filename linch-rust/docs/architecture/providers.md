@@ -132,7 +132,7 @@ the adapter and must never hold credentials or request headers.
 | `Status { status, retry_after, message }` | Non-success HTTP status | 408, 429 and >= 500 only |
 | `ContextLength { status, message }` | The provider refused the prompt as longer than the model's context window. `status` is `None` for an error inside a stream. Each adapter maps its own provider's refusal ([below](#context-length-refusals)) | no |
 | `InvalidRequest { message }` | The adapter refused the request as built | no |
-| `Stream(StreamError)` | The event stream broke the stream contract | no |
+| `Stream(StreamError)` | The event stream broke the stream contract: an event the assembler refuses, one event over the 16 MiB bound (`EventTooLarge`), or a byte that is not UTF-8 (`NotUtf8`) | no |
 | `Cancelled` | The cancel token fired | no |
 
 Adapters never retry (`crates/linch-providers/src/lib.rs:4`); `retryable()`
@@ -334,8 +334,9 @@ Every adapter builds its client with `transport::client`
   not retryable.
 - **Bounded error bodies.** At most 8 KiB of a non-2xx body is read
   (`transport.rs:17`, `transport.rs:41`). The summary prefers the vendor's
-  error message, is redacted, then cut to 500 characters
-  (`crates/linch-providers/src/openai_compat/http.rs:73`).
+  error message and is redacted of the key there; the 500-character cut
+  comes last, after every secret is out (`RequestOptions::scrub_error`,
+  `crates/linch-providers/src/request.rs`).
 - **`Retry-After`** is read as whole seconds; an HTTP date is ignored. Gemini
   also reads a `RetryInfo` detail's `retryDelay`
   (`crates/linch-providers/src/gemini/http.rs:68-88`).
@@ -352,19 +353,38 @@ Read timeouts:
 ### The single SSE loop
 
 All five wire formats run through one loop, `sse::events`
-(`crates/linch-providers/src/sse.rs:45`). An adapter supplies a crate-private
-`Decoder` (`sse.rs:19`): `data` translates one non-blank `data:` payload and
+(`crates/linch-providers/src/sse.rs:202`). An adapter supplies a crate-private
+`Decoder` (`sse.rs:32`): `data` translates one non-blank `data:` payload and
 says whether the response is complete; `close` handles a body that ended
 early (a format with an end marker fails, one without finishes). The loop:
 
+- frames the body itself (`Framer`, `sse.rs:88`), in one pass over a buffer
+  with a cursor, so the cost is linear in the bytes whatever the chunk size.
+  It reads LF, CRLF and CR line ends, drops a leading byte order mark, joins
+  the `data` lines of an event, and drops comments and the `event`, `id` and
+  `retry` fields, which no decoder reads. The body end delivers a last event
+  with no trailing blank line;
+- bounds one event: the bytes read since the last event end, an unterminated
+  line included, may not pass `MAX_EVENT_BYTES` (16 MiB, `sse.rs:25`; the
+  largest real event is the Responses terminal event, which repeats the whole
+  output, about 2 MiB for a 128 000-token answer), and a byte that is not
+  UTF-8 fails the call when it is read. Both are `Stream` errors, which are never retried
+  (the next call meets the same body), and both
+  come after the events that the same chunk completed before the fault, so the
+  result does not depend on where chunks end. The buffer grows by doubling
+  but never past the bound, and a buffer over 1 MiB that a chunk leaves mostly
+  empty is given back (`KEEP_BYTES`), so one large event does not keep its memory
+  for the rest of the stream;
 - checks the cancel token before each read and races the read against it;
 - once the response is complete, yields what is queued even if a cancel
-  arrives, so the end and its usage are not lost (`sse.rs:99-103`);
-- yields nothing after an error (`sse.rs:156`);
-- scrubs the API key and every `Bearer <token>` from transport and status
-  messages (`sse.rs:137`);
-- appends a closing blank line so a last event with no trailing blank line
-  is still dispatched (`sse.rs:57-61`).
+  arrives, so the end and its usage are not lost (`sse.rs:242`);
+- yields nothing after an error (`sse.rs:327`);
+- cleans the text of every error in one order (`ErrorScrub`,
+  `crates/linch-providers/src/request.rs`): the API key and every
+  `Bearer <token>`, then every configured header value and the cache salt,
+  and only then the cut to 500 characters (`MAX_ERROR_CHARS`), so a secret
+  that straddles the cut leaves no part of itself behind. The errors that
+  come before a stream take the same order in `RequestOptions::scrub_error`.
 
 ### Credentials
 
@@ -441,7 +461,7 @@ behavior by accident.
 | llama.cpp (`servers/llamacpp.rs:31`) | `delta.reasoning_content` | yes | no (fails locally) | `max_tokens` | `enable_thinking: false` |
 
 A server is chosen with `ServerOptions::new(Server::Vllm, base_url)`
-(`crates/linch-providers/src/servers.rs:80`), which fills the
+(`crates/linch-providers/src/servers.rs:83`), which fills the
 `chat_template_kwargs` that server's docs give for turning thinking off. When
 a request asks for `Thinking::Disabled`, those kwargs are sent and effort is
 left out (`profile.rs:144-154`). The profile's `reasoning_effort` writes the
@@ -519,8 +539,12 @@ holds the lookups and probes): Anthropic 200000; Gemini 2000000 for
 `OpenAiChatOptions` and `ServerOptions` take a `context_window` that wins.
 A server profile states its rule (`ChatProfile::context`): vLLM and SGLang read
 each model's `max_model_len` from `GET /v1/models`, llama.cpp `n_ctx` from
-`GET /props` (then the root's), once in `prepare`, within 2 seconds, with the
-call's bearer key. A failed probe leaves 128000. Unlike Python, a configured
+`GET {base}/props` (a base that does not end in `/v1` also tries
+`{base}/v1/props`; the parent of a `/v1` base is never asked, since a tenant's
+`base_url` is admitted by its path and the probe sends the key), once in
+`prepare`, within 2 seconds, with the call's bearer key. A stock llama.cpp
+serves `/props` at its root only, so behind a `/v1` base it finds no window
+unless a proxy serves `{base}/props`: set `context_window` there. A failed probe leaves 128000. Unlike Python, a configured
 llama.cpp window skips the probe rather than serving as its fallback.
 
 ### Usage normalization

@@ -30,11 +30,11 @@ that finds the root run of a call's tree.
 
 | Method | Contract |
 |---|---|
-| `create(NewRun)` | One write: the run row at status `pending`, epoch 0, with its first checkpoint and events (seqs from 1). `Conflict` when the id exists; `SessionBusy` when the namespace already holds a non-terminal run of that session. The check and the insert are one atomic step (`store.rs:184-191`) |
-| `claim(namespace, run_id, owner)` | Take ownership: epoch + 1, status `running`, a `Lease`. The only way to `running`, including out of `awaiting_*`. Refused on a terminal run, and, on a store with a lease TTL, with `RunLeased` while another holder keeps the run's lease alive (`store.rs:193-205`) |
-| `seize(namespace, run_id, owner)` | `claim`, but also over a live lease of another holder. For `Agent::fail` and a parent taking its child runs back (`store.rs:207-217`) |
-| `lease_ttl()` | How long a claim holds without a renewal; `None` (the default) when claims never expire (`store.rs:219-228`) |
-| `renew(&Lease)` / `release(&Lease)` | Extend the lease by a whole TTL; end it early. Both match the lease's epoch; a renewal after a later claim is `LeaseLost`. Default no-ops (`store.rs:230-244`) |
+| `create(NewRun)` | One write: the run row at status `pending`, epoch 0, with its first checkpoint and events (seqs from 1). `Conflict` when the id exists or retention pruned it (a tombstone keeps it, also against a create that overlaps the delete); `SessionBusy` when the namespace already holds a non-terminal run of that session. The check and the insert are one atomic step (`store.rs:196-206`) |
+| `claim(namespace, run_id, owner)` | Take ownership: epoch + 1, status `running`, a `Lease`. The only way to `running`, including out of `awaiting_*`. Refused on a terminal run, and, on a store with a lease TTL, with `RunLeased` while another holder keeps the run's lease alive (`store.rs:193-207`) |
+| `seize(namespace, run_id, owner)` | `claim`, but also over a live lease of another holder. For `Agent::fail` and a parent taking its child runs back (`store.rs:209-219`) |
+| `lease_ttl()` | How long a claim holds without a renewal; `None` (the default) when claims never expire (`store.rs:221-230`) |
+| `renew(&Lease)` / `release(&Lease)` | Extend the lease by a whole TTL; end it early. Both match the lease's epoch; a renewal after a later claim is `LeaseLost`, and so is one after the release (a release leaves no live lease, and a renewal that lands late must not lease the run again). Default no-ops (`store.rs:232-246`) |
 | `load` | The current `RunRecord` |
 | `commit(&Lease, Commit)` | One atomic write of events (seqs continue `last_seq` with no gap), an optional checkpoint and an optional status. Accepted only on a `running` run under the current epoch. A terminal status is final |
 | `events(namespace, run_id, after_seq)` | Committed events after `after_seq`, in order |
@@ -202,7 +202,7 @@ schema. Queries are built at run time: building the crate needs no database.
 | `0007_run_principal.sql` | `linch_runs.principal`, nullable, no default (the principal a run was started for, as JSON): a resume, approve or answer that names none acts for it, so a role rule cannot be escaped by leaving the principal out of a continuation |
 | `0008_tool_cache.sql` | `linch_tool_cache` (`PgToolCache`: tool results by namespace and key digest, `expires_at` on the database's clock, `seq` to evict the oldest, `bytes` and `quota_group` for a tenant's byte cap; `output` is `TEXT`) and `linch_tool_cache_epoch` (a namespace's clear count, never deleted). A put and a clear of a namespace take one advisory lock (shared and exclusive) for their transaction, so a put whose epoch is behind is refused; a put also trims the quota group newest first and sweeps up to 100 expired rows of any namespace |
 | `0009_memories.sql` | `linch_memories` (`PgMemoryStore`: long-term memories by namespace and scope, `NULL` scope being the memory every session shares; `call_key` is the saving call's idempotency key, unique per namespace, so a replayed save stores one row; `terms` holds the words of the content and tags, each prefixed with a bucket hash of the namespace and scope, behind a GIN index, so a search reads only its own bucket's postings; a save under a cap takes an advisory lock per tenant root) |
-| `0010_retention.sql` | `linch_runs.ended_at` (stamped by the commit that moves a run to a terminal status; partial index `linch_runs_ended` for the pruner's keyset scan, and `linch_runs_unstamped` over the rows that were terminal before the migration), `linch_sessions.updated_at` (moved by create and append, not indexed so appends stay heap-only updates) and `linch_pruned_runs` (a tombstone per pruned run, read only on the not-found path of `load`, `events` and `claim`, which then returns `StoreError::NotFound { pruned: true }`). No existing row is rewritten: a backfilling `UPDATE` took 15 s per 500k runs, and an agent's open gives a migration 30 s |
+| `0010_retention.sql` | `linch_runs.ended_at` (stamped by the commit that moves a run to a terminal status; partial index `linch_runs_ended` for the pruner's keyset scan, and `linch_runs_unstamped` over the rows that were terminal before the migration), `linch_sessions.updated_at` (moved by create and append, not indexed so appends stay heap-only updates) and `linch_pruned_runs` (a tombstone per pruned run, read on the not-found path of `load`, `events` and `claim`, which then returns `StoreError::NotFound { pruned: true }`, and by `create`'s insert, which skips a pruned id so that `create` answers `Conflict` as it does for an existing one, and a retried `create` of a caller-chosen run id cannot start a second run after retention). No existing row is rewritten: a backfilling `UPDATE` took 15 s per 500k runs, and an agent's open gives a migration 30 s |
 
 JSON payloads (checkpoints, envelopes, log entries, task metadata) are `TEXT`,
 not `JSONB`: JSONB reorders keys and rewrites numbers, and the stores must
@@ -217,11 +217,11 @@ applied migration differs from the embedded one.
 
 | Write | Shape |
 |---|---|
-| Run `commit` | One autocommit statement (`crates/linch-postgres/src/run.rs:140-150`): an `UPDATE` that moves the run row only under the lease's epoch, while `running`, and when `last_seq` is the one the events continue; the events are inserted from the moved row, so they land with it or not at all |
+| Run `commit` | One autocommit statement (`crates/linch-postgres/src/run.rs:144-154`): an `UPDATE` that moves the run row only under the lease's epoch, while `running`, and when `last_seq` is the one the events continue; the events are inserted from the moved row, so they land with it or not at all |
 | Session `append` | One autocommit statement (`crates/linch-postgres/src/session.rs:17-24`): the length moves only from `expected_len`, and the entries are inserted from the moved row at positions `expected_len + n - 1` |
-| Run `create` | A transaction: insert the row with `ON CONFLICT (namespace, run_id) DO NOTHING`, then the first events (`run.rs:334`) |
-| Run `claim` / `seize` | A transaction that locks the row `FOR UPDATE` and reads its lease on the database clock (`clock_timestamp()`), refuses another holder's live lease (`claim` only), then sets status, epoch, owner, holder and `lease_until` (`run.rs:90-104`, `run.rs:250-300`) |
-| Lease `renew` / `release` | One autocommit statement each, matched on the epoch: `lease_until` a TTL from now, or NULL. A renewal that matches no row is `LeaseLost` (`run.rs:106-113`, `run.rs:305-331`) |
+| Run `create` | A transaction: insert the row with `ON CONFLICT (namespace, run_id) DO NOTHING`, then the first events (`run.rs:341`) |
+| Run `claim` / `seize` | A transaction that locks the row `FOR UPDATE` and reads its lease on the database clock (`clock_timestamp()`), refuses another holder's live lease (`claim` only), then sets status, epoch, owner, holder and `lease_until` (`run.rs:90-104`, `run.rs:254-304`) |
+| Lease `renew` / `release` | One autocommit statement each, matched on the epoch: `lease_until` a TTL from now, or NULL. A renewal that matches no row is `LeaseLost` (`run.rs:106-113`, `run.rs:309-338`) |
 | Task writes | A transaction that locks the session row first, so a session's task writes serialize: ids come out in order with no gaps and a claim has one winner (`crates/linch-postgres/src/tasks.rs:1-8`) |
 | File `edit` | A transaction that locks the file row `FOR UPDATE` (`crates/linch-postgres/src/files.rs:1-6`) |
 
@@ -234,12 +234,12 @@ wrote nothing and is retried, up to three tries in all (`lib.rs:153-166`).
 Admission is enforced by the partial unique index, not by a read. A violation
 of `linch_runs_one_live_per_session` reads the live run's id and returns
 `SessionBusy`; if that run ended in between, the insert is tried again, up to
-three times (`run.rs:196-220`, `run.rs:374-396`).
+three times (`run.rs:200-224`, `run.rs:381-408`).
 
 ### Refusal classification
 
 When a commit's statement moves no row, the store reads the row once more and
-names the refusal in the same order as the memory store (`run.rs:154-170`,
+names the refusal in the same order as the memory store (`run.rs:158-174`,
 `codec.rs:120`):
 
 1. no row: `NotFound`;
@@ -250,7 +250,7 @@ names the refusal in the same order as the memory store (`run.rs:154-170`,
 
 If the read finds nothing wrong, the row moved after the refused write and the
 commit is tried again. After three tries it is `Conflict` ("kept changing
-during a commit") (`run.rs:472-506`). A commit that no row could take (a
+during a commit") (`run.rs:505-539`). A commit that no row could take (a
 status of `pending`, an event of another run, or seqs that do not continue
 each other) skips the statement and goes straight to the read. A session append reads the length
 the same way: `NotFound`, or `Conflict` naming both lengths

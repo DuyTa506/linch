@@ -85,7 +85,7 @@ fn bad_configs_are_refused_without_echoing_tokens() {
         ),
         (
             json!({"http": "127.0.0.1:1", "tenants": {"a": {"tokens": [{"file": "x"}]}}}),
-            "unknown variant",
+            "expected an object with `env` or `value`",
         ),
         // An MCP entry is an object: a program alone names no arguments.
         (
@@ -123,6 +123,51 @@ fn bad_configs_are_refused_without_echoing_tokens() {
                                       "allow": {"mcp_commands": [{"command": "/bin/x",
                                                                   "env": ["LD_PRELOAD"]}]}}}));
     assert!(error.to_string().contains("LD_PRELOAD"), "{error}");
+}
+
+/// A secret given in the wrong shape (a bare string where `{"env": ...}` or
+/// `{"value": ...}` belongs) is refused, and the refusal, which
+/// `linch-server` prints on stderr, does not repeat it.
+#[test]
+fn a_config_error_does_not_echo_a_secret() {
+    let cases = [
+        (
+            "token",
+            r#"{"socket": "/tmp/x.sock", "tenants": {"acme": {"tokens": ["tok-SENTINEL-1"]}}}"#,
+        ),
+        (
+            "cache_salt_secret",
+            r#"{"socket": "/tmp/x.sock", "cache_salt_secret": "salt-SENTINEL-2", "tenants": {}}"#,
+        ),
+        (
+            "worker.dsn",
+            r#"{"tenants": {}, "worker": {"dsn": "postgres://linch:pw-SENTINEL-3@db/linch"}}"#,
+        ),
+        (
+            "a number",
+            r#"{"socket": "/tmp/x.sock", "tenants": {"acme": {"tokens": [4711]}}}"#,
+        ),
+        (
+            "a value of the wrong type",
+            r#"{"socket": "/tmp/x.sock", "tenants": {"acme": {"tokens": [{"value": ["tok-SENTINEL-4"]}]}}}"#,
+        ),
+        (
+            "an object with both keys",
+            r#"{"socket": "/tmp/x.sock", "tenants": {"acme": {"tokens": [{"value": "tok-SENTINEL-5", "env": "X"}]}}}"#,
+        ),
+        (
+            "an unknown key",
+            r#"{"socket": "/tmp/x.sock", "tenants": {"acme": {"tokens": [{"valeu": "tok-SENTINEL-6"}]}}}"#,
+        ),
+    ];
+    for (what, text) in cases {
+        let error = ServerConfig::from_json(text).unwrap_err().to_string();
+        assert!(!error.contains("SENTINEL"), "{what}: {error}");
+        assert!(
+            error.contains("expected an object with `env` or `value`"),
+            "{what}: {error}"
+        );
+    }
 }
 
 #[test]

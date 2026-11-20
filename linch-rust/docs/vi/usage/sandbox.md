@@ -119,7 +119,11 @@ giữ chúng.
 - **Không có đặc quyền hay namespace mới.** Một chương trình setuid không được thêm gì.
   Bộ lọc seccomp từ chối với `EPERM` các kernel module, `kexec`, `reboot`, swap, mọi
   lời gọi mount, `pivot_root` và `chroot`; keyring của người dùng (`keyctl`, `add_key`,
-  `request_key`), `bpf`, `perf_event_open` và `userfaultfd`; cùng `unshare`, `setns` và
+  `request_key`), `bpf`, `perf_event_open` và `userfaultfd`; System V IPC (`shmget`, `shmat`,
+  `shmctl`, `msgget`, `msgsnd`, `msgrcv`, `msgctl`, `semget`, `semop`, `semtimedop`,
+  `semctl`) và hàng đợi tin POSIX (`mq_open`, `mq_unlink`, `mq_timedsend`,
+  `mq_timedreceive`), mà đối tượng của chúng được kiểm tra theo user id nên sẽ cho một lệnh
+  chạm tới chương trình khác của user của server; cùng `unshare`, `setns` và
   `clone` với cờ `CLONE_NEW*`, nên ngay cả user namespace không đặc quyền cũng không mở
   được. `clone3`, mà bộ lọc không đọc được cờ của nó, nhận `ENOSYS` và glibc lùi về
   `clone`. `io_uring`, mà bộ lọc sẽ không thấy các request của nó, bị từ chối. Bộ lọc là một denylist: một
@@ -142,6 +146,12 @@ giữ chúng.
   `/proc/cpuinfo` và `/proc/meminfo`, và mọi thứ đọc `/proc/self` đều thất bại; Landlock
   không thể cấp cho một lệnh `/proc/self` của chính nó mà không cấp phần còn lại. Đừng
   đặt bí mật trên command line của server.
+- System V IPC bị từ chối (xem trên), nên một chương trình cần nó thất bại với
+  `Operation not permitted`: `fakeroot` (`shmget: Operation not permitted`; trước khi
+  chặn thì nó chạy được), người dùng `IPC::SysV` của Perl và mọi công cụ chia sẻ bộ nhớ,
+  hàng đợi hay semaphore theo cách đó. Một cơ sở dữ liệu lấy một segment bộ nhớ chia sẻ
+  System V lúc khởi động (PostgreSQL làm vậy cho interlock của nó) không thể khởi động trong
+  sandbox; PostgreSQL chưa được thử ở đây. Dùng `local` hoặc `docker` cho việc như vậy.
 - Các khóa `multiprocessing` của Python cần `/dev/shm`, vốn bị đóng, nên một `Pool` thất
   bại.
 - Giới hạn tính theo từng process, không theo từng lệnh: không có cgroup, nên không có

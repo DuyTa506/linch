@@ -155,15 +155,164 @@ pub struct TenantConfig {
     pub allow: AllowConfig,
 }
 
-/// Where a bearer token comes from. `Debug` hides an inline value.
+/// Where a bearer token comes from. `Debug` hides an inline value, and a
+/// value in the wrong shape is refused without being repeated.
 #[derive(Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(try_from = "serde_json::Value")]
 pub enum TokenSource {
     /// `{"env": "NAME"}`: the value of an environment variable of the
     /// server, read at startup.
     Env(String),
     /// `{"value": "..."}`: the token itself.
     Value(String),
+}
+
+impl TryFrom<serde_json::Value> for TokenSource {
+    type Error = &'static str;
+
+    /// Exactly one of `env` and `value`, a string. The error never holds
+    /// the value, which may be the secret itself given in the wrong shape.
+    fn try_from(value: serde_json::Value) -> Result<Self, Self::Error> {
+        const SHAPE: &str = TOKEN_SHAPE;
+        let serde_json::Value::Object(map) = value else {
+            return Err(SHAPE);
+        };
+        let mut entries = map.into_iter();
+        match (entries.next(), entries.next()) {
+            (Some((key, serde_json::Value::String(text))), None) => match key.as_str() {
+                "env" => Ok(Self::Env(text)),
+                "value" => Ok(Self::Value(text)),
+                _ => Err(SHAPE),
+            },
+            _ => Err(SHAPE),
+        }
+    }
+}
+
+/// What `TokenSource` says of a value that is not `{"env"}` or `{"value"}`.
+const TOKEN_SHAPE: &str = "expected an object with `env` or `value`";
+
+/// Kinds of value serde names, in its own words, at the start of an
+/// `invalid type` or `invalid value` message.
+const VALUE_KINDS: [&str; 15] = [
+    "string",
+    "integer",
+    "floating point",
+    "boolean",
+    "character",
+    "sequence",
+    "map",
+    "null",
+    "unit value",
+    "Option value",
+    "newtype struct",
+    "byte array",
+    "enum",
+    "unit variant",
+    "struct variant",
+];
+
+/// The text of a config parse error without any string of the input. The
+/// config holds secrets, and serde quotes the value that did not fit
+/// (`invalid type: string "tok-..."`) and the key it did not know (`unknown
+/// field `tok-...``), which `linch-server` would print on stderr.
+///
+/// The message is rebuilt from the parts that cannot come from the input:
+/// its start (the kind of error, which serde writes before the input's
+/// words) and its end (what was expected, which serde writes after them,
+/// and which is the part after the last `, expected `). Whatever lies
+/// between is dropped, whatever characters it holds. The line and column
+/// come from the error, not its text. A message of another shape is
+/// reduced to `invalid value`.
+fn redact(error: &serde_json::Error) -> String {
+    let full = error.to_string();
+    let place = format!(" at line {} column {}", error.line(), error.column());
+    let message = full.strip_suffix(&place).unwrap_or(&full);
+    let place = if message.len() == full.len() {
+        ""
+    } else {
+        place.as_str()
+    };
+    if error.classify() != serde_json::error::Category::Data {
+        // A syntax error names a byte of the file, never a string of it.
+        return format!("{message}{place}");
+    }
+    format!("{}{place}", data_error(message))
+}
+
+fn data_error(message: &str) -> String {
+    const NO_FIELDS: &str = ", there are no fields";
+    if message == TOKEN_SHAPE {
+        return message.to_owned();
+    }
+    let expected = message.rfind(", expected ").map(|at| &message[at + 2..]);
+    for kind in ["unknown field", "unknown variant"] {
+        if message.starts_with(&format!("{kind} `")) {
+            if message.ends_with(NO_FIELDS) {
+                return format!("{kind}{NO_FIELDS}");
+            }
+            return match expected.filter(|expected| names_only(expected)) {
+                Some(expected) => format!("{kind}, {expected}"),
+                None => kind.to_owned(),
+            };
+        }
+    }
+    for lead in ["invalid type: ", "invalid value: "] {
+        if let Some(rest) = message.strip_prefix(lead) {
+            let kind = VALUE_KINDS.iter().find(|kind| rest.starts_with(**kind));
+            let kind = kind.map_or(lead.trim_end_matches(": ").to_owned(), |kind| {
+                format!("{lead}{kind}")
+            });
+            return match expected {
+                Some(expected) => format!("{kind}, {expected}"),
+                None => kind,
+            };
+        }
+    }
+    if let Some(name) = message.strip_prefix("missing field `")
+        && name.strip_suffix('`').is_some_and(is_name)
+    {
+        return message.to_owned();
+    }
+    "invalid value".to_owned()
+}
+
+/// Whether `expected` is `expected` and then only field or variant names in
+/// backticks, as serde lists them: `expected `a``, `expected `a` or `b``,
+/// `expected one of `a`, `b``.
+fn names_only(expected: &str) -> bool {
+    let Some(list) = expected.strip_prefix("expected ") else {
+        return false;
+    };
+    let mut rest = list.strip_prefix("one of ").unwrap_or(list);
+    loop {
+        let Some(open) = rest.strip_prefix('`') else {
+            return false;
+        };
+        let Some((name, after)) = open.split_once('`') else {
+            return false;
+        };
+        if !is_name(name) {
+            return false;
+        }
+        if after.is_empty() {
+            return true;
+        }
+        match after
+            .strip_prefix(", ")
+            .or_else(|| after.strip_prefix(" or "))
+        {
+            Some(next) => rest = next,
+            None => return false,
+        }
+    }
+}
+
+fn is_name(text: &str) -> bool {
+    !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 impl fmt::Debug for TokenSource {
@@ -331,9 +480,11 @@ pub enum ConfigError {
     /// The file could not be read.
     #[error("cannot read the config: {0}")]
     Read(#[source] std::io::Error),
-    /// The JSON is malformed or has an unknown or mistyped field.
+    /// The JSON is malformed or has an unknown or mistyped field. The text
+    /// says where and what was expected, and never repeats a string of the
+    /// input.
     #[error("invalid config: {0}")]
-    Json(#[source] serde_json::Error),
+    Json(String),
     /// Neither `socket` nor `http` is set, and there is no `worker`.
     #[error("the config sets neither socket nor http nor worker")]
     NoListener,
@@ -426,7 +577,8 @@ impl ServerConfig {
     ///         a tenant a cap of 0, or allows `memory` without
     ///         `max_memories`.
     pub fn from_json(text: &str) -> Result<Self, ConfigError> {
-        let config: Self = serde_json::from_str(text).map_err(ConfigError::Json)?;
+        let config: Self =
+            serde_json::from_str(text).map_err(|error| ConfigError::Json(redact(&error)))?;
         if config.socket.is_none() && config.http.is_none() && config.worker.is_none() {
             return Err(ConfigError::NoListener);
         }

@@ -431,3 +431,84 @@ async fn admitting_a_config_again_adds_the_operator_sections_once() {
     tenant.admit(&mut config).await.unwrap();
     assert_eq!(config.spec.system.sections, once);
 }
+
+/// `linch_core::system::layout` sends every section, the operator's and the
+/// tenant's, sorted by `order`, each with its `cacheable` flag. The restore
+/// after a tenant's `before_provider_call` rewrite puts an operator block
+/// back where the request that was sent had it, so a rewrite that changes
+/// nothing yields the very same system (a cache hit), and an operator
+/// section the operator ordered last (a footer that is not cacheable) stays
+/// after the tenant's cacheable blocks.
+#[test]
+fn a_rewrite_that_changes_nothing_keeps_the_order_of_the_system() {
+    let sent = footer_request(&["Tone.", "Operator footer."]);
+    let confined = footer_tenant().confine_rewrite(&sent, sent.clone());
+    assert_eq!(confined.unwrap(), sent);
+}
+
+#[test]
+fn a_rewrite_puts_the_operators_blocks_back_where_they_were_sent() {
+    use linch::SystemBlock;
+
+    let sent = footer_request(&["Tone.", "Operator footer.", "Child body."]);
+    let tenant = footer_tenant();
+    let texts = |request: &linch::ProviderRequest| -> Vec<String> {
+        (request.system.iter())
+            .map(|block| block.text.clone())
+            .collect()
+    };
+    // The rewrite dropped every system block: the footer comes back as it
+    // was, not cacheable.
+    let mut dropped = sent.clone();
+    dropped.system.clear();
+    let confined = tenant.confine_rewrite(&sent, dropped).unwrap();
+    assert_eq!(confined.system, vec![sent.system[1].clone()]);
+    assert!(!confined.system[0].cacheable);
+    // The tenant's own blocks change around it.
+    let mut edited = sent.clone();
+    edited.system = vec![
+        SystemBlock {
+            text: "New tone.".into(),
+            cacheable: true,
+        },
+        SystemBlock {
+            text: "Extra.".into(),
+            cacheable: false,
+        },
+    ];
+    let confined = tenant.confine_rewrite(&sent, edited).unwrap();
+    assert_eq!(
+        texts(&confined),
+        ["New tone.", "Operator footer.", "Extra."]
+    );
+    // A request that carries none of the operator's (nothing to put back)
+    // is the callback's own.
+    let bare = footer_request(&["Tone."]);
+    let mut other = bare.clone();
+    other.system[0].text = "Changed.".into();
+    let confined = tenant.confine_rewrite(&bare, other.clone()).unwrap();
+    assert_eq!(confined, other);
+}
+
+fn footer_tenant() -> Tenant {
+    let footer = linch::SystemSection::new("footer", "Operator footer.")
+        .order(10)
+        .cacheable(false);
+    let allow = Allowlists::new()
+        .system_sections(std::slice::from_ref(&footer))
+        .unwrap();
+    Tenant::new("acme", allow).unwrap()
+}
+
+/// A request whose system is `texts`: the first cacheable (the tenant's
+/// section), "Operator footer." not.
+fn footer_request(texts: &[&str]) -> linch::ProviderRequest {
+    let system: Vec<_> = (texts.iter())
+        .enumerate()
+        .map(|(at, text)| serde_json::json!({"text": text, "cacheable": at == 0}))
+        .collect();
+    serde_json::from_value(serde_json::json!({
+        "model": "m", "tools": [], "messages": [], "system": system,
+    }))
+    .unwrap()
+}

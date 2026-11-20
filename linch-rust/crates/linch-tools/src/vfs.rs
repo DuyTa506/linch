@@ -41,7 +41,8 @@ use linch_core::SessionId;
 pub use composite::CompositeBackend;
 pub use disk::DiskBackend;
 pub use linch_core::vfs::{
-    BackendError, FileBackend, VfsError, apply_edit, conformance, file_path, normalize_path,
+    BackendError, FileBackend, OFFLOADED_TO, VfsError, apply_edit, conformance, file_path,
+    normalize_path, offload_path, without_offload_path,
 };
 pub use memory::{MemoryBackend, MemorySessions};
 pub use offload::{OffloadConfig, ResultOffload};

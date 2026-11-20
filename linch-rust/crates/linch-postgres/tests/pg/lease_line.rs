@@ -115,3 +115,62 @@ async fn a_killed_connection_is_replaced_by_the_next_renewal() {
     store.renew(&lease).await.unwrap();
     db.finish().await;
 }
+
+/// A renewal that lands after the holder released its run (the heartbeat
+/// task is aborted with a renewal in flight and the server still executes
+/// it) must not lease the run again: the release exists so that another
+/// process need not wait out the TTL.
+#[tokio::test]
+async fn a_renewal_after_the_release_leaves_the_run_free() {
+    let Some(db) = TestDb::migrated("renew_release").await else {
+        return;
+    };
+    let ttl = Duration::from_secs(30);
+    let a = PgRunStore::new(db.pool.clone()).with_lease_ttl(ttl);
+    let b = PgRunStore::new(db.pool.clone()).with_lease_ttl(ttl);
+    let run = new_run("ns", "r1", 0);
+    let id = run.run_id.clone();
+    a.create(run).await.unwrap();
+    let lease = a.claim("ns", &id, "a").await.unwrap();
+    a.release(&lease).await.unwrap();
+    // The late renewal of the same lease.
+    let late = a.renew(&lease).await;
+    let claimed = b.claim("ns", &id, "b").await;
+    db.finish().await;
+    assert!(
+        !matches!(claimed, Err(StoreError::RunLeased { .. })),
+        "a renewal after the release leased the run again (renew: {late:?}): {claimed:?}"
+    );
+}
+
+/// Renewing a held lease still extends it, and an expired lease that was
+/// never released still renews while its epoch is current (the epoch is
+/// the fence, not the clock).
+#[tokio::test]
+async fn a_renewal_while_the_lease_is_held_extends_it() {
+    let Some(db) = TestDb::migrated("renew_held").await else {
+        return;
+    };
+    let a = PgRunStore::new(db.pool.clone()).with_lease_ttl(Duration::from_secs(30));
+    let b = PgRunStore::new(db.pool.clone()).with_lease_ttl(Duration::from_secs(30));
+    let run = new_run("ns", "r1", 0);
+    let id = run.run_id.clone();
+    a.create(run).await.unwrap();
+    let lease = a.claim("ns", &id, "a").await.unwrap();
+    a.renew(&lease).await.expect("renew while held");
+    let claimed = b.claim("ns", &id, "b").await;
+    assert!(
+        matches!(claimed, Err(StoreError::RunLeased { .. })),
+        "{claimed:?}"
+    );
+    sqlx::query("UPDATE linch_runs SET lease_until = now() - interval '1 second'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let late = a.renew(&lease).await;
+    db.finish().await;
+    assert!(
+        late.is_ok(),
+        "an expired lease of the current epoch: {late:?}"
+    );
+}

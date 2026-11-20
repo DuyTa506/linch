@@ -70,6 +70,13 @@ pub struct WorkflowOptions {
     /// included; a call that would add one past it fails with
     /// [`WorkflowError::LimitExceeded`]. `None` is no cap.
     pub max_records: Option<u64>,
+    /// Most distinct call keys (one per call, whatever its occurrences, and
+    /// per branch) the run keeps counters for; a call with a new key past it
+    /// and no record to replay fails with [`WorkflowError::LimitExceeded`].
+    /// Calls that journal nothing (a failed call, a suspended interrupt) take
+    /// a key all the same, so this bounds what they keep in memory. `None`
+    /// is no cap.
+    pub max_call_keys: Option<usize>,
     /// Most bytes one record's JSON value may take; a call whose value is
     /// larger fails with [`WorkflowError::LimitExceeded`] and journals
     /// nothing. `None` is no cap.
@@ -108,6 +115,7 @@ impl WorkflowOptions {
             on_event: None,
             budget: None,
             max_records: None,
+            max_call_keys: None,
             max_record_bytes: None,
             live_gate: None,
             principal: None,

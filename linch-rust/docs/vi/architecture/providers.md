@@ -133,7 +133,7 @@ giờ được chứa thông tin xác thực hay header của request.
 | `Status { status, retry_after, message }` | Mã trạng thái HTTP không thành công | chỉ 408, 429 và >= 500 |
 | `ContextLength { status, message }` | Provider từ chối prompt vì dài hơn cửa sổ ngữ cảnh của model. `status` là `None` với lỗi bên trong một stream. Mỗi adapter ánh xạ lần từ chối của provider của nó ([bên dưới](#context-length-refusals)) | không |
 | `InvalidRequest { message }` | Adapter từ chối request như đã được dựng | không |
-| `Stream(StreamError)` | Event stream vi phạm hợp đồng stream | không |
+| `Stream(StreamError)` | Event stream vi phạm hợp đồng stream: một event mà assembler từ chối, một event vượt giới hạn 16 MiB (`EventTooLarge`), hoặc một byte không phải UTF-8 (`NotUtf8`) | không |
 | `Cancelled` | Cancel token đã kích hoạt | không |
 
 Các adapter không bao giờ retry (`crates/linch-providers/src/lib.rs:4`); `retryable()`
@@ -329,8 +329,8 @@ Mọi adapter dựng client của nó bằng `transport::client`
   retry được.
 - **Giới hạn thân lỗi.** Tối đa 8 KiB của một thân không phải 2xx được đọc
   (`transport.rs:17`, `transport.rs:41`). Bản tóm tắt ưu tiên thông báo lỗi của vendor,
-  được che dữ liệu nhạy cảm, rồi cắt còn 500 ký tự
-  (`crates/linch-providers/src/openai_compat/http.rs:73`).
+  được che key ở đó; việc cắt còn 500 ký tự đến sau cùng, khi mọi bí mật đã được
+  loại bỏ (`RequestOptions::scrub_error`, `crates/linch-providers/src/request.rs`).
 - **`Retry-After`** được đọc dưới dạng số giây nguyên; một ngày HTTP bị bỏ qua. Gemini
   cũng đọc `retryDelay` của một detail `RetryInfo`
   (`crates/linch-providers/src/gemini/http.rs:68-88`).
@@ -347,19 +347,36 @@ Read timeout:
 ### Vòng lặp SSE duy nhất
 
 Cả năm wire format chạy qua một vòng lặp, `sse::events`
-(`crates/linch-providers/src/sse.rs:45`). Một adapter cung cấp một `Decoder` riêng của
-crate (`sse.rs:19`): `data` dịch một payload `data:` không rỗng và
+(`crates/linch-providers/src/sse.rs:202`). Một adapter cung cấp một `Decoder` riêng của
+crate (`sse.rs:32`): `data` dịch một payload `data:` không rỗng và
 cho biết response đã hoàn tất chưa; `close` xử lý một body kết thúc sớm
 (một format có dấu kết thúc thì thất bại, format không có thì hoàn tất). Vòng lặp:
 
+- tự tách khung body (`Framer`, `sse.rs:88`), trong một lượt qua bộ đệm có con
+  trỏ, nên chi phí tuyến tính theo số byte bất kể kích thước chunk. Nó đọc dấu
+  xuống dòng LF, CRLF và CR, bỏ byte order mark ở đầu, nối các dòng `data` của
+  một event, và bỏ comment cùng các trường `event`, `id`, `retry` mà không
+  decoder nào đọc. Khi body kết thúc, event cuối không có dòng trống theo sau
+  vẫn được giao;
+- chặn kích thước một event: số byte đọc từ cuối event trước, gồm cả một dòng
+  chưa kết thúc, không được vượt `MAX_EVENT_BYTES` (16 MiB, `sse.rs:25`; event
+  thật lớn nhất là event kết thúc của Responses, lặp lại toàn bộ output, khoảng
+  2 MiB cho một câu trả lời 128 000 token), và một byte không phải UTF-8 làm
+  lời gọi thất bại ngay khi được đọc. Cả hai là lỗi `Stream`, không bao giờ được retry (lần gọi sau gặp đúng body đó), và đều đến sau các
+  event mà cùng chunk đó đã hoàn tất trước lỗi, nên kết quả không phụ thuộc vào chỗ
+  chunk kết thúc. Bộ đệm tăng gấp đôi nhưng không bao giờ vượt quá giới hạn, và
+  một bộ đệm trên 1 MiB mà một chunk để lại gần như trống sẽ được trả lại
+  (`KEEP_BYTES`), nên một event lớn không giữ bộ nhớ của nó cho phần còn lại của
+  stream;
 - kiểm tra cancel token trước mỗi lần đọc và cho lần đọc chạy đua với nó;
 - khi response đã hoàn tất, yield những gì đang xếp hàng kể cả khi một lệnh hủy
-  đến, để phần kết thúc và usage của nó không bị mất (`sse.rs:99-103`);
-- không yield gì sau một lỗi (`sse.rs:156`);
-- xóa API key và mọi `Bearer <token>` khỏi các thông báo transport và status
-  (`sse.rs:137`);
-- thêm một dòng trống kết thúc để event cuối không có dòng trống theo sau
-  vẫn được dispatch (`sse.rs:57-61`).
+  đến, để phần kết thúc và usage của nó không bị mất (`sse.rs:242`);
+- không yield gì sau một lỗi (`sse.rs:327`);
+- làm sạch văn bản của mọi lỗi theo một thứ tự (`ErrorScrub`,
+  `crates/linch-providers/src/request.rs`): API key và mọi `Bearer <token>`, rồi mọi
+  giá trị header đã cấu hình và cache salt, và chỉ sau đó mới cắt còn 500 ký tự
+  (`MAX_ERROR_CHARS`), nên một bí mật nằm vắt qua điểm cắt không để lại phần nào.
+  Các lỗi xảy ra trước stream theo cùng thứ tự trong `RequestOptions::scrub_error`.
 
 ### Thông tin xác thực
 
@@ -434,7 +451,7 @@ mỗi đích nêu mọi quy tắc, nên một server không bao giờ vô tình 
 | llama.cpp (`servers/llamacpp.rs:31`) | `delta.reasoning_content` | có | không (thất bại tại chỗ) | `max_tokens` | `enable_thinking: false` |
 
 Một server được chọn bằng `ServerOptions::new(Server::Vllm, base_url)`
-(`crates/linch-providers/src/servers.rs:80`), thứ điền
+(`crates/linch-providers/src/servers.rs:83`), thứ điền
 `chat_template_kwargs` mà tài liệu của server đó nêu để tắt thinking. Khi
 một request yêu cầu `Thinking::Disabled`, các kwargs đó được gửi và effort bị
 bỏ ra (`profile.rs:144-154`). `reasoning_effort` của profile quyết định cách
@@ -511,8 +528,12 @@ chứa các phép tra cứu và thăm dò): Anthropic 200000; Gemini 2000000 cho
 `OpenAiChatOptions` và `ServerOptions` nhận một `context_window` được ưu tiên.
 Một server profile nêu quy tắc của nó (`ChatProfile::context`): vLLM và SGLang đọc
 `max_model_len` của từng model từ `GET /v1/models`, llama.cpp đọc `n_ctx` từ
-`GET /props` (rồi đến của gốc), một lần trong `prepare`, trong vòng 2 giây, với
-bearer key của lời gọi. Một lần thăm dò thất bại để lại 128000. Không giống Python, một
+`GET {base}/props` (base không kết thúc bằng `/v1` thì còn thử `{base}/v1/props`;
+không bao giờ hỏi đường dẫn cha của một base `/v1`, vì `base_url` của tenant được
+duyệt theo đường dẫn và lần thăm dò gửi kèm key), một lần trong `prepare`, trong vòng
+2 giây, với bearer key của lời gọi. llama.cpp gốc chỉ phục vụ `/props` ở đường dẫn gốc,
+nên sau một base `/v1` nó không tìm được cửa sổ trừ khi một proxy phục vụ `{base}/props`:
+hãy đặt `context_window` ở đó. Một lần thăm dò thất bại để lại 128000. Không giống Python, một
 cửa sổ llama.cpp đã cấu hình bỏ qua lần thăm dò thay vì dùng làm phương án dự phòng của nó.
 
 ### Chuẩn hóa usage

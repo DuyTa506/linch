@@ -58,6 +58,7 @@ use crate::ApiKey;
 use crate::context::{self, ContextRule, Probed};
 use crate::openai_compat::stream::Translator;
 use crate::openai_compat::{http, stream};
+use crate::request::ErrorScrub;
 use crate::servers::ServerOptions;
 
 mod profile;
@@ -344,11 +345,11 @@ impl Provider for OpenAiChat {
             self.profile.usage,
         )
         .refusing(overflow);
-        Ok(self.request.scrub_stream(stream::events(
+        Ok(stream::events(
             response.bytes_stream(),
             translator,
             cancel,
-            self.api_key.clone(),
-        )))
+            ErrorScrub::new(self.api_key.clone(), &self.request),
+        ))
     }
 }

@@ -238,16 +238,34 @@ impl<'a> Eval<'a> {
             .map(shell::trim_blanks);
         for segment in segments.filter(|s| !s.is_empty()) {
             any = true;
-            let first = pool.iter().find(|r| {
-                r.patterns
-                    .iter()
-                    .any(|p| shell::pattern_matches(p, segment))
-            });
-            match first.map(|r| r.decision) {
-                Some(RuleDecision::Deny) => return Some(RuleDecision::Deny),
-                Some(RuleDecision::Ask) => ask = true,
-                Some(RuleDecision::Allow) => {}
-                None => all_allowed = false,
+            let matching = |text: &str| {
+                pool.iter()
+                    .find(|r| r.patterns.iter().any(|p| shell::pattern_matches(p, text)))
+            };
+            let first = |text: &str| matching(text).map(|r| r.decision);
+            // A prefix (`X=1 rm`, `if x; then rm`) or a quoted spelling
+            // (`\rm`, `git 'push'`) hides the command from the segment's own
+            // text, so deny and ask rules also see it stripped and unquoted. An
+            // allow never comes from those forms.
+            let own_rule = matching(segment);
+            let own = own_rule.map(|r| r.decision);
+            let allow_all = own_rule.is_some_and(|r| r.patterns.iter().any(|p| p.trim() == "*"));
+            let behind = shell::strip_command_prefix(segment);
+            let plain = shell::unquote_words(behind);
+            let hidden: Vec<Option<RuleDecision>> = [behind, plain.as_str()]
+                .into_iter()
+                .filter(|text| !text.is_empty() && *text != segment)
+                .map(first)
+                .collect();
+            if own == Some(RuleDecision::Deny) || hidden.contains(&Some(RuleDecision::Deny)) {
+                return Some(RuleDecision::Deny);
+            }
+            if own == Some(RuleDecision::Ask) || hidden.contains(&Some(RuleDecision::Ask)) {
+                ask = true;
+            } else if own.is_none() || (!allow_all && shell::redirects_to_file(segment)) {
+                // A narrow allow covers a command, not what it writes to a
+                // file; the bare `*` already covers every command.
+                all_allowed = false;
             }
         }
         if ask {
