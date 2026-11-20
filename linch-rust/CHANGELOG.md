@@ -6,6 +6,7 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ## Unreleased
 
+- The usage docs state that name-based bash deny and ask rules are best effort against a shell the engine does not run, list the classes they do not cover, and describe the normalised words form exactly.
 - Behind `env`, any word that holds a `=` is an assignment for deny and ask rules, so `env a.b=1 touch M` reaches a `touch *` rule; a `${` followed by a blank or `|` counts as syntax the splitter cannot model (bash 5.3 command substitution).
 - A redirection between a wrapper option (`env -u`, `time -o`, `exec -a`) and its argument no longer makes the argument the command for deny and ask rules.
 - Bash deny and ask rules always match the words of a segment normalised (blanks collapsed, redirections dropped wherever they appear), so `git push *` covers `git  push origin`, `git<TAB>push origin` and `git 2>&1 push origin`.
