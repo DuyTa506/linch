@@ -4,10 +4,11 @@ mod common;
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::{
     Duplex, Fixture, PATIENCE, call, config, connect, eventually, standard_tools, text_input, tool,
+    tool_described,
 };
 use linch_core::ToolRegistry;
 use linch_mcp::{McpServer, codes};
@@ -109,6 +110,74 @@ async fn a_json_rpc_error_message_is_capped_like_result_text() {
         error.message.len() <= 31_000,
         "the tool error text is {} bytes",
         error.message.len()
+    );
+    server.disconnect().await;
+}
+
+/// Eight tools of 1 MiB of description are 8 MiB for the model every turn:
+/// the first listing past the byte bound is refused, and registers nothing.
+#[tokio::test]
+async fn a_tool_list_over_the_byte_bound_is_refused() {
+    let huge = (0..8)
+        .map(|i| tool_described(format!("t{i}"), "d".repeat(1024 * 1024)))
+        .collect();
+    let registry = Arc::new(ToolRegistry::new());
+    let duplex = Duplex::new(Fixture::new(huge));
+    let connected = McpServer::connect(config("t", duplex), Arc::clone(&registry)).await;
+    assert!(
+        connected.is_err(),
+        "8 MiB of tool descriptions were accepted"
+    );
+    assert!(registry.snapshot().definitions().is_empty());
+}
+
+/// A relist over the byte bound keeps the tools the server has, like a
+/// relist that failed.
+#[tokio::test]
+async fn a_relist_over_the_byte_bound_keeps_the_current_tools() {
+    let fixture = Fixture::new(standard_tools());
+    let (server, _duplex, _registry) = connect(fixture.clone()).await;
+    let before = fixture.lists.load(Ordering::SeqCst);
+    fixture.set_tools(
+        (0..8)
+            .map(|i| tool_described(format!("t{i}"), "d".repeat(1024 * 1024)))
+            .collect(),
+    );
+    eventually("the relist to reach the server", || async {
+        fixture.lists.load(Ordering::SeqCst) > before
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        server.tools().contains(&"mcp__t__echo".to_owned()),
+        "{:?}",
+        server.tools()
+    );
+    server.disconnect().await;
+}
+
+/// A server that sends a burst of `list_changed` costs a few listings, not
+/// one per notification, and the last change is still applied.
+#[tokio::test]
+async fn a_burst_of_list_changes_is_relisted_a_few_times() {
+    let fixture = Fixture::new(standard_tools());
+    let (server, _duplex, _registry) = connect(fixture.clone()).await;
+    let before = fixture.lists.load(Ordering::SeqCst);
+    let began = Instant::now();
+    for i in 0..20 {
+        fixture.set_tools(vec![tool(format!("n{i}"), "Changing.")]);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    eventually("the last change to be listed", || async {
+        server.tools() == ["mcp__t__n19"]
+    })
+    .await;
+    let lists = fixture.lists.load(Ordering::SeqCst) - before;
+    // One at once, then at most one a second while the burst lasts.
+    let allowed = 3 + began.elapsed().as_secs() as usize;
+    assert!(
+        lists <= allowed,
+        "{lists} listings for 20 notifications, {allowed} allowed"
     );
     server.disconnect().await;
 }

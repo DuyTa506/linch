@@ -118,8 +118,15 @@ Phần diff của relist chỉ chạm vào những gì đã thay đổi (`catalo
   cache phụ thuộc vào thứ tự);
 - một tool mà server không còn liệt kê thì bị dispose.
 
-Một lần relist thất bại hoặc hết thời gian giữ nguyên các tool hiện tại; một transport
-đóng trong lúc relist sẽ bắt đầu một lần kết nối lại.
+Relist bị giới hạn tốc độ (`server.rs`, `MIN_RELIST_INTERVAL`): thông báo đầu tiên sau
+một quãng yên lặng relist ngay, còn thông báo đến trong vòng 1 s kể từ lúc relist
+trước bắt đầu, hoặc trong lúc một relist đang chạy, thì chờ hết giây đó; các thông báo
+đến trong lúc chờ dùng chung một relist tiếp theo, nên một server gửi dồn dập tốn tối đa
+một lần liệt kê mỗi giây (kết nối lại vẫn relist ngay). Một lần liệt kê vượt 4 MiB tên,
+mô tả và input schema của tool (`MAX_LIST_BYTES`) bị từ chối toàn bộ.
+
+Một lần relist thất bại, bị từ chối hoặc hết thời gian giữ nguyên các tool hiện tại; một
+transport đóng trong lúc relist sẽ bắt đầu một lần kết nối lại.
 
 ### Kết nối lại
 
@@ -178,6 +185,8 @@ Những gì một server có thể khiến client giữ hoặc chờ
 |---|---|---|
 | Số trang `tools/list` cho mỗi lần liệt kê | 100 | `server.rs:20` |
 | Số tool giữ lại từ một lần liệt kê | 1000 | `server.rs:23` |
+| Số byte của một lần liệt kê (tên, mô tả và input schema dạng JSON) | 4 MiB, kiểm tra sau mỗi trang; vượt thì lần liệt kê đầu làm kết nối thất bại với `ConnectError::ListTooLarge` và một relist giữ nguyên các tool hiện có | `server.rs` (`MAX_LIST_BYTES`) |
+| Thời gian giữa hai relist do `list_changed` | 1 s, các thông báo ở giữa dùng chung một relist | `server.rs` (`MIN_RELIST_INTERVAL`) |
 | Một lần thử kết nối, subscribe lại hoặc relist | `attempt_timeout` (30 s) | `server.rs:241`, `server.rs:285` |
 | Một lời gọi tool | `call_timeout` (300 s) | `tool.rs:264` |
 | Số lệnh hủy đang chờ trên một kết nối | 64; các lệnh sau đó bị bỏ | `tool.rs:29` |

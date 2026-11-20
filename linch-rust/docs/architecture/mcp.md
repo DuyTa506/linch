@@ -119,8 +119,16 @@ The relist diff touches only what changed (`catalog.rs:33-72`):
   cache depends on the order);
 - a tool the server no longer lists is disposed.
 
-A failed or timed-out relist keeps the current tools; a closed transport
-during a relist starts a reconnect.
+Relists are rate limited (`server.rs`, `MIN_RELIST_INTERVAL`): the first
+notification after a quiet spell relists at once, and one that arrives within
+1 s of the last relist's start, or while a relist runs, waits for the end of
+that second; the notifications that arrive meanwhile share the one relist that
+follows, so a server that sends a burst costs at most one listing a second
+(a reconnect relists at once, as before). A listing over 4 MiB of tool names,
+descriptions and input schemas (`MAX_LIST_BYTES`) is refused whole.
+
+A failed, refused or timed-out relist keeps the current tools; a closed
+transport during a relist starts a reconnect.
 
 ### Reconnect
 
@@ -182,6 +190,8 @@ What one server can make the client hold or wait for
 |---|---|---|
 | `tools/list` pages per listing | 100 | `server.rs:20` |
 | Tools kept from one listing | 1000 | `server.rs:23` |
+| Bytes in one listing (names, descriptions and input schemas as JSON) | 4 MiB, checked after each page; over it the first listing fails the connect with `ConnectError::ListTooLarge` and a relist keeps the current tools | `server.rs` (`MAX_LIST_BYTES`) |
+| Time between two `list_changed` relists | 1 s, notifications in between share one relist | `server.rs` (`MIN_RELIST_INTERVAL`) |
 | One connect, resubscribe or relist attempt | `attempt_timeout` (30 s) | `server.rs:241`, `server.rs:285` |
 | One tool call | `call_timeout` (300 s) | `tool.rs:264` |
 | Cancels waiting on one connection | 64; later ones are dropped | `tool.rs:29` |

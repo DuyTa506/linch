@@ -28,6 +28,8 @@ pub struct Fixture {
     pub cancelled: Arc<Notify>,
     /// `subscriptions/listen` streams opened so far.
     pub subscriptions: Arc<AtomicUsize>,
+    /// `tools/list` requests answered or started so far.
+    pub lists: Arc<AtomicUsize>,
     /// While set, `tools/list` never answers.
     pub hang_lists: Arc<AtomicBool>,
     /// Notified when a `tools/list` request starts hanging.
@@ -47,6 +49,7 @@ impl Fixture {
             version: Arc::new(watch::Sender::new(0)),
             cancelled: Arc::new(Notify::new()),
             subscriptions: Arc::new(AtomicUsize::new(0)),
+            lists: Arc::new(AtomicUsize::new(0)),
             hang_lists: Arc::new(AtomicBool::new(false)),
             hung: Arc::new(Notify::new()),
             end_subscription: Arc::new(Notify::new()),
@@ -92,6 +95,13 @@ pub fn tool(name: impl Into<Cow<'static, str>>, description: &'static str) -> To
     Tool::new(name, description, Arc::new(schema))
 }
 
+/// A tool with a description of the caller's length.
+pub fn tool_described(name: impl Into<Cow<'static, str>>, description: String) -> Tool {
+    let mut tool = tool(name, "");
+    tool.description = Some(Cow::Owned(description));
+    tool
+}
+
 /// The tools the server can run.
 pub fn standard_tools() -> Vec<Tool> {
     vec![
@@ -134,6 +144,7 @@ impl ServerHandler for TestServer {
         request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
+        self.0.lists.fetch_add(1, Ordering::SeqCst);
         if self.0.hang_lists.load(Ordering::SeqCst) {
             self.0.hung.notify_one();
             context.ct.cancelled().await;

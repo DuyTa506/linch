@@ -48,6 +48,12 @@ pub enum ConnectError {
     /// `tools/list` failed.
     #[error("could not list the MCP server's tools: {0}")]
     ListTools(#[source] ServiceError),
+    /// The server's tool list is over the size bound, so none of it is used.
+    #[error("the MCP server's tool list is over {limit} bytes of names, descriptions and schemas")]
+    ListTooLarge {
+        /// The bound, in bytes.
+        limit: usize,
+    },
     /// The attempt took longer than the policy's `attempt_timeout`.
     #[error("MCP connection attempt timed out after {} s", .0.as_secs_f64())]
     Timeout(Duration),

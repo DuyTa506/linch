@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use linch_core::ToolRegistry;
 use rmcp::model::PaginatedRequestParams;
@@ -9,6 +10,7 @@ use rmcp::service::{Peer, RoleClient, RunningService, ServiceError};
 use thiserror::Error;
 use tokio::sync::{Notify, Semaphore, watch};
 use tokio::task::JoinHandle;
+use tokio::time::{Instant, error::Elapsed};
 use tokio_util::sync::CancellationToken;
 
 use crate::catalog::{Catalog, SkippedTool};
@@ -22,6 +24,19 @@ const MAX_LIST_PAGES: usize = 100;
 
 /// Most tools kept from one listing; the rest are left out.
 const MAX_TOOLS: usize = 1_000;
+
+/// Most bytes in one listing: the sum, over its tools, of the name, the
+/// description and the input schema as JSON. They go into the model's prompt
+/// every turn. A listing past it is refused whole: the first one fails the
+/// connect, a relist keeps the tools the server already has.
+const MAX_LIST_BYTES: usize = 4 * 1024 * 1024;
+
+/// Shortest time between the starts of two relists that
+/// `notifications/tools/list_changed` asks for. A notification that arrives
+/// sooner (or while a relist runs) waits, and the notifications that
+/// arrive meanwhile share the one relist that follows; the first
+/// notification after a quiet spell relists at once.
+const MIN_RELIST_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Where a server's connection stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,6 +246,7 @@ impl Supervisor {
         let stop = service.cancellation_token();
         let ended = service.waiting();
         tokio::pin!(ended);
+        let mut last_relist = None;
         let ended_by_itself = loop {
             tokio::select! {
                 biased;
@@ -242,12 +258,15 @@ impl Supervisor {
                     () = close.cancelled() => break false,
                     () = lost.cancelled() => break false,
                     _ = &mut ended => break true,
-                    listed = tokio::time::timeout(self.policy.attempt_timeout, list_tools(&peer)) => {
+                    listed = self.relist(&peer, &list_changed, &mut last_relist) => {
                         match listed {
                             Ok(Ok(tools)) => self.sync(tools),
-                            Ok(Err(ServiceError::TransportClosed)) => lost.cancel(),
-                            // A failed or timed-out relist keeps the current
-                            // tools; the next change or reconnect lists again.
+                            Ok(Err(ConnectError::ListTools(ServiceError::TransportClosed))) => {
+                                lost.cancel();
+                            }
+                            // A failed, refused or timed-out relist keeps the
+                            // current tools; the next change or reconnect
+                            // lists again.
                             _ => {}
                         }
                     }
@@ -266,6 +285,25 @@ impl Supervisor {
             stop.cancel();
             let _ = ended.await;
         }
+    }
+
+    /// List the tools again for a `list_changed`, at least
+    /// [`MIN_RELIST_INTERVAL`] after the last relist began. The wait comes
+    /// first and takes in the notifications that arrived during it, so the
+    /// listing that follows answers them all; `attempt_timeout` covers the
+    /// listing alone.
+    async fn relist(
+        &self,
+        peer: &Peer<RoleClient>,
+        list_changed: &Notify,
+        last: &mut Option<Instant>,
+    ) -> Result<Result<Vec<rmcp::model::Tool>, ConnectError>, Elapsed> {
+        if let Some(began) = *last {
+            tokio::time::sleep_until(began + MIN_RELIST_INTERVAL).await;
+            let _ = tokio::time::timeout(Duration::ZERO, list_changed.notified()).await;
+        }
+        *last = Some(Instant::now());
+        tokio::time::timeout(self.policy.attempt_timeout, list_tools(peer)).await
     }
 
     async fn reconnect(&self, close: &CancellationToken) -> Option<(Live, Vec<rmcp::model::Tool>)> {
@@ -363,21 +401,31 @@ async fn prepare(
             if let Some(listener) = listener {
                 listener.stop().await;
             }
-            Err(ConnectError::ListTools(error))
+            Err(error)
         }
     }
 }
 
 /// Follow `tools/list` pages to the end, or until [`MAX_LIST_PAGES`] pages
 /// or [`MAX_TOOLS`] tools, so a server cannot keep the client listing or
-/// holding tools without end.
-async fn list_tools(peer: &Peer<RoleClient>) -> Result<Vec<rmcp::model::Tool>, ServiceError> {
+/// holding tools without end. A listing over [`MAX_LIST_BYTES`] is
+/// [`ConnectError::ListTooLarge`], checked after each page so later pages
+/// are not asked for.
+async fn list_tools(peer: &Peer<RoleClient>) -> Result<Vec<rmcp::model::Tool>, ConnectError> {
     let mut tools = Vec::new();
+    let mut bytes = 0usize;
     let mut cursor = None;
     for _ in 0..MAX_LIST_PAGES {
         let page = peer
             .list_tools(Some(PaginatedRequestParams::default().with_cursor(cursor)))
-            .await?;
+            .await
+            .map_err(ConnectError::ListTools)?;
+        bytes += page.tools.iter().map(listed_bytes).sum::<usize>();
+        if bytes > MAX_LIST_BYTES {
+            return Err(ConnectError::ListTooLarge {
+                limit: MAX_LIST_BYTES,
+            });
+        }
         tools.extend(page.tools);
         cursor = page.next_cursor;
         if cursor.is_none() || tools.len() >= MAX_TOOLS {
@@ -386,6 +434,14 @@ async fn list_tools(peer: &Peer<RoleClient>) -> Result<Vec<rmcp::model::Tool>, S
     }
     tools.truncate(MAX_TOOLS);
     Ok(tools)
+}
+
+/// What one tool adds to the model's prompt, in bytes: its name, its
+/// description and its input schema as JSON.
+fn listed_bytes(tool: &rmcp::model::Tool) -> usize {
+    let description = tool.description.as_deref().map_or(0, str::len);
+    let schema = serde_json::to_vec(tool.input_schema.as_ref()).map_or(0, |json| json.len());
+    tool.name.len() + description + schema
 }
 
 fn lock(catalog: &Mutex<Catalog>) -> MutexGuard<'_, Catalog> {
