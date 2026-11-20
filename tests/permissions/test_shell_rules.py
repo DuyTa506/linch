@@ -38,9 +38,11 @@ def _deny_rm(command: str) -> str:
 
 _SUPPORTED = [
     "pytest -q 2>&1",
+    "pytest -q > test.log",
+    "pytest -q >> test.log",
+    "python script.py < input.txt > output.txt",
     "cat < input.txt",
     "pytest -q > /dev/null 2>&1",
-    "python script.py < input.txt 2> /dev/null",
     "git status | cat",
     "ruff check . | tee ruff.log",
     "npm test 2>&1 | tee npm.log",
@@ -51,7 +53,7 @@ _SUPPORTED = [
     "echo hi >&2",
     "cat <&3",
     "build 2>&1 && deploy",
-    "build >/dev/null 2>&1 | tee run.log",
+    "build >out.log 2>&1 | tee run.log",
     "tail -f app.log 2>/dev/null",
     "printf '&'",
     "printf '$(literal)'",

@@ -157,3 +157,28 @@ def test_the_stricter_of_two_pooled_bash_rules_decides_a_file_redirect() -> None
     # once per layer and would allow here. The stricter Python result is kept.
     rules: list[PermissionRule] = [BashRule("echo", "allow"), BashRule("echo *", "ask")]
     assert _bash(rules, "echo x > f", "skip-dangerous") == "ask"
+
+
+def test_an_allow_rule_does_not_cover_a_redirect_to_a_file_spelled_like_a_descriptor() -> None:
+    assert _allow_echo("echo hi >&2") == "allow"
+    assert _allow_echo("echo hi >&-") == "allow"
+    assert _allow_echo("echo hi >&M") == "ask"
+    assert _allow_echo("echo hi >&/dev/null") == "ask"  # unparsed: `>&` then a name
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo hi >&2file",
+        "echo hi >&1M",
+        "echo hi 1>&2file",
+        "echo hi >&2-M",
+        'echo hi >&2"file"',
+        "echo hi >&-file",
+        "echo hi >&2-",
+    ],
+)
+def test_a_redirect_to_a_file_spelled_like_a_descriptor_is_a_file_redirect(command: str) -> None:
+    assert _allow_echo(command) == "ask"
+    # The allow-all rule treats them like any other file redirect.
+    assert _bash([BashRule("*", "allow")], command) == "allow"

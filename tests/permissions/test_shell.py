@@ -195,6 +195,12 @@ def test_patterns_match_by_glob_or_word_prefix(pattern: str, segment: str, expec
         'a >"f"',
         "a 2>&1 > f",
         "a >",
+        "a >&2file",
+        "a >&1M",
+        "a >&2-M",
+        'a >&2"file"',
+        "a >&-file",
+        "a >&2-",
     ],
 )
 def test_file_redirects_are_found(command: str) -> None:
@@ -208,6 +214,7 @@ def test_file_redirects_are_found(command: str) -> None:
         "a 2>&1",
         "a >&2",
         "a >&-",
+        "a >&/dev/null",
         "a <&3",
         "a < f",
         "a <<< f",

@@ -30,6 +30,9 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
   word is matched unquoted (`\rm`, `r""m`) while arguments stay as written, so a deny rule
   `* --force` does not match a commit message that contains `--force`. Allow rules still match
   the segment as written. Regex patterns follow the same rule.
+- `>&` followed by anything other than exactly digits or `-` is a file redirect for Bash allow
+  rules (`>&2file`, `>&2-`, `>&-file`), not a descriptor duplication; a narrow allow rule asks and
+  the allow-all rule still allows. A blank after `>&` is unparsed.
 - A `$[` inside the `${...}` of a double-quoted parameter expansion makes the command unparsed
   for Bash rules, as a quote or a nested `${` already did, since bash nests the arithmetic and a
   `}` inside it does not end the expansion.

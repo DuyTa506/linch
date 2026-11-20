@@ -704,7 +704,9 @@ Cách Bash rule đọc một lệnh:
 - Rule allow không bao phủ một đoạn lệnh chuyển hướng đầu ra vào tệp
   (`echo x > file`, `>>`, `2>file`, `>|`, `<>`, có hoặc không có số
   descriptor): lệnh đó bị hỏi (hoặc rơi về mặc định của mode khi không rule nào
-  quyết định). Nhân đôi descriptor (`2>&1`, `>&2`, `>&-`, `<&3`) và đúng
+  quyết định). `>&` theo sau đúng bởi chữ số hoặc `-` (`2>&1`, `>&2`, `>&-`) và `<&3`
+  nhân đôi descriptor; mọi từ khác sau `>&` (`>&2file`, `>&2-`) là tệp. Dấu
+  cách sau `>&` là cú pháp chưa phân tích được. Đúng
   `/dev/null`, `/dev/stdout`, `/dev/stderr` không phải là tệp. Rule allow-all
   (đúng pattern `*`) được miễn: nó vốn đã cho phép mọi lệnh nên
   `BashRule("*", "allow")` bao phủ `cmd > file`. Rule deny và ask không đổi, và

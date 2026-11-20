@@ -421,8 +421,9 @@ def redirects_to_file(segment: str) -> bool:
     """Return whether ``segment`` opens a file for writing with a redirection.
 
     Covers ``>``, ``>>``, ``>|`` and ``<>``, with or without a descriptor number.
-    Descriptor duplication (``2>&1``, ``>&2``, ``>&-``) and ``/dev/null``,
-    ``/dev/stdout`` and ``/dev/stderr`` are not files.
+    ``>&`` followed by exactly digits or ``-`` (``2>&1``, ``>&2``, ``>&-``) duplicates a
+    descriptor, and ``/dev/null``, ``/dev/stdout`` and ``/dev/stderr`` are not files; any
+    other word after ``>&`` is one.
 
     Args:
         segment: One command segment.
@@ -449,9 +450,13 @@ def redirects_to_file(segment: str) -> bool:
             if c == "<" or segment[end : end + 1] in (">", "|"):
                 end += 1
             if c == ">" and segment[end : end + 1] == "&":
-                # `>&2`, `>&-`: duplicates a descriptor.
-                i = end + 1
-                continue
+                # `>&2` and `>&-` duplicate a descriptor; `>&2file` and `>& 2` name a file.
+                word = segment[end + 1 :]
+                word = word[: _word_end(word)]
+                if word == "-" or (word != "" and word.isascii() and word.isdigit()):
+                    i = end + 1 + len(word)
+                    continue
+                end += 1
             rest = trim_blanks(segment[end:])
             if _unquote(rest[: _word_end(rest)]) not in _DEVICES:
                 return True

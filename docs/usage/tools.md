@@ -706,7 +706,9 @@ How Bash rules read a command:
 - An allow rule does not cover a segment that redirects output to a file
   (`echo x > file`, `>>`, `2>file`, `>|`, `<>`, with or without a descriptor
   number): the command asks (or falls to the mode default when no rule
-  decides it). Descriptor duplication (`2>&1`, `>&2`, `>&-`, `<&3`) and exactly
+  decides it). `>&` followed by exactly digits or `-` (`2>&1`, `>&2`, `>&-`)
+  and `<&3` duplicate a descriptor; any other word after `>&` (`>&2file`,
+  `>&2-`) is a file. A blank after `>&` is unparsed syntax. Exactly
   `/dev/null`, `/dev/stdout` and `/dev/stderr` are not files. The allow-all
   rule (the bare pattern `*`) is exempt: it already allows every command, so
   `BashRule("*", "allow")` covers `cmd > file`. Deny and ask rules are
