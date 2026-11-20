@@ -520,7 +520,8 @@ một response dạng stream: một event giữ tối đa 16 MiB (tính từ cu�
 gồm cả một dòng không có điểm kết thúc), và một body không phải UTF-8 hợp lệ làm
 lời gọi thất bại tại byte sai đầu tiên; cả hai kết thúc lời gọi bằng lỗi
 `transport`, loại lỗi được thử lại. Văn bản lỗi mà provider gửi trong stream bị
-cắt còn 500 ký tự, giống một body lỗi HTTP.
+cắt còn 500 ký tự, giống một body lỗi HTTP, sau khi key của provider, các giá trị
+header và cache salt đã được loại khỏi nó.
 
 Hai trường của [`spec`](./agent.md#spec) quyết định việc này:
 

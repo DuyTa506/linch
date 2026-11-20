@@ -9,8 +9,9 @@ use futures::{Stream, StreamExt};
 use linch_core::{Message, Provider, ProviderError, ProviderEvent, ProviderRequest};
 use tokio_util::sync::CancellationToken;
 
-use super::{Decoder, MAX_ERROR_CHARS, MAX_EVENT_BYTES, events};
+use super::{Decoder, MAX_EVENT_BYTES, events};
 use crate::openai_compat::stream::{ReasoningField, Translator};
+use crate::request::MAX_ERROR_CHARS;
 use crate::test_server::serve_once;
 use crate::{ApiKey, OpenAiResponses, ResponsesOptions};
 

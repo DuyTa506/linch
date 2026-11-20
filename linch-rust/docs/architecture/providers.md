@@ -326,8 +326,9 @@ Every adapter builds its client with `transport::client`
   not retryable.
 - **Bounded error bodies.** At most 8 KiB of a non-2xx body is read
   (`transport.rs:17`, `transport.rs:41`). The summary prefers the vendor's
-  error message, is redacted, then cut to 500 characters
-  (`crates/linch-providers/src/openai_compat/http.rs:73`).
+  error message and is redacted of the key there; the 500-character cut
+  comes last, after every secret is out (`RequestOptions::scrub_error`,
+  `crates/linch-providers/src/request.rs`).
 - **`Retry-After`** is read as whole seconds; an HTTP date is ignored. Gemini
   also reads a `RetryInfo` detail's `retryDelay`
   (`crates/linch-providers/src/gemini/http.rs:68-88`).
@@ -364,9 +365,12 @@ early (a format with an end marker fails, one without finishes). The loop:
 - once the response is complete, yields what is queued even if a cancel
   arrives, so the end and its usage are not lost (`sse.rs:242`);
 - yields nothing after an error (`sse.rs:327`);
-- scrubs the API key and every `Bearer <token>` from transport and status
-  messages, then cuts them to 500 characters (`MAX_ERROR_CHARS`), like an
-  HTTP error body (`sse.rs:301`).
+- cleans the text of every error in one order (`ErrorScrub`,
+  `crates/linch-providers/src/request.rs`): the API key and every
+  `Bearer <token>`, then every configured header value and the cache salt,
+  and only then the cut to 500 characters (`MAX_ERROR_CHARS`), so a secret
+  that straddles the cut leaves no part of itself behind. The errors that
+  come before a stream take the same order in `RequestOptions::scrub_error`.
 
 ### Credentials
 

@@ -524,7 +524,8 @@ limits apply to a streamed response: one event may hold at most 16 MiB (from
 the end of the last event, a line with no end included), and a body that is
 not valid UTF-8 fails at the first bad byte; both end the call with a
 `transport` error, which is retried. Error text a provider sends inside a
-stream is cut to 500 characters, like an HTTP error body.
+stream is cut to 500 characters, like an HTTP error body, after the provider
+key, header values and the cache salt are removed from it.
 
 Two [`spec`](./agent.md#spec) fields shape this:
 

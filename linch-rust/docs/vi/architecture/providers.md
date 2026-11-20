@@ -322,8 +322,8 @@ Mọi adapter dựng client của nó bằng `transport::client`
   retry được.
 - **Giới hạn thân lỗi.** Tối đa 8 KiB của một thân không phải 2xx được đọc
   (`transport.rs:17`, `transport.rs:41`). Bản tóm tắt ưu tiên thông báo lỗi của vendor,
-  được che dữ liệu nhạy cảm, rồi cắt còn 500 ký tự
-  (`crates/linch-providers/src/openai_compat/http.rs:73`).
+  được che key ở đó; việc cắt còn 500 ký tự đến sau cùng, khi mọi bí mật đã được
+  loại bỏ (`RequestOptions::scrub_error`, `crates/linch-providers/src/request.rs`).
 - **`Retry-After`** được đọc dưới dạng số giây nguyên; một ngày HTTP bị bỏ qua. Gemini
   cũng đọc `retryDelay` của một detail `RetryInfo`
   (`crates/linch-providers/src/gemini/http.rs:68-88`).
@@ -360,9 +360,11 @@ cho biết response đã hoàn tất chưa; `close` xử lý một body kết th
 - khi response đã hoàn tất, yield những gì đang xếp hàng kể cả khi một lệnh hủy
   đến, để phần kết thúc và usage của nó không bị mất (`sse.rs:242`);
 - không yield gì sau một lỗi (`sse.rs:327`);
-- xóa API key và mọi `Bearer <token>` khỏi các thông báo transport và status,
-  rồi cắt còn 500 ký tự (`MAX_ERROR_CHARS`), giống một body lỗi HTTP
-  (`sse.rs:301`).
+- làm sạch văn bản của mọi lỗi theo một thứ tự (`ErrorScrub`,
+  `crates/linch-providers/src/request.rs`): API key và mọi `Bearer <token>`, rồi mọi
+  giá trị header đã cấu hình và cache salt, và chỉ sau đó mới cắt còn 500 ký tự
+  (`MAX_ERROR_CHARS`), nên một bí mật nằm vắt qua điểm cắt không để lại phần nào.
+  Các lỗi xảy ra trước stream theo cùng thứ tự trong `RequestOptions::scrub_error`.
 
 ### Thông tin xác thực
 

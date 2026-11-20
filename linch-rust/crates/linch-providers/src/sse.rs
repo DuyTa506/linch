@@ -12,8 +12,7 @@ use linch_core::{ProviderError, ProviderEvent, ProviderStream};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-use crate::ApiKey;
-use crate::api_key::scrub;
+use crate::request::ErrorScrub;
 
 /// The most bytes held for one event, counted from the end of the last
 /// event and including an unterminated line. The largest event an adapter
@@ -23,10 +22,6 @@ use crate::api_key::scrub;
 /// Eight times that leaves room for any real response and still stops a
 /// body that never ends an event.
 pub(crate) const MAX_EVENT_BYTES: usize = 16 * 1024 * 1024;
-
-/// The most characters of error text a stream may carry: the cut of an
-/// HTTP error body.
-pub(crate) const MAX_ERROR_CHARS: usize = 500;
 
 /// One response's wire format, fed one SSE event at a time.
 pub(crate) trait Decoder: Send + 'static {
@@ -190,20 +185,21 @@ struct State<S, D> {
     decoder: D,
     pending: VecDeque<ProviderEvent>,
     cancel: CancellationToken,
-    key: Option<ApiKey>,
+    scrub: ErrorScrub,
     done: bool,
 }
 
 /// Drive `decoder` over an SSE byte stream until the response completes,
 /// an error or `cancel`. One event may hold [`MAX_EVENT_BYTES`]; a stream
 /// that passes it, or that is not UTF-8, fails with a `Transport` error.
-/// Error text is scrubbed of `key` and bearer tokens and cut to
-/// [`MAX_ERROR_CHARS`], and nothing is yielded after an error.
+/// Error text is scrubbed of the secrets `scrub` names and cut to
+/// [`MAX_ERROR_CHARS`](crate::request::MAX_ERROR_CHARS), in that order, and
+/// nothing is yielded after an error.
 pub(crate) fn events<D, S, B, E>(
     bytes: S,
     decoder: D,
     cancel: CancellationToken,
-    key: impl Into<Option<ApiKey>>,
+    scrub: impl Into<ErrorScrub>,
 ) -> ProviderStream
 where
     D: Decoder,
@@ -219,7 +215,7 @@ where
         decoder,
         pending: VecDeque::new(),
         cancel,
-        key: key.into(),
+        scrub: scrub.into(),
         done: false,
     };
     futures::stream::unfold(state, |mut state| async move {
@@ -284,7 +280,7 @@ where
                 }
             }
         };
-        let failure = scrubbed(state.key.as_ref(), failure);
+        let failure = state.scrub.error(failure);
         return Some(Err(stop(state, failure)));
     }
 }
@@ -292,34 +288,6 @@ where
 fn transport(err: impl Display) -> ProviderError {
     ProviderError::Transport {
         message: err.to_string(),
-    }
-}
-
-/// Server and transport text can echo request headers, and a server can
-/// send any amount of it: scrub it, then cut it, so a cut never leaves
-/// part of a key behind.
-fn scrubbed(key: Option<&ApiKey>, err: ProviderError) -> ProviderError {
-    let clean = |message: String| -> String {
-        scrub(key, &message).chars().take(MAX_ERROR_CHARS).collect()
-    };
-    match err {
-        ProviderError::Transport { message } => ProviderError::Transport {
-            message: clean(message),
-        },
-        ProviderError::Status {
-            status,
-            retry_after,
-            message,
-        } => ProviderError::Status {
-            status,
-            retry_after,
-            message: clean(message),
-        },
-        ProviderError::ContextLength { status, message } => ProviderError::ContextLength {
-            status,
-            message: clean(message),
-        },
-        other => other,
     }
 }
 
