@@ -496,6 +496,13 @@ lại.
 "not found" thường, trong `tombstone_days`. Sau đó server đã quên nó và run đọc
 ra là `RunNotFound`. Một id sai luôn là `RunNotFound`.
 
+Bắt đầu một run với id của một run đã bị xóa (`agent.run(..., run_id=...)`) kết thúc
+run bằng `RunExists` (-32023) và thông báo `conflict: run <id> was pruned by retention
+and its id cannot be used again in <namespace>`, chừng nào tombstone còn được giữ, nên
+một client thử lại `create` với id của chính nó không thể bắt đầu run thứ hai sau khi
+retention đã xóa run đầu. Điều này cũng đúng với một `create` đến đúng lúc bộ dọn đang
+xóa cùng id đó: nó bị từ chối, không được bắt đầu.
+
 ### Nâng cấp
 
 Migration 10 thêm `linch_runs.ended_at` (đặt bởi commit làm run thành terminal),

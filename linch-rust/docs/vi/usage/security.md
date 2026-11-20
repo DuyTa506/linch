@@ -277,8 +277,8 @@ phải làm gì (prompt injection), và model có thể làm theo.
 - Nội dung không đổi được principal, permission hay hook của run: chúng đến từ option
   của run, không từ transcript.
 - Một tool MCP được coi là scope `exec` trừ khi server được cấu hình `trust_annotations`,
-  vì `readOnlyHint` của server là không đáng tin (`linch-mcp/src/config.rs:152`, mặc
-  định `false` ở `:173`). Ở mode `default` nó hỏi trước khi chạy
+  vì `readOnlyHint` của server là không đáng tin (`linch-mcp/src/config.rs:176`, mặc
+  định `false` ở `:197`). Ở mode `default` nó hỏi trước khi chạy
   ([Tool](./tools.md#mcp-tool)).
 
 **Những gì chúng không chặn**

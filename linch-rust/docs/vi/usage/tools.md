@@ -814,7 +814,7 @@ thứ compaction và context window phải trả giá. Một số tool tự gi�
 | `Bash`, `BashOutput` | 4000 byte đầu và 26000 byte cuối của mỗi luồng |
 | `Grep` | mặc định 250 mục, đầu ra tối đa 30000 byte; mẫu biên dịch quá 10 MiB là `invalid_query`; một lời gọi chạy quá 30 s thất bại với `timed_out` (một dòng rất dài không thể bị ngắt nên có thể chạy lâu hơn) |
 | `Glob` | 1000 đường dẫn |
-| Một tool MCP | 30000 byte văn bản kết quả |
+| Một tool MCP | 30000 byte văn bản kết quả hoặc văn bản lỗi; tối đa 8 ảnh và 4 MiB dữ liệu ảnh cùng MIME type, mỗi MIME type tối đa 255 byte |
 | `memory_recall` | 8 KiB ngữ cảnh được gợi lại mỗi request |
 | `Read` | mặc định 2000 dòng và tệp tối đa 10 MiB; một dòng không bị giới hạn độ rộng, nên một dòng minify có thể trả về hàng megabyte (một khoảng trống đã biết: offload bên dưới phủ cả kết quả của `Read` và `read_file` phân trang một dòng dài, nhưng chính `Read` không cắt dòng) |
 

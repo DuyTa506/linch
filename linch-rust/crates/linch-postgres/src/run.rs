@@ -125,10 +125,14 @@ const CLAIM: &str = "UPDATE linch_runs SET status = $3, epoch = $4, owner = $5, 
                      lease_until = clock_timestamp() + $7::float8 * interval '1 millisecond' \
                      WHERE namespace = $1 AND run_id = $2";
 
-/// A renewal: a whole TTL from now, only under the lease's epoch.
+/// A renewal: a whole TTL from now, only under the lease's epoch, and only
+/// while the lease has not been released (a release sets `lease_until` to
+/// NULL), so a renewal that lands after the release does not lease the run
+/// again.
 const RENEW: &str = "UPDATE linch_runs \
                      SET lease_until = clock_timestamp() + $4::float8 * interval '1 millisecond' \
-                     WHERE namespace = $1 AND run_id = $2 AND epoch = $3";
+                     WHERE namespace = $1 AND run_id = $2 AND epoch = $3 \
+                       AND lease_until IS NOT NULL";
 
 /// A release: no live lease, only under the lease's epoch.
 const RELEASE: &str = "UPDATE linch_runs SET lease_until = NULL \
@@ -245,9 +249,9 @@ fn session_busy(error: &sqlx::Error) -> bool {
 
 impl PgRunStore {
     /// The error for a run with no row: `NotFound`, `pruned` when a
-    /// retention pass deleted it. Only this not-found path reads the
-    /// tombstones, so no read of a run that exists pays for them. A failed
-    /// tombstone read is the error, and not a guess.
+    /// retention pass deleted it. Besides `create`'s insert, only this
+    /// not-found path reads the tombstones, so no read of a run that exists
+    /// pays for them. A failed tombstone read is the error, and not a guess.
     async fn missing(&self, namespace: &str, run_id: &RunId) -> StoreError {
         let pruned = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM linch_pruned_runs WHERE namespace = $1 AND run_id = $2)",
@@ -310,6 +314,9 @@ impl PgRunStore {
             .await
             .map_err(backend)?;
         let Some((status, epoch, held_by, holder, left_ms)) = row else {
+            // Back to the pool first: `missing` reads on a connection of its
+            // own, and a pool of one has no second one to give.
+            tx.rollback().await.map_err(backend)?;
             return Err(self.missing(namespace, run_id).await);
         };
         let (status, epoch) = (parse_status(&status)?, to_u64(epoch, "epoch")?);
@@ -386,12 +393,17 @@ impl PgRunStore {
         let events = encode_events(&run.events)?;
         let last_seq = run.events.len() as u64;
         let mut tx = crate::begin(&self.pool).await.map_err(backend)?;
-        // Only an existing id is skipped here; a live run on the session
-        // fails the statement through the partial unique index.
+        // Only an existing or pruned id is skipped here (a pruned id has a
+        // tombstone, read by this statement's primary key lookup); a live
+        // run on the session fails the statement through the partial unique
+        // index.
         let inserted = sqlx::query(
             "INSERT INTO linch_runs (namespace, run_id, session_id, parent_run_id, contract, \
              status, epoch, checkpoint, last_seq, principal) \
-             VALUES ($1, $2, $3, $4, $5, $6, 0, $7, $8, $9) \
+             SELECT $1::text, $2::text, $3::text, $4::text, $5::text, $6::text, 0, $7::text, \
+                    $8::bigint, $9::text \
+             WHERE NOT EXISTS (SELECT 1 FROM linch_pruned_runs \
+                               WHERE namespace = $1 AND run_id = $2) \
              ON CONFLICT (namespace, run_id) DO NOTHING",
         )
         .bind(&run.namespace)
@@ -410,9 +422,30 @@ impl PgRunStore {
             Err(error) if session_busy(&error) => return Ok(Insert::Busy(error)),
             Err(error) => return Err(backend(error)),
         };
-        if inserted == 0 {
+        // The statement above read the tombstone in its own snapshot. A
+        // pruner that deletes this id (the run row and its tombstone in one
+        // statement) and commits while the insert waits on that delete is
+        // missed by the snapshot, and the insert then goes through. Read the
+        // tombstone again, as a new statement, which sees what the pruner
+        // committed. The pruner only deletes ended runs, so the reverse
+        // order (this insert first, then the delete) cannot happen.
+        let pruned: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM linch_pruned_runs \
+             WHERE namespace = $1 AND run_id = $2)",
+        )
+        .bind(&run.namespace)
+        .bind(run.run_id.as_str())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(backend)?;
+        if pruned || inserted == 0 {
+            let what = if pruned {
+                "was pruned by retention and its id cannot be used again"
+            } else {
+                "already exists"
+            };
             return Err(StoreError::Conflict {
-                message: format!("run {} already exists in {}", run.run_id, run.namespace),
+                message: format!("run {} {what} in {}", run.run_id, run.namespace),
             });
         }
         insert_events(&mut tx, &run.namespace, &run.run_id, events).await?;

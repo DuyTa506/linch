@@ -19,7 +19,7 @@ use linch_mcp::{
 };
 use tokio_util::sync::CancellationToken;
 
-pub use server::{Fixture, TestServer, standard_tools, tool};
+pub use server::{Fixture, TestServer, standard_tools, tool, tool_described};
 
 /// How long a test waits for something asynchronous before failing.
 pub const PATIENCE: Duration = Duration::from_secs(10);
