@@ -2,7 +2,7 @@
 //! servers and agent, and the [`OpenedAgent`] that closes them.
 
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -514,17 +514,17 @@ const WORKSPACE_PATH_TOOLS: [&str; 5] = ["Read", "Write", "Edit", "Grep", "Glob"
 /// project root in the same canonical form and the call's directory is the
 /// workspace: a link in the root's spelling, above or below the workspace,
 /// cannot shift what a rule covers. The policy the run contract holds is not
-/// this copy. A project root that is the workspace, however spelled, gives
-/// `None`.
+/// this copy, and a deny of the root as written still applies (see
+/// `scheduler::plan`). A project root written as the workspace gives `None`.
 async fn workspace_engine(
     policy: &PermissionPolicy,
     workspace: &str,
 ) -> Result<Option<PermissionEngine>, OpenError> {
-    let root = tokio::fs::canonicalize(&policy.project_root).await;
-    let root = root.unwrap_or_else(|_| PathBuf::from(&policy.project_root));
-    if root == Path::new(workspace) {
+    if policy.project_root == workspace {
         return Ok(None);
     }
+    let root = tokio::fs::canonicalize(&policy.project_root).await;
+    let root = root.unwrap_or_else(|_| PathBuf::from(&policy.project_root));
     let mut policy = policy.clone();
     policy.project_root = root.to_string_lossy().into_owned();
     Ok(Some(PermissionEngine::new(policy)?))

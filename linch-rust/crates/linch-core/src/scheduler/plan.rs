@@ -406,6 +406,15 @@ impl Planner<'_> {
         };
         permission_call.cwd = cwd;
         let mut decision = engine.evaluate(&permission_call, principal);
+        // A path spelled through the project root as written (a link) is
+        // below that root only in the policy's own spelling: its deny holds
+        // as well.
+        if cwd.is_some() && !matches!(decision, PermissionDecision::Deny { .. }) {
+            let written = self.permissions.evaluate(&permission_call, principal);
+            if matches!(written, PermissionDecision::Deny { .. }) {
+                decision = written;
+            }
+        }
         if let PermissionDecision::Ask { reason } = &decision
             && !self.hooks.permission_request.is_empty()
         {

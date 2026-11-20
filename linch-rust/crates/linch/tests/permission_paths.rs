@@ -147,3 +147,28 @@ async fn a_symlinked_project_root_deeper_than_its_target_keeps_its_deny() {
     let real = acme.join("app/secrets/new");
     assert_write_denied(&acme, &root, "app/secrets/new", &real).await;
 }
+
+#[tokio::test]
+async fn an_absolute_path_in_either_spelling_of_a_symlinked_root_is_denied() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let acme = base.join("acme");
+    std::fs::create_dir_all(acme.join("app/secrets")).unwrap();
+    let link = base.join("plink");
+    std::os::unix::fs::symlink(acme.join("app"), &link).unwrap();
+    let real = acme.join("app/secrets/new");
+    // Through the link the root is written with, and as the file really is.
+    let spelled = link.join("secrets/new");
+    assert_write_denied(&acme, &link, spelled.to_str().unwrap(), &real).await;
+    assert_write_denied(&acme, &link, real.to_str().unwrap(), &real).await;
+
+    // The workspace reached through a link that is also the project root:
+    // a file below it is denied by its canonical path and by the link's.
+    let alias = base.join("alias");
+    std::os::unix::fs::symlink(&acme, &alias).unwrap();
+    std::fs::create_dir_all(acme.join("secrets")).unwrap();
+    let key = acme.join("secrets/key");
+    assert_write_denied(&alias, &alias, key.to_str().unwrap(), &key).await;
+    let through = alias.join("secrets/key");
+    assert_write_denied(&alias, &alias, through.to_str().unwrap(), &key).await;
+}
