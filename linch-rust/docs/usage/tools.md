@@ -336,6 +336,11 @@ status: final
   out (never their names). Hard links to files outside the workspace are not
   covered, and neither are the names in a directory a racing command swapped
   ([Confinement](../architecture/tools.md#confinement)).
+- **Ignore files.** `Grep` and `Glob` honour the `.ignore` and `.gitignore`
+  files from the workspace root down, and not the ones above it, nor
+  `.git/info/exclude`, nor the host's global ignore file. A workspace inside a
+  repository therefore searches `target/` and `node_modules/` unless it has its
+  own ignore file: put those patterns in a `.ignore` in the workspace.
 - **`Bash` is not confined by default.** With the default `local` backend it
   starts in the workspace but can reach anything the server's user can;
   `execution` runs it in a sandbox or a container instead

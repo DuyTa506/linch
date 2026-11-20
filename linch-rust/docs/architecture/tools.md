@@ -350,8 +350,11 @@ files up to 1 MiB; any other is skipped without a word), and drops the
 entries they rule out. It keeps the walk's precedence: a glob pattern beats
 every ignore file, then the nearest matching `.ignore` rule, then the nearest
 matching `.gitignore` rule, from the workspace root down, also for the
-directories above a searched subdirectory. `.git/info/exclude` and the host's
-global ignore file are not read. A listed name is searched or
+directories above a searched subdirectory. Ignore files above the workspace
+root, `.git/info/exclude` and the host's global ignore file are not read:
+`ignore`'s own walk read all of them by path, so this is a change, and a
+workspace inside a repository now searches `target/` and `node_modules/`
+unless the workspace has its own `.ignore` (or `.gitignore`) naming them. A listed name is searched or
 returned only after it is opened again from the root descriptor with no
 symlink allowed, one descriptor at a time, so there is no depth limit. A name
 that fails that (unreadable or not searchable, gone, swapped) is never named

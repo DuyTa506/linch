@@ -342,8 +342,11 @@ descriptor gốc (không symlink trên đường đi hay ở cuối, tệp thư�
 khác bị bỏ qua không một lời) và loại các mục chúng loại trừ. Thứ tự ưu tiên giữ
 như lượt đi: mẫu glob thắng mọi tệp ignore, rồi đến quy tắc `.ignore` khớp gần
 nhất, rồi quy tắc `.gitignore` khớp gần nhất, từ thư mục gốc workspace đi xuống, kể
-cả các thư mục phía trên một thư mục con được tìm. `.git/info/exclude` và tệp
-ignore toàn cục của host không được đọc. Một tên được liệt kê chỉ được tìm hoặc trả về sau khi
+cả các thư mục phía trên một thư mục con được tìm. Tệp ignore nằm trên thư mục
+gốc workspace, `.git/info/exclude` và tệp ignore toàn cục của host không được đọc:
+lượt đi của `ignore` đọc tất cả chúng theo đường dẫn, nên đây là một thay đổi, và
+một workspace nằm trong một repository nay sẽ tìm cả trong `target/` và
+`node_modules/` trừ khi workspace có `.ignore` (hoặc `.gitignore`) riêng nêu chúng. Một tên được liệt kê chỉ được tìm hoặc trả về sau khi
 được mở lại từ descriptor gốc mà không cho phép symlink nào, từng descriptor một,
 nên không có giới hạn độ sâu. Tên không qua được bước đó (không đọc được hoặc
 không tìm kiếm được, đã mất, bị hoán đổi) không bao giờ được nêu tên trong đầu ra

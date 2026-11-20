@@ -336,6 +336,11 @@ status: final
   bao giờ nêu tên). Hard link tới tệp ngoài workspace không được che, tên trong
   một thư mục mà một lệnh đang chạy đã hoán đổi cũng vậy
   ([Giới hạn truy cập](../architecture/tools.md#giới-hạn-truy-cập)).
+- **Tệp ignore.** `Grep` và `Glob` tuân theo các tệp `.ignore` và `.gitignore` từ
+  thư mục gốc workspace đi xuống, không phải các tệp nằm trên nó, cũng không phải
+  `.git/info/exclude` hay tệp ignore toàn cục của host. Vì vậy một workspace nằm
+  trong một repository sẽ tìm cả trong `target/` và `node_modules/` trừ khi nó có
+  tệp ignore riêng: hãy đặt các mẫu đó vào một `.ignore` trong workspace.
 - **`Bash` mặc định không bị giới hạn phạm vi.** Với backend `local` mặc định, nó
   bắt đầu trong workspace nhưng có thể chạm tới mọi thứ mà user của server chạm
   được; `execution` chạy nó trong một sandbox hoặc container thay vào đó
