@@ -698,7 +698,8 @@ How Bash rules read a command:
 - A command the splitter cannot model can be denied or asked by rules but never
   allowed by one. That covers `$(...)` and backticks, a background `&` or `&>`,
   `|&`, `>&file`, a `#` comment, a here-document (`<<`, `<<-`), `>|`, a newline,
-  a `${...}` in double quotes whose body holds a quote, a backslash, a nested `${` or `$[`, `env -S`,
+  a `${` followed by a blank, tab or `|`, a `${...}` in double quotes whose body holds a quote, a
+  backslash, a nested `${` or `$[`, `env -S`,
   and a command position that is a `$` expansion, a brace expansion
   (`{rm,-rf}`), `function`, `coproc`, an array assignment (`a[0]=1`) or a
   `{fd}>file` redirection. A here-string (`<<<`) and a descriptor duplication

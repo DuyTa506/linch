@@ -489,3 +489,24 @@ def test_old_arithmetic_outside_a_parameter_expansion_is_modelled() -> None:
 def test_a_blank_after_an_ampersand_redirect_is_unparsed_and_never_allowed() -> None:
     assert _allow_echo("echo hi >& 2") == "ask"
     assert _bash([BashRule("*", "allow")], "echo hi >& 2") == "ask"
+
+
+# Source: `a_command_substitution_in_a_parameter_expansion_is_unparsed` in the Rust tests.
+@pytest.mark.parametrize(
+    "command",
+    [
+        'echo "${ touch M; }"',
+        'echo "${\ttouch M; }"',
+        'echo "${| touch M; }"',
+        "echo ${ touch M; }",
+        "echo ${|touch M; }",
+    ],
+)
+def test_a_command_substitution_in_a_parameter_expansion_is_unparsed(command: str) -> None:
+    assert _allow_echo(command) == "ask"
+    assert _bash([BashRule("*", "allow")], command) == "ask"
+
+
+@pytest.mark.parametrize("command", ['echo "${x}"', "echo ${x:-a b}", 'echo "${#x}" ${!y}'])
+def test_a_plain_parameter_expansion_is_still_modelled(command: str) -> None:
+    assert _allow_echo(command) == "allow"

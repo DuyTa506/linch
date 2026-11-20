@@ -143,9 +143,10 @@ def has_unparsed_construct(command: str) -> bool:
     substitution or subshell parentheses, ANSI-C quoting (``$'...'``, whose ``\\'``
     the quote tracking would misread), an unbalanced quote or trailing backslash, or a
     ``${...}`` inside double quotes whose body holds a quote, a backslash, a nested
-    ``${`` or ``$[``. ``&`` is a redirection only right after an unescaped, unquoted ``<`` or
-    ``>`` and names a descriptor (``2>&1``, ``>&2``, ``<&3``, ``>&-``): what
-    ``>&file`` means differs between shells. A ``$`` expansion in command position
+    ``${`` or ``$[``, or a ``${`` followed by a blank, tab or ``|`` (bash 5.3 reads
+    ``${ cmd; }`` as a command substitution). ``&`` is a redirection only right after an
+    unescaped, unquoted ``<`` or ``>`` and names a descriptor (``2>&1``, ``>&2``, ``<&3``,
+    ``>&-``): what ``>&file`` means differs between shells. A ``$`` expansion in command position
     (``$a -rf x``) or ``env -S`` is reported too: the command is not in the text.
 
     Args:
@@ -192,6 +193,8 @@ def has_unparsed_construct(command: str) -> bool:
                 return True
             elif c == "$" and following != "" and following in "('":
                 return True
+            elif c == "$" and following == "{" and _blank_or_bar(command, i + 2):
+                return True
             elif c == "#" and (i == 0 or break_end == i):
                 return True
             elif c == "<" and command.startswith("<<<", i):
@@ -223,14 +226,25 @@ def has_unparsed_construct(command: str) -> bool:
     )
 
 
+def _blank_or_bar(command: str, start: int) -> bool:
+    """Return whether the text at ``start``, after a ``${``, starts with a blank or ``|``.
+
+    Bash 5.3 reads ``${ cmd; }`` and ``${| cmd; }`` as command substitutions.
+    """
+    return command[start : start + 1] in (" ", "\t", "|")
+
+
 def _quotes_in_expansion(command: str, start: int) -> bool:
     """Return whether the body of a ``${`` up to its first ``}`` is not plain text.
 
-    A body holding a quote, a backslash, a nested ``${`` or an old-style arithmetic
+    A body starting with a blank or ``|`` (a command substitution in bash 5.3), or holding a
+    quote, a backslash, a nested ``${`` or an old-style arithmetic
     ``$[`` (bash nests it, so a ``}`` inside it does not end the expansion) is read by
     the shell on its own (``"${x#'"'}"`` quotes a ``"`` inside the pattern), which the
     quote tracking cannot follow, so the operators are not modelled.
     """
+    if _blank_or_bar(command, start):
+        return True
     end = command.find("}", start)
     body = command[start:] if end < 0 else command[start:end]
     return any(c in "'\"\\" for c in body) or "${" in body or "$[" in body
