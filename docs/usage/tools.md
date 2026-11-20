@@ -709,6 +709,18 @@ How Bash rules read a command:
   decides it). Descriptor duplication (`2>&1`, `>&2`, `>&-`, `<&3`) and exactly
   `/dev/null`, `/dev/stdout` and `/dev/stderr` are not files. Deny and ask rules
   are unchanged.
+- A deny or ask rule matches each segment as written, and again after its
+  command word is unquoted (`\rm`, `r""m`) and the words in front of the
+  command are removed: `NAME=value` assignments, redirections (`>f`, `2>&1`),
+  the reserved words `if`, `then`, `else`, `elif`, `do`, `while`, `until`, `!`
+  and `{`, and `time`, `exec`, `command`, `builtin` and `env` (quoted or not)
+  with their options, including the argument of `env -u`/`-C`, `time -f`/`-o`
+  and `exec -a`. `command -v NAME` is not a command named `NAME`. Arguments stay
+  as written, so a deny rule `* --force` does not match a commit message that
+  contains `--force`. An allow rule always matches the segment as written:
+  `X=1 echo` is not `echo`. Other spellings of a command, such as `/bin/rm`,
+  `sudo rm`, `xargs rm`, `eval rm x` and `sh -c 'rm x'`, are other commands to
+  a rule; the sandbox is the boundary.
 
 When no rule matches, read-scoped tools and the four task tools are allowed in
 every mode. The remaining defaults are:

@@ -9,7 +9,9 @@ from .shell import (
     pattern_matches,
     redirects_to_file,
     split_composite,
+    strip_command_prefix,
     trim_blanks,
+    unquote_command_word,
 )
 
 RuleDecision = Literal["allow", "deny", "ask", "passthrough"]
@@ -308,12 +310,21 @@ def evaluate_bash_rules(
     saw_ask = False
     for segment in segments:
         decision = _first_matching_bash_decision(rules, segment)
-        if decision == "deny":
+        # A prefix (`X=1 rm`, `if x; then rm`) or a quoted spelling (`\rm`, `r""m`)
+        # hides the command from the segment's own text, so deny and ask rules also
+        # see it stripped and unquoted. An allow never comes from those forms.
+        behind = strip_command_prefix(segment)
+        hidden = [
+            _first_matching_bash_decision(rules, text)
+            for text in (behind, unquote_command_word(behind))
+            if text != "" and text != trim_blanks(segment)
+        ]
+        if decision == "deny" or "deny" in hidden:
             return "deny"
-        if decision == "ask":
+        if decision == "ask" or "ask" in hidden:
             saw_ask = True
-        # An allow covers a command, not what it writes to a file.
-        if decision != "allow" or redirects_to_file(segment):
+        elif decision != "allow" or redirects_to_file(segment):
+            # An allow covers a command, not what it writes to a file.
             all_allowed = False
     if saw_ask:
         return "ask"

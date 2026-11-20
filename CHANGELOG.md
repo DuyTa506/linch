@@ -22,6 +22,12 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
   `>|`, `<>`, with or without a descriptor number): the call asks, or falls to the mode default
   when no rule decides it. Descriptor duplication (`2>&1`, `>&2`, `>&-`, `<&3`) and exactly
   `/dev/null`, `/dev/stdout` and `/dev/stderr` are not files. Deny and ask rules are unchanged.
+- Bash deny and ask rules see through the words in front of a command: leading assignments and
+  redirections, `if then else elif do while until ! {`, and `time exec command builtin env` (quoted
+  or not) with their options and option arguments (`command -v`/`-V` is kept whole). The command
+  word is matched unquoted (`\rm`, `r""m`) while arguments stay as written, so a deny rule
+  `* --force` does not match a commit message that contains `--force`. Allow rules still match
+  the segment as written. Regex patterns follow the same rule.
 - The compaction summary no longer loses early content. The summary request ended with the
   folded history's last user message, which the model answered ("Acknowledged. Received log
   excerpt 2...") instead of summarizing. It now ends with one user message carrying a guard

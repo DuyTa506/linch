@@ -707,6 +707,18 @@ Cách Bash rule đọc một lệnh:
   quyết định). Nhân đôi descriptor (`2>&1`, `>&2`, `>&-`, `<&3`) và đúng
   `/dev/null`, `/dev/stdout`, `/dev/stderr` không phải là tệp. Rule deny và ask
   không đổi.
+- Rule deny hoặc ask khớp từng đoạn lệnh như được viết, và khớp lại sau khi từ
+  lệnh được bỏ dấu nháy (`\rm`, `r""m`) và các từ đứng trước lệnh bị loại bỏ:
+  phép gán `NAME=value`, chuyển hướng (`>f`, `2>&1`), các từ dành riêng `if`,
+  `then`, `else`, `elif`, `do`, `while`, `until`, `!` và `{`, cùng `time`,
+  `exec`, `command`, `builtin` và `env` (có hoặc không có dấu nháy) với các tùy
+  chọn của chúng, gồm đối số của `env -u`/`-C`, `time -f`/`-o` và `exec -a`.
+  `command -v NAME` không phải là lệnh tên `NAME`. Các đối số giữ nguyên như đã
+  viết, nên rule deny `* --force` không khớp một commit message có chứa
+  `--force`. Rule allow luôn khớp đoạn lệnh như được viết: `X=1 echo` không phải
+  `echo`. Các cách viết khác của một lệnh, như `/bin/rm`, `sudo rm`, `xargs rm`,
+  `eval rm x` và `sh -c 'rm x'`, là những lệnh khác đối với rule; ranh giới là
+  sandbox.
 
 Khi không rule nào khớp, tool scope read và bốn task tool được cho phép ở mọi
 mode. Các mặc định còn lại là:

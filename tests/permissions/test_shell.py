@@ -16,6 +16,7 @@ from linch.permissions.shell import (
     split_composite,
     strip_command_prefix,
     tokenize,
+    unquote_command_word,
 )
 
 
@@ -218,3 +219,9 @@ def test_file_redirects_are_not_found_in_quotes_or_for_descriptors_and_devices(
     command: str,
 ) -> None:
     assert not redirects_to_file(command)
+
+
+def test_unquote_command_word_keeps_the_arguments_as_written() -> None:
+    assert unquote_command_word("\\rm -rf x") == "rm -rf x"
+    assert unquote_command_word('r""m "a b"') == 'rm "a b"'
+    assert unquote_command_word("rm 'a b'") == "rm 'a b'"

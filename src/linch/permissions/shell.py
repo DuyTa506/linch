@@ -457,3 +457,21 @@ def redirects_to_file(segment: str) -> bool:
             continue
         i += 1
     return False
+
+
+def unquote_command_word(command: str) -> str:
+    """Return ``command`` with the quotes and backslashes of its first word removed.
+
+    ``\\rm -rf x`` becomes ``rm -rf x``; the rest stays as written, so a quoted
+    argument keeps its boundaries.
+
+    Args:
+        command: Command text starting at its command word.
+
+    Returns:
+        The text with an unquoted command word.
+    """
+    end = _word_end(command)
+    if not any(c in "'\"\\" for c in command[:end]):
+        return command
+    return _unquote(command[:end]) + command[end:]
