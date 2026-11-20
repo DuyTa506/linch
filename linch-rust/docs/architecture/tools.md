@@ -408,7 +408,9 @@ kills the new group.
   server's terminal.
 - The seccomp filter (`crates/linch-tools/src/exec/sandbox/seccomp.rs`) kills a
   syscall of a foreign architecture, refuses x32 syscalls, `io_uring_setup`
-  and `socket(AF_UNIX)`, and with the network off every `socket`. Landlock
+  and `socket(AF_UNIX)`, System V IPC and POSIX message queue calls (objects
+  checked by user id, which Landlock does not cover), and with the network off
+  every `socket`. Landlock
   restricts pathname Unix sockets only from ABI 9, and a socket of the
   server's user (a session bus, a Docker socket) would start something
   outside the sandbox. The filter is a denylist: a syscall it does not name

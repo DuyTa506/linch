@@ -129,7 +129,12 @@ ambient set, since a command would keep them.
   The seccomp filter refuses with `EPERM` kernel modules, `kexec`,
   `reboot`, swap, every mount call, `pivot_root` and `chroot`; the user's
   keyrings (`keyctl`, `add_key`, `request_key`), `bpf`,
-  `perf_event_open` and `userfaultfd`; and `unshare`, `setns` and `clone`
+  `perf_event_open` and `userfaultfd`; System V IPC (`shmget`, `shmat`,
+  `shmctl`, `msgget`, `msgsnd`, `msgrcv`, `msgctl`, `semget`, `semop`,
+  `semtimedop`, `semctl`) and POSIX message queues (`mq_open`, `mq_unlink`,
+  `mq_timedsend`, `mq_timedreceive`), whose objects are checked by user id
+  and so would let a command reach another program of the server's user;
+  and `unshare`, `setns` and `clone`
   with a `CLONE_NEW*` flag, so not even an unprivileged user namespace
   opens. `clone3`, whose flags the filter cannot read, gets `ENOSYS` and
   glibc falls back to `clone`. `io_uring`, whose requests the filter would

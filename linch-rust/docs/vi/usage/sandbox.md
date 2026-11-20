@@ -119,7 +119,11 @@ giữ chúng.
 - **Không có đặc quyền hay namespace mới.** Một chương trình setuid không được thêm gì.
   Bộ lọc seccomp từ chối với `EPERM` các kernel module, `kexec`, `reboot`, swap, mọi
   lời gọi mount, `pivot_root` và `chroot`; keyring của người dùng (`keyctl`, `add_key`,
-  `request_key`), `bpf`, `perf_event_open` và `userfaultfd`; cùng `unshare`, `setns` và
+  `request_key`), `bpf`, `perf_event_open` và `userfaultfd`; System V IPC (`shmget`, `shmat`,
+  `shmctl`, `msgget`, `msgsnd`, `msgrcv`, `msgctl`, `semget`, `semop`, `semtimedop`,
+  `semctl`) và hàng đợi tin POSIX (`mq_open`, `mq_unlink`, `mq_timedsend`,
+  `mq_timedreceive`), mà đối tượng của chúng được kiểm tra theo user id nên sẽ cho một lệnh
+  chạm tới chương trình khác của user của server; cùng `unshare`, `setns` và
   `clone` với cờ `CLONE_NEW*`, nên ngay cả user namespace không đặc quyền cũng không mở
   được. `clone3`, mà bộ lọc không đọc được cờ của nó, nhận `ENOSYS` và glibc lùi về
   `clone`. `io_uring`, mà bộ lọc sẽ không thấy các request của nó, bị từ chối. Bộ lọc là một denylist: một

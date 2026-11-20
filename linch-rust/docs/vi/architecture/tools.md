@@ -397,7 +397,8 @@ bị giới hạn, và không có code nào chạy giữa fork và exec, nên cr
   bật là đích của `/etc/resolv.conf`. Mọi quyền: root và home của session. Quyền tệp:
   năm thiết bị (`sandbox/shell.rs:35`), không có `/dev/tty`, terminal của server.
 - Bộ lọc seccomp (`crates/linch-tools/src/exec/sandbox/seccomp.rs`) kill một syscall của kiến
-  trúc khác, từ chối các syscall x32, `io_uring_setup` và `socket(AF_UNIX)`, và khi
+  trúc khác, từ chối các syscall x32, `io_uring_setup`, `socket(AF_UNIX)`, các lời gọi System V IPC và hàng đợi tin POSIX
+  (đối tượng được kiểm tra theo user id, Landlock không phủ), và khi
   mạng tắt là mọi `socket`. Landlock chỉ giới hạn pathname Unix socket từ ABI 9, và
   một socket của user của server (session bus, socket Docker) sẽ khởi động thứ gì đó
   ngoài sandbox. Bộ lọc là một denylist: một syscall mà nó không nêu tên thì được
