@@ -368,14 +368,21 @@ class Agent:
         """Return a run's durable envelopes with a seq above `after_seq`, in order.
 
         Stream-only kinds (`partial_assistant`, `tool_progress`, `hook`,
-        `cache_diagnostic`) are never replayed.
+        `cache_diagnostic`) are never replayed. The server answers a long run
+        in pages; this reads them all, one call per page.
 
         Raises:
             RunError: The stores could not be read, or the run is unknown.
         """
-        params = {"agent": self.handle, "run_id": run_id, "after_seq": after_seq}
-        answer = await self._conn.request("run.events", params)
-        return [decode_envelope(raw) for raw in answer["events"]]
+        envelopes: list[Envelope] = []
+        while True:
+            params = {"agent": self.handle, "run_id": run_id, "after_seq": after_seq}
+            answer = await self._conn.request("run.events", params)
+            envelopes.extend(decode_envelope(raw) for raw in answer["events"])
+            next_after_seq = answer.get("next_after_seq")
+            if next_after_seq is None:
+                return envelopes
+            after_seq = next_after_seq
 
     async def eval(
         self,

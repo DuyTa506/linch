@@ -155,6 +155,126 @@ async fn run_events_replays_the_durable_envelopes_after_a_seq() {
     assert!(events(last).await.unwrap().events.is_empty());
 }
 
+/// Read a whole run page by page, following `next_after_seq`; every page
+/// is one answer that the client accepted.
+async fn read_pages(rpc: &Rpc, agent: &str, run_id: &RunId, extra: Value) -> Vec<Vec<Value>> {
+    let mut pages = Vec::new();
+    let mut after_seq = 0_u64;
+    loop {
+        let mut params = json!({"agent": agent, "run_id": run_id, "after_seq": after_seq});
+        for (name, value) in extra.as_object().unwrap() {
+            params[name] = value.clone();
+        }
+        let answer = rpc.call(method::RUN_EVENTS, params).await;
+        let answer = answer.unwrap_or_else(|error| panic!("run.events failed: {error}"));
+        pages.push(answer["events"].as_array().unwrap().clone());
+        match answer.get("next_after_seq") {
+            Some(next) => after_seq = next.as_u64().unwrap(),
+            None => return pages,
+        }
+        assert!(pages.len() < 1000, "the cursor does not advance");
+    }
+}
+
+/// A run whose two largest envelopes are 9 MiB each: one answer with all of
+/// them is past the 16 MiB a message may carry.
+#[tokio::test]
+async fn run_events_of_a_large_run_can_be_read_page_by_page() {
+    let mut rpc = Rpc::new();
+    let text = "x".repeat(9 * 1024 * 1024);
+    let agent = rpc.open(scripted(vec![text_turn(&text)], None, "")).await;
+    let run_id = rpc.start(&agent, "s1", "Go.").await;
+    let ended = rpc.until_end(&run_id).await;
+    assert!(ended.error.is_none(), "the run itself streams fine");
+    let durable = (ended.envelopes.iter())
+        .filter(|e| e.event.persistence() == Persistence::Both)
+        .count();
+    let pages = read_pages(&rpc, &agent, &run_id, json!({})).await;
+    assert!(pages.len() > 1, "{} page for a run of 18 MiB", pages.len());
+    let read: Vec<_> = pages.iter().flatten().collect();
+    assert_eq!(read.len(), durable);
+    let seqs: Vec<u64> = read.iter().map(|e| e["seq"].as_u64().unwrap()).collect();
+    assert!(seqs.windows(2).all(|pair| pair[0] < pair[1]), "{seqs:?}");
+}
+
+#[tokio::test]
+async fn run_events_with_a_limit_answers_one_page_and_the_next_seq() {
+    let mut rpc = Rpc::new();
+    let agent = rpc.open(scripted(vec![text_turn("Hi.")], None, "")).await;
+    let run_id = rpc.start(&agent, "s1", "Go.").await;
+    let ended = rpc.until_end(&run_id).await;
+    let durable: Vec<_> = (ended.envelopes.iter())
+        .filter(|e| e.event.persistence() == Persistence::Both)
+        .collect();
+    assert!(durable.len() > 3);
+    let params = json!({"agent": agent, "run_id": run_id, "limit": 2});
+    let first = rpc.call(method::RUN_EVENTS, params).await.unwrap();
+    assert_eq!(first["events"].as_array().unwrap().len(), 2);
+    assert_eq!(first["next_after_seq"], json!(durable[1].seq));
+    let pages = read_pages(&rpc, &agent, &run_id, json!({"limit": 2})).await;
+    assert!(pages.iter().all(|page| page.len() <= 2));
+    assert_eq!(pages.iter().map(Vec::len).sum::<usize>(), durable.len());
+    // No limit: a small run is one page and carries no cursor.
+    let whole = json!({"agent": agent, "run_id": run_id});
+    let whole = rpc.call(method::RUN_EVENTS, whole).await.unwrap();
+    assert_eq!(whole["events"].as_array().unwrap().len(), durable.len());
+    assert!(whole.get("next_after_seq").is_none(), "{whole}");
+    // A limit that takes the rest is the last page.
+    let rest = json!({"agent": agent, "run_id": run_id, "limit": durable.len()});
+    let rest = rpc.call(method::RUN_EVENTS, rest).await.unwrap();
+    assert!(rest.get("next_after_seq").is_none(), "{rest}");
+}
+
+/// An envelope over the byte bound is still returned, alone, so a reader
+/// always makes progress.
+#[tokio::test]
+async fn run_events_with_a_byte_bound_below_one_event_returns_one_event_per_page() {
+    let mut rpc = Rpc::new();
+    let agent = rpc.open(scripted(vec![text_turn("Hi.")], None, "")).await;
+    let run_id = rpc.start(&agent, "s1", "Go.").await;
+    let ended = rpc.until_end(&run_id).await;
+    let durable = (ended.envelopes.iter())
+        .filter(|e| e.event.persistence() == Persistence::Both)
+        .count();
+    let pages = read_pages(&rpc, &agent, &run_id, json!({"max_bytes": 1})).await;
+    assert!(pages.iter().all(|page| page.len() == 1));
+    assert_eq!(pages.len(), durable);
+}
+
+/// The members added for paging stay off the wire while unset.
+#[test]
+fn unset_run_events_paging_members_are_not_on_the_wire() {
+    use linch_rpc::protocol::EventsParams;
+    let params = EventsParams {
+        agent: "agent-1".into(),
+        run_id: RunId::new("r1"),
+        after_seq: 0,
+        limit: None,
+        max_bytes: None,
+    };
+    let wire = r#"{"agent":"agent-1","run_id":"r1","after_seq":0}"#;
+    assert_eq!(serde_json::to_string(&params).unwrap(), wire);
+    assert_eq!(serde_json::from_str::<EventsParams>(wire).unwrap(), params);
+    let events = Events {
+        events: vec![],
+        next_after_seq: None,
+    };
+    assert_eq!(serde_json::to_string(&events).unwrap(), r#"{"events":[]}"#);
+}
+
+#[tokio::test]
+async fn run_events_refuses_a_zero_limit_or_byte_bound() {
+    let mut rpc = Rpc::new();
+    let agent = rpc.open(scripted(vec![text_turn("Hi.")], None, "")).await;
+    let run_id = rpc.start(&agent, "s1", "Go.").await;
+    rpc.until_end(&run_id).await;
+    for field in ["limit", "max_bytes"] {
+        let params = json!({"agent": agent, "run_id": run_id, field: 0});
+        let error = rpc.call(method::RUN_EVENTS, params).await.unwrap_err();
+        assert_eq!(code_of(error), code::INVALID_PARAMS, "{field}");
+    }
+}
+
 #[tokio::test]
 async fn resuming_a_finished_run_ends_with_terminal() {
     let mut rpc = Rpc::new();

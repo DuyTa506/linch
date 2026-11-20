@@ -6,6 +6,8 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 ## Unreleased
 
+- `run.events` answers one page (`limit`, `max_bytes`, default 1000 envelopes and 4 MiB) and names `next_after_seq` while more follow, so a long run no longer exceeds the message size; `Agent.events` in the Python client follows the pages.
+
 ## 0.2.0 - 2026-11-19
 
 0.1.1 was uploaded to PyPI from commit `e102d938` and never tagged; this is the first tagged release. The Python client of this build refuses a server without `server.info` (`IncompatibleServer`), so ship the client and the `linch-server` binary together.

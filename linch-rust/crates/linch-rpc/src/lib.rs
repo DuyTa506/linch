@@ -332,11 +332,17 @@
 //! `provider_info` or `provider_base_url`), and may make 10 `provider.models`
 //! and `provider.model` calls a minute (`-32005`, `kind` `provider_calls`).
 //!
-//! **`run.events`** `{agent, run_id, after_seq?}`
+//! **`run.events`** `{agent, run_id, after_seq?, limit?, max_bytes?}`
 //! ([`EventsParams`](protocol::EventsParams)) returns
-//! `{"events": [<envelope>...]}`: the run's durable envelopes with a seq
-//! greater than `after_seq` (default 0), in order, for replay after a
-//! reconnect.
+//! `{"events": [<envelope>...], "next_after_seq"?: n}`: one page of the run's
+//! durable envelopes with a seq greater than `after_seq` (default 0), in
+//! order, for replay after a reconnect. A page holds at most `limit`
+//! envelopes (1000 when absent, 10000 at most) and `max_bytes` encoded bytes
+//! (4 MiB when absent, 8 MiB at most), so an answer stays under
+//! `max_message_bytes`; the first envelope is always taken. While more
+//! follow, `next_after_seq` is the seq of the last envelope returned: ask
+//! again with it as `after_seq`. An envelope too long for one message is
+//! refused (`-32603`, naming its seq); `limit` or `max_bytes` 0 is `-32602`.
 //!
 //! ## Scheduler
 //!

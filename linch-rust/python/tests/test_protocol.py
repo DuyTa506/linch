@@ -9,6 +9,7 @@ from typing import Any, cast
 import pytest
 
 from linch_rust import (
+    Agent,
     AgentNotFound,
     ConnectionClosed,
     InvalidSchedule,
@@ -81,6 +82,48 @@ async def test_events_read_with_the_run_answer_reach_the_run() -> None:
 
     assert run_id == "r1"
     assert [queue.get_nowait(), queue.get_nowait()] == [batch["envelopes"], RunEnd(None)]
+    reader.feed_eof()
+    await conn.finish()
+
+
+class Paging:
+    """A stream writer that answers `run.events` two envelopes at a time."""
+
+    def __init__(self, reader: asyncio.StreamReader, seqs: list[int]) -> None:
+        self.reader = reader
+        self.seqs = seqs
+        self.after: list[int] = []
+
+    def write(self, data: bytes) -> None:
+        request = json.loads(data)
+        after = request["params"]["after_seq"]
+        self.after.append(after)
+        page = [seq for seq in self.seqs if seq > after][:2]
+        result: dict[str, Any] = {
+            "events": [
+                {"v": 1, "seq": seq, "run_id": "r1", "ts_ms": 0, "event": {"type": "custom"}}
+                for seq in page
+            ]
+        }
+        if page and page[-1] < self.seqs[-1]:
+            result["next_after_seq"] = page[-1]
+        line = {"jsonrpc": "2.0", "id": request["id"], "result": result}
+        self.reader.feed_data(json.dumps(line).encode() + b"\n")
+
+    async def drain(self) -> None:
+        return None
+
+
+async def test_events_follows_the_cursor_until_the_last_page() -> None:
+    reader = asyncio.StreamReader()
+    writer = Paging(reader, [1, 2, 3, 4, 5])
+    conn = Connection(StreamTransport(reader, cast(asyncio.StreamWriter, writer)))
+    agent = Agent(conn, "agent-1", "digest")
+
+    envelopes = await agent.events("r1", after_seq=0)
+
+    assert [envelope.seq for envelope in envelopes] == [1, 2, 3, 4, 5]
+    assert writer.after == [0, 2, 4]
     reader.feed_eof()
     await conn.finish()
 

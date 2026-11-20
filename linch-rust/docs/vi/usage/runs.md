@@ -23,7 +23,7 @@ của run sau đó được stream về dưới dạng `Envelope`.
 | `await agent.steer(run_id, text, *, steer_id=None, principal=None)` | Gửi văn bản cho một run đang chạy; nó đọc văn bản ở ranh giới lượt kế tiếp ([bên dưới](#steer)) |
 | `await run.steer(text, *, steer_id=None)` | Tương tự, cho run này |
 | `await agent.cancel(run_id)` | Hủy một run theo id, kể cả run bị tạm dừng, từ bất kỳ tiến trình nào ([bên dưới](#cancel-a-suspended-run)) |
-| `await agent.events(run_id, after_seq=0)` | Các envelope bền vững của run sau `after_seq`, lấy từ các kho lưu trữ |
+| `await agent.events(run_id, after_seq=0)` | Các envelope bền vững của run sau `after_seq`, lấy từ các kho lưu trữ; run dài được đọc từng trang ([bên dưới](#run-dài-được-đọc-từng-trang)) |
 | `run.id` | Run id, dùng cho `resume`, `approve` và `events` |
 | `run.trace_id` | Trace id của các span của lời gọi khi nó được trace ([Observability](./observability.md#correlate-logs-and-traces)) |
 
@@ -755,6 +755,19 @@ ngoài run xảy ra trước khi trạng thái dẫn tới nó được ghi:
 Với kho memory, các điểm này vẫn áp dụng, nhưng các kho nằm bên trong process của
 server. Một lượt tốn bao nhiêu lần ghi và chúng được gom nhóm ra sao nằm ở
 [trang stores của kiến trúc](../architecture/stores.md#group-commit-write-counts).
+
+### Run dài được đọc từng trang
+
+`agent.events` trả về cả run: nó tự đi theo các trang của server. Trên wire,
+`run.events` trả lời một trang: tối đa `limit` envelope (1000 khi không có, tối đa
+10000) và `max_bytes` byte đã mã hóa (4 MiB khi không có, tối đa 8 MiB), nên một
+câu trả lời luôn nhỏ hơn nhiều so với 16 MiB mà một message được mang
+(`limits.max_message_bytes` trong `server.info`). Khi còn envelope phía sau, câu
+trả lời có `next_after_seq`, seq của envelope cuối cùng của nó: hỏi lại với giá trị
+đó làm `after_seq`. Trang cuối không có `next_after_seq`. Một envelope dài hơn
+`max_bytes` vẫn được trả về, riêng một mình, nên người đọc luôn tiến lên được; một
+envelope dài hơn mức một message được mang (khoảng 16 MiB) bị từ chối với `-32603`
+kèm seq của nó. `limit` hoặc `max_bytes` bằng 0 là `-32602`.
 
 ## Các trang liên quan
 

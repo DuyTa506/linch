@@ -21,7 +21,7 @@ the run's events then stream in as `Envelope`s.
 | `await agent.steer(run_id, text, *, steer_id=None, principal=None)` | Send text to a run that is going on; it reads it at its next turn boundary ([below](#steer)) |
 | `await run.steer(text, *, steer_id=None)` | The same, for this run |
 | `await agent.cancel(run_id)` | Abort a run by id, a suspended one included, from any process ([below](#cancel-a-suspended-run)) |
-| `await agent.events(run_id, after_seq=0)` | The run's durable envelopes after `after_seq`, from the stores |
+| `await agent.events(run_id, after_seq=0)` | The run's durable envelopes after `after_seq`, from the stores; a long run is read page by page ([below](#long-runs-are-read-in-pages)) |
 | `run.id` | The run id, for `resume`, `approve` and `events` |
 | `run.trace_id` | The trace id of the call's spans when it is traced ([Observability](./observability.md#correlate-logs-and-traces)) |
 
@@ -750,6 +750,19 @@ What that means for you:
 With memory stores the same points apply, but the stores are inside the server
 process. How many writes a turn costs and how they are grouped is in the
 [architecture stores page](../architecture/stores.md#group-commit-write-counts).
+
+### Long runs are read in pages
+
+`agent.events` returns the whole run: it follows the server's pages for you.
+On the wire, `run.events` answers one page: at most `limit` envelopes (1000
+when absent, at most 10000) and `max_bytes` encoded bytes (4 MiB when absent,
+at most 8 MiB), so one answer stays far below the 16 MiB a message may carry
+(`limits.max_message_bytes` in `server.info`). When more follow, the answer
+carries `next_after_seq`, the seq of its last envelope: ask again with it as
+`after_seq`. The last page has no `next_after_seq`. An envelope longer than
+`max_bytes` is returned alone, so a reader always advances; one longer than a
+message may carry (about 16 MiB) is refused with `-32603` naming its seq. A
+`limit` or `max_bytes` of 0 is `-32602`.
 
 ## Related pages
 
