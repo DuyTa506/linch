@@ -745,6 +745,33 @@ fn ask_and_deny_rules_are_unchanged_by_a_file_redirect() {
     assert_eq!(bash(&rules, "git status > log"), "allow");
 }
 
+const OLD_ARITHMETIC: &[&str] = &[
+    r#"echo "${x:+$[}'"']}" ; touch M ; echo \'"#,
+    r#"echo "${x:+$[}]'"'}" ; touch M ; echo \'"#,
+    r#"echo "${x#$[}]'"'}" ; touch M ; echo \'"#,
+    r#"echo "${x:-$((}'"']}" ; touch M ; echo \'"#,
+    r#"echo "${x:-`}'"']}" ; touch M ; echo \'"#,
+];
+
+#[test]
+fn an_allow_rule_does_not_cover_a_command_behind_a_brace_in_old_arithmetic() {
+    for command in OLD_ARITHMETIC {
+        assert_eq!(bash(&allow_echo(), command), "ask", "{command:?}");
+    }
+    assert_eq!(bash(&allow_echo(), r#"echo "${x:-a} $[1+1]""#), "allow");
+}
+
+#[test]
+fn a_deny_rule_covers_a_command_behind_a_brace_in_old_arithmetic() {
+    let engine = flat(
+        PermissionMode::SkipDangerous,
+        vec![bash_rule("touch *", Deny)],
+    );
+    for command in OLD_ARITHMETIC {
+        assert_ne!(bash(&engine, command), "allow", "{command:?}");
+    }
+}
+
 #[test]
 fn unparsed_floor_beats_a_generic_allow_in_any_layer_order() {
     let rules = vec![tool("Bash", Allow), bash_rule("rm -rf *", Deny)];

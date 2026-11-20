@@ -196,13 +196,15 @@ pub fn has_unparsed_construct(command: &str) -> bool {
 }
 
 /// Whether the body of a `${` inside double quotes, up to its first `}`,
-/// holds a quote, a backslash or a nested `${`. The shell reads those on
-/// their own (`"${x#'"'}"` quotes a `"` inside the pattern), which the quote
-/// tracking cannot follow, so the operators are not modelled.
+/// holds a quote, a backslash, a nested `${` or an old-style arithmetic `$[`
+/// (bash nests it, so a `}` inside it does not end the expansion). The shell
+/// reads those on its own (`"${x#'"'}"` quotes a `"` inside the pattern),
+/// which the quote tracking cannot follow, so the operators are not modelled.
 fn quotes_in_expansion(after: &[u8]) -> bool {
     let end = after.iter().position(|&c| c == b'}').unwrap_or(after.len());
     let body = &after[..end];
-    body.iter().any(|c| matches!(c, b'\'' | b'"' | b'\\')) || body.windows(2).any(|w| w == b"${")
+    body.iter().any(|c| matches!(c, b'\'' | b'"' | b'\\'))
+        || body.windows(2).any(|w| w == b"${" || w == b"$[")
 }
 
 /// End of the first word of `text`: the first blank outside quotes and
@@ -542,6 +544,7 @@ mod tests {
             "echo \"${x#'a'}\"",
             "echo \"${x#'\"'}\" ; b ; echo \\'",
             "echo \"${x:-${y}}\"",
+            "echo \"${x:+$[}]'\"'}\" ; b ; echo \\'",
             "echo \"${x#\\\"}\"",
             "a &> log",
             "echo hi &>/tmp/f touch x",

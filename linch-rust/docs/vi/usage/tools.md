@@ -496,7 +496,7 @@ Cách các rule kết hợp:
 - Một lệnh shell mà bộ tách lệnh không mô hình hóa được có thể bị rule deny
   hoặc ask nhưng không bao giờ được rule allow. Gồm `$(...)` và dấu backtick, dấu
   `&` chạy nền hoặc `&>`, `>&file`, chú thích `#`, here-document, `>|`, `${...}`
-  trong dấu nháy kép mà phần thân có dấu nháy hoặc dấu gạch chéo ngược, `env -S`,
+  trong dấu nháy kép mà phần thân có dấu nháy, dấu gạch chéo ngược, `${` lồng hay `$[`, `env -S`,
   và vị trí lệnh là phép khai triển `$`, khai triển ngoặc nhọn (`{rm,-rf}`),
   `function`, `coproc`, gán phần tử mảng (`a[0]=1`) hay chuyển hướng `{fd}>file`.
 - Một rule allow hẹp (pattern không phải `*` trần) không bao phủ lệnh chuyển
