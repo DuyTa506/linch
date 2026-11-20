@@ -11,7 +11,7 @@ from .shell import (
     split_composite,
     strip_command_prefix,
     trim_blanks,
-    unquote_command_word,
+    unquote_words,
 )
 
 RuleDecision = Literal["allow", "deny", "ask", "passthrough"]
@@ -311,13 +311,13 @@ def evaluate_bash_rules(
     for segment in segments:
         matched = _first_matching_bash_rule(rules, segment)
         decision = matched.decision if matched is not None else None
-        # A prefix (`X=1 rm`, `if x; then rm`) or a quoted spelling (`\rm`, `r""m`)
+        # A prefix (`X=1 rm`, `if x; then rm`) or a quoted spelling (`\rm`, `git 'push'`)
         # hides the command from the segment's own text, so deny and ask rules also
         # see it stripped and unquoted. An allow never comes from those forms.
         behind = strip_command_prefix(segment)
         hidden = [
             _first_matching_bash_decision(rules, text)
-            for text in (behind, unquote_command_word(behind))
+            for text in (behind, unquote_words(behind))
             if text != "" and text != trim_blanks(segment)
         ]
         if decision == "deny" or "deny" in hidden:

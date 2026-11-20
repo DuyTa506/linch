@@ -711,8 +711,10 @@ Cách Bash rule đọc một lệnh:
   (đúng pattern `*`) được miễn: nó vốn đã cho phép mọi lệnh nên
   `BashRule("*", "allow")` bao phủ `cmd > file`. Rule deny và ask không đổi, và
   cú pháp chưa phân tích được không bao giờ được cho phép, kể cả bởi allow-all.
-- Rule deny hoặc ask khớp từng đoạn lệnh như được viết, và khớp lại sau khi từ
-  lệnh được bỏ dấu nháy (`\rm`, `r""m`) và các từ đứng trước lệnh bị loại bỏ:
+- Rule deny hoặc ask khớp từng đoạn lệnh như được viết, và khớp lại sau khi
+  từng từ được bỏ dấu nháy (`\rm`, `r""m`, `git 'push'`; đối số có dấu nháy vẫn
+  là một từ, nên `* --force` không khớp bên trong một commit message) và các từ
+  đứng trước lệnh bị loại bỏ:
   phép gán `NAME=value`, chuyển hướng (`>f`, `2>&1`), các từ dành riêng `if`,
   `then`, `else`, `elif`, `do`, `while`, `until`, `!` và `{`, cùng `time`,
   `exec`, `command`, `builtin` và `env` (có hoặc không có dấu nháy) với các tùy
@@ -720,9 +722,7 @@ Cách Bash rule đọc một lệnh:
   NAME`, `exec -la NAME`), tiền tố duy nhất của tùy chọn dài (`env --uns NAME`)
   và đối số của `env -u`/`-C`/`-a`, `time -f`/`-o` và `exec -a`. `env -S` là cú
   pháp chưa phân tích được.
-  `command -v NAME` không phải là lệnh tên `NAME`. Các đối số giữ nguyên như đã
-  viết, nên rule deny `* --force` không khớp một commit message có chứa
-  `--force`. Rule allow luôn khớp đoạn lệnh như được viết: `X=1 echo` không phải
+  `command -v NAME` không phải là lệnh tên `NAME`. Rule allow luôn khớp đoạn lệnh như được viết: `X=1 echo` không phải
   `echo`. Các cách viết và wrapper khác, như `/bin/rm`, `sudo rm`, `nice`,
   `nohup`, `setsid`, `timeout`, `xargs`, `eval rm x` và `sh -c 'rm x'`, không
   được bao phủ: chúng là những lệnh khác đối với rule. Ranh giới là sandbox.

@@ -16,7 +16,7 @@ from linch.permissions.shell import (
     split_composite,
     strip_command_prefix,
     tokenize,
-    unquote_command_word,
+    unquote_words,
 )
 
 
@@ -229,7 +229,18 @@ def test_file_redirects_are_not_found_in_quotes_or_for_descriptors_and_devices(
     assert not redirects_to_file(command)
 
 
-def test_unquote_command_word_keeps_the_arguments_as_written() -> None:
-    assert unquote_command_word("\\rm -rf x") == "rm -rf x"
-    assert unquote_command_word('r""m "a b"') == 'rm "a b"'
-    assert unquote_command_word("rm 'a b'") == "rm 'a b'"
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("\\rm -rf x", "rm -rf x"),
+        ("git 'push' \"a b\"", "git push 'a b'"),
+        ("git 'commit' -m 'it'\\''s --force'", "git commit -m 'it'\\''s --force'"),
+        ("r\"\"m '' x", "rm '' x"),
+        ("rm  -rf   x", "rm  -rf   x"),
+        ("  git  'push'  x ", "git push x"),
+    ],
+)
+def test_unquote_words_unquotes_every_word_and_keeps_the_boundaries(
+    command: str, expected: str
+) -> None:
+    assert unquote_words(command) == expected

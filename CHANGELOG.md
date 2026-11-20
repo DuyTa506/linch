@@ -30,6 +30,10 @@ reflected by `linch.RUN_SCHEMA_VERSION`.
   word is matched unquoted (`\rm`, `r""m`) while arguments stay as written, so a deny rule
   `* --force` does not match a commit message that contains `--force`. Allow rules still match
   the segment as written. Regex patterns follow the same rule.
+- Bash deny and ask rules match each word unquoted with the word boundaries kept (a word that is
+  empty or holds a blank, a quote or a backslash is written back in single quotes), so
+  `git push *` covers `git 'push' origin main` and `rm -rf *` covers `rm '-rf' build`, while
+  `* --force` still does not match inside `git commit -m 'never --force'`.
 - Bash deny and ask rules read wrapper options unquoted (`env "-i" cmd`, `env "X=1" cmd`) and as
   GNU does: bundled short options (`env -iu NAME`, `time -po FILE`, `exec -la NAME`), unique
   prefixes of long options (`env --uns NAME`, `time --outp FILE`) with an optional `=value`, and

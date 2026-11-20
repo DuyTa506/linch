@@ -512,19 +512,28 @@ def redirects_to_file(segment: str) -> bool:
     return False
 
 
-def unquote_command_word(command: str) -> str:
-    """Return ``command`` with the quotes and backslashes of its first word removed.
+def unquote_words(command: str) -> str:
+    """Return ``command`` with the quotes and backslashes of every word removed.
 
-    ``\\rm -rf x`` becomes ``rm -rf x``; the rest stays as written, so a quoted
-    argument keeps its boundaries.
+    The words stay apart: a word that is empty or holds a blank, a quote or a
+    backslash is written back in single quotes, so ``git 'push' "a b"`` becomes
+    ``git push 'a b'`` and a quoted argument stays one word.
 
     Args:
         command: Command text starting at its command word.
 
     Returns:
-        The text with an unquoted command word.
+        The text with unquoted words.
     """
-    end = _word_end(command)
-    if not any(c in "'\"\\" for c in command[:end]):
+    if not any(c in "'\"\\" for c in command):
         return command
-    return _unquote(command[:end]) + command[end:]
+    words: list[str] = []
+    rest = trim_blanks(command)
+    while rest:
+        end = _word_end(rest)
+        word = _unquote(rest[:end])
+        if word == "" or any(c in word for c in " \t'\"\\"):
+            word = "'" + word.replace("'", "'\\''") + "'"
+        words.append(word)
+        rest = trim_blanks(rest[end:])
+    return " ".join(words)

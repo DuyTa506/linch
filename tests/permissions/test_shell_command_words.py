@@ -286,3 +286,41 @@ def test_a_deny_rule_does_not_match_the_argument_of_a_bundled_wrapper_option(
     command: str,
 ) -> None:
     assert _bash([BashRule("rm", "deny")], command, "skip-dangerous") == "allow"
+
+
+# Source: `a_glob_deny_rule_covers_a_quoted_second_word` in the Rust kernel's tests.
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git push origin main",
+        "git 'push' origin main",
+        'git "push" origin main',
+        "git pu\\sh origin main",
+        "git pu\"\"sh 'origin' main",
+        "X=1 git 'push' origin main",
+    ],
+)
+def test_a_glob_deny_rule_covers_a_quoted_second_word(command: str) -> None:
+    assert _bash([BashRule("git push *", "deny")], command, "skip-dangerous") == "deny"
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["rm -rf build", 'rm -r""f build', "rm '-rf' build", "\\rm -r'f' build"],
+)
+def test_a_glob_deny_rule_covers_quoted_flags(command: str) -> None:
+    assert _bash([BashRule("rm -rf *", "deny")], command, "skip-dangerous") == "deny"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git commit -m 'never --force'",
+        'git commit -m "never --force"',
+        "git 'commit' -m 'it'\\''s --force'",
+    ],
+)
+def test_a_quoted_argument_stays_one_word_for_a_glob_deny_rule(command: str) -> None:
+    rules: list[PermissionRule] = [BashRule("* --force", "deny")]
+    assert _bash(rules, command, "skip-dangerous") == "allow"
+    assert _bash(rules, "git 'push' '--force'", "skip-dangerous") == "deny"

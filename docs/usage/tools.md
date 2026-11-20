@@ -714,16 +714,15 @@ How Bash rules read a command:
   `BashRule("*", "allow")` covers `cmd > file`. Deny and ask rules are
   unchanged, and unparsed syntax is never allowed, allow-all included.
 - A deny or ask rule matches each segment as written, and again after its
-  command word is unquoted (`\rm`, `r""m`) and the words in front of the
-  command are removed: `NAME=value` assignments, redirections (`>f`, `2>&1`),
+  words are unquoted one by one (`\rm`, `r""m`, `git 'push'`; a quoted argument
+  stays one word, so `* --force` does not match inside a commit message) and
+  the words in front of the command are removed: `NAME=value` assignments, redirections (`>f`, `2>&1`),
   the reserved words `if`, `then`, `else`, `elif`, `do`, `while`, `until`, `!`
   and `{`, and `time`, `exec`, `command`, `builtin` and `env` (quoted or not)
   with their options, read unquoted: bundled short options (`env -iu NAME`,
   `exec -la NAME`), unique prefixes of long options (`env --uns NAME`) and the
   argument of `env -u`/`-C`/`-a`, `time -f`/`-o` and `exec -a`. `env -S` is
-  unparsed. `command -v NAME` is not a command named `NAME`. Arguments stay
-  as written, so a deny rule `* --force` does not match a commit message that
-  contains `--force`. An allow rule always matches the segment as written:
+  unparsed. `command -v NAME` is not a command named `NAME`. An allow rule always matches the segment as written:
   `X=1 echo` is not `echo`. Other spellings of a command, such as `/bin/rm`,
   `sudo rm`, `nice`, `nohup`, `setsid`, `timeout`, `xargs`, `eval rm x` and
   `sh -c 'rm x'`, are not covered: they are other commands to a rule. The
