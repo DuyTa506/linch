@@ -48,6 +48,7 @@ async fn edit_replace_all_does_not_hold_many_times_the_file() {
     let said = text(call(&edit, shrink).await);
     let grown = peak_rss().saturating_sub(before);
     assert_eq!(said, "Edited a.txt (10485760 replacements)");
+    eprintln!("peak memory grew by {} MiB", grown / MIB);
     assert!(
         grown < 64 * MIB,
         "one Edit of a 10 MiB file raised the peak memory by {} MiB",

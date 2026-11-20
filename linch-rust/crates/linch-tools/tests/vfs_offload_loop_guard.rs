@@ -99,7 +99,7 @@ async fn stuck(id: fn(usize) -> String) -> (usize, Vec<String>) {
         match item.unwrap().event {
             Event::ToolCallEnd(_) => runs += 1,
             Event::LoopGuard(guard) => {
-                let reason = serde_json::to_value(&guard.reason).unwrap();
+                let reason = serde_json::to_value(guard.reason).unwrap();
                 guards.push(reason.as_str().unwrap().to_owned());
             }
             _ => {}

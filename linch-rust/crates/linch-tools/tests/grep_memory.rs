@@ -45,6 +45,7 @@ async fn one_grep_call_cannot_hold_hundreds_of_megabytes() {
     let query = json!({"pattern": "(0|1)*1(0|1){22}", "output_mode": "count"});
     call(&tool, query).await.unwrap();
     let grown = peak_rss().saturating_sub(before);
+    eprintln!("peak memory grew by {} MiB", grown / MIB);
     assert!(
         grown < 128 * MIB,
         "one Grep over a 2 MiB file raised the peak memory by {} MiB",
