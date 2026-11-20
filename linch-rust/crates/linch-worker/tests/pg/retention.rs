@@ -767,3 +767,55 @@ async fn an_aborted_retention_pass_frees_the_pruner_lock() {
         done.runs
     );
 }
+
+/// The pruner lock's connection is detached, so a
+/// pass on a pool of one runs (its batches use the pool), leaves the pool
+/// usable, and a second pass right after it is not `contended`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retention_pass_runs_on_a_pool_of_one() {
+    let Some(db) = TestDb::new("retention_one").await else {
+        return;
+    };
+    sqlx::query(
+        "INSERT INTO linch_runs (namespace, run_id, session_id, contract, status, epoch, \
+         checkpoint, last_seq, ended_at) \
+         SELECT 'p9', 'r' || n, 's' || n, 'c', 'completed', 1, '{}', 0, now() - interval '3 days' \
+         FROM generate_series(1, 50) AS n",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let one = PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect_with(db.options.clone())
+        .await
+        .unwrap();
+    let retention = Retention {
+        terminal_runs: Some(DAY),
+        batch_size: 10,
+        ..Retention::default()
+    };
+    let first = prune_retained(&one, &retention).await;
+    let second = prune_retained(&one, &retention).await;
+    let alive: Result<i32, _> = sqlx::query_scalar("SELECT 1").fetch_one(&one).await;
+    // Sessions that hold the lock key of this schema, a moment later.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let locks: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND database = \
+         (SELECT oid FROM pg_database WHERE datname = current_database()) \
+         AND (classid::bigint << 32 | objid::bigint) = hashtextextended( \
+             'linch_retention:' || current_database() || ':' || current_schema(), 0)",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    one.close().await;
+    db.finish().await;
+    let first = first.expect("a pass on a pool of one");
+    let second = second.expect("a second pass");
+    assert_eq!((first.runs, first.contended), (50, false));
+    assert!(!second.contended, "the second pass found the lock held");
+    assert!(alive.is_ok(), "{alive:?}");
+    assert_eq!(locks, 0, "the pruner lock is still held");
+}

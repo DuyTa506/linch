@@ -218,3 +218,53 @@ async fn a_heartbeat_while_the_job_is_owned_hides_it() {
     assert!(matches!(beat, Ok(true)), "{beat:?}");
     assert!(hidden_ms > 20_000.0, "hidden for {hidden_ms:.0} ms");
 }
+
+/// The heartbeat matches `owner IS NOT NULL` and not
+/// the owner's name. After a release, another worker's dequeue sets a new
+/// owner and the next `attempts`; the first worker's late heartbeat must
+/// answer `false` and leave the new holder's visibility alone.
+#[tokio::test]
+async fn a_heartbeat_after_another_workers_dequeue_changes_nothing() {
+    let Some(db) = Db::new("late_beat").await else {
+        return;
+    };
+    let first = db.held("late_beat").await;
+    let line = LeaseLine::new(&db.pool, Duration::from_secs(10));
+    let released = first.release(&db.pool, Duration::ZERO, "retry", true);
+    assert!(matches!(released.await, Ok(true)));
+    let served = Served {
+        namespaces: vec!["ns".to_owned()],
+        roots: Vec::new(),
+    };
+    // The second worker hides the job for 5 s only.
+    let short = Duration::from_secs(5);
+    let second = dequeue(&db.pool, "late_beat", &served, "w2", short).await;
+    let second = second.unwrap().expect("the released job is visible");
+    assert_eq!(second.attempt(), first.attempt() + 1);
+    let read = || async {
+        sqlx::query_as::<_, (f64, Option<String>)>(
+            "SELECT (extract(epoch FROM visible_at - now()) * 1000)::float8, owner \
+             FROM linch_worker_jobs WHERE id = $1",
+        )
+        .bind(first.job.id.0)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+    };
+    let late = first.heartbeat(&line, Duration::from_secs(300)).await;
+    let (hidden_ms, owner) = read().await;
+    // The second worker fails the job for good: no heartbeat of either
+    // attempt hides it again, and the first worker's other writes are
+    // fenced by `attempts`.
+    assert!(matches!(second.fail(&db.pool, "bad").await, Ok(true)));
+    let after_fail = second.heartbeat(&line, Duration::from_secs(300)).await;
+    let stale_release = first.release(&db.pool, Duration::ZERO, "stale", false).await;
+    let stale_ack = first.ack(&db.pool, "done").await;
+    db.finish().await;
+    assert!(matches!(late, Ok(false)), "{late:?}");
+    assert!(hidden_ms <= 5_000.0, "hidden for {hidden_ms:.0} ms");
+    assert_eq!(owner.as_deref(), Some("w2"));
+    assert!(matches!(after_fail, Ok(false)), "{after_fail:?}");
+    assert!(matches!(stale_release, Ok(false)), "{stale_release:?}");
+    assert!(matches!(stale_ack, Ok(false)), "{stale_ack:?}");
+}
