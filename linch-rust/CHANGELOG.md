@@ -8,6 +8,7 @@ package `linch` has its own [changelog](../CHANGELOG.md).
 
 - A relative path in a call of a workspace tool is judged where the tool resolves it, the workspace, so path rules and the `accept_edits` check name the file the call touches when `project_root` is above or below the workspace; the project root and the workspace being one directory is judged as before.
 - The catalog change notice escapes `<`, `>` and `&` in the tool and skill names and descriptions it lists, so a description cannot close the notice's wrapper.
+- One provider response holds at most 32 MiB (`MAX_RESPONSE_BYTES`) and 4096 tool calls (`MAX_RESPONSE_TOOL_CALLS`); a stream that passes either fails with `StreamError::ResponseTooLarge` or `TooManyToolCalls`.
 
 ## 0.2.0 - 2026-11-19
 

@@ -74,7 +74,15 @@ consumer of the stream and enforces the rules on every push; `assemble`
   non-empty name;
 - an input delta or `tool_use_end` names a call that is open;
 - every opened call ends before `message_end`;
-- `stop_reason` is `tool_use` if and only if at least one call completed.
+- `stop_reason` is `tool_use` if and only if at least one call completed;
+- one response holds at most 32 MiB (`MAX_RESPONSE_BYTES`: text, thinking and
+  its signatures, redacted data, call ids, names and inputs) and 4096 tool calls (`MAX_RESPONSE_TOOL_CALLS`),
+  else `StreamError::ResponseTooLarge` or `TooManyToolCalls`. A response cannot
+  hold more tokens than the model's context window, and the largest window in
+  the adapters' tables is 2,000,000 tokens (`gemini-1.5-pro`); at up to 8 bytes
+  a token that is 16 MiB, so 32 MiB is never met by a legitimate response
+  (a 128k-token answer is about 1 MiB). 4096 calls is a 128k-token answer of
+  calls of 32 tokens each.
 
 A call whose concatenated input is not a JSON object (malformed, cut off,
 an array) does not fail the stream: the block keeps an empty `input` and the

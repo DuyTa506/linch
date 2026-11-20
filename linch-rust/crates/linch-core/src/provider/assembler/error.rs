@@ -58,6 +58,18 @@ pub enum StreamError {
         /// this error.
         stop_reason: StopReason,
     },
+    /// One response held more than [`super::MAX_RESPONSE_BYTES`].
+    #[error("the response is longer than {limit} bytes")]
+    ResponseTooLarge {
+        /// The cap that was passed.
+        limit: usize,
+    },
+    /// One response opened more than [`super::MAX_RESPONSE_TOOL_CALLS`] calls.
+    #[error("the response holds more than {limit} tool calls")]
+    TooManyToolCalls {
+        /// The cap that was passed.
+        limit: usize,
+    },
     /// The stream ended without ever pushing a `message_start`.
     #[error("stream ended before message_start")]
     EndedBeforeStart,
