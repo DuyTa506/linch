@@ -754,7 +754,7 @@ process. How many writes a turn costs and how they are grouped is in the
 
 ### Long runs are read in pages
 
-`agent.events` returns the whole run: it always asks for pages (`max_bytes` of 8 MiB) and follows them for you.
+`agent.events` returns the whole run: it asks for pages (`max_bytes` of 8 MiB) and follows them for you, when the server has the `run_events_paging` capability (`server.info.has("run_events_paging")`). A server without it does not know `max_bytes` and refuses it, so there `agent.events` asks for no page and reads the whole run in one call, as that server answers it.
 On the wire, `run.events` answers one message at a time, and a message holds
 at most `limits.max_message_bytes` of `server.info` (16 MiB) in all. What
 a request gets:

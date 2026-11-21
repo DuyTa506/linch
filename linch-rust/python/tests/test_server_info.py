@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from scripted import config, text_turn
 from test_protocol import Answering
 from test_remote import TOKEN, TRANSPORTS, listening
 
@@ -205,3 +206,60 @@ async def test_a_tenant_connection_gets_the_same_info_as_a_local_one(transport: 
 
     assert info == expected
     assert "acme" not in repr(info)
+
+
+def events_server(tmp_path: Path, capabilities: list[str]) -> Path:
+    """A server binary that opens agents and answers `run.events` the way a
+    server with `capabilities` does: one without `run_events_paging` refuses
+    the `max_bytes` member (it does not know it) and answers the whole run."""
+    info = {**WIRE, "capabilities": capabilities}
+    script = tmp_path / "fake-events-server"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys\n"
+        f"INFO = {info!r}\n"
+        f"PAGING = {'run_events_paging' in capabilities!r}\n"
+        "def envelope(seq):\n"
+        "    return {'v': 1, 'seq': seq, 'run_id': 'r1', 'ts_ms': 0, 'event': {'type': 'custom'}}\n"
+        "for line in sys.stdin:\n"
+        "    request = json.loads(line)\n"
+        "    method, params = request['method'], request.get('params', {})\n"
+        "    if method == 'server.info':\n"
+        "        body = {'result': INFO}\n"
+        "    elif method == 'agent.open':\n"
+        "        body = {'result': {'agent': 'a1', 'contract': 'c'}}\n"
+        "    elif method == 'run.events' and 'max_bytes' in params and not PAGING:\n"
+        "        message = 'unknown field `max_bytes`, expected one of `agent`, `run_id`'\n"
+        "        body = {'error': {'code': -32602, 'message': message}}\n"
+        "    elif method == 'run.events' and params.get('after_seq', 0) == 0 and PAGING:\n"
+        "        body = {'result': {'events': [envelope(1), envelope(2)], 'next_after_seq': 2}}\n"
+        "    elif method == 'run.events':\n"
+        "        after = params.get('after_seq', 0)\n"
+        "        body = {'result': {'events': [envelope(s) for s in (1, 2, 3) if s > after]}}\n"
+        "    else:\n"
+        "        body = {'error': {'code': -32601, 'message': 'no method'}}\n"
+        "    reply = {'jsonrpc': '2.0', 'id': request['id'], **body}\n"
+        "    sys.stdout.write(json.dumps(reply) + '\\n')\n"
+        "    sys.stdout.flush()\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    return script
+
+
+async def test_events_against_a_server_without_paging_asks_for_the_whole_run(
+    tmp_path: Path,
+) -> None:
+    # A server that predates `run_events_paging` refuses the `max_bytes` member.
+    async with Server(events_server(tmp_path, ["cache_isolation"])) as server:
+        agent = await server.open_agent(config([text_turn("x")]))
+        envelopes = await agent.events("r1")
+
+    assert [envelope.seq for envelope in envelopes] == [1, 2, 3]
+
+
+async def test_events_against_a_server_with_paging_reads_page_by_page(tmp_path: Path) -> None:
+    async with Server(events_server(tmp_path, ["run_events_paging"])) as server:
+        agent = await server.open_agent(config([text_turn("x")]))
+        envelopes = await agent.events("r1")
+
+    assert [envelope.seq for envelope in envelopes] == [1, 2, 3]

@@ -759,7 +759,7 @@ server. Một lượt tốn bao nhiêu lần ghi và chúng được gom nhóm r
 
 ### Run dài được đọc từng trang
 
-`agent.events` trả về cả run: nó luôn xin theo trang (`max_bytes` 8 MiB) và tự đi theo các trang đó. Trên wire, `run.events` trả lời
+`agent.events` trả về cả run: nó xin theo trang (`max_bytes` 8 MiB) và tự đi theo các trang đó, khi server có capability `run_events_paging` (`server.info.has("run_events_paging")`). Server không có nó không biết `max_bytes` và từ chối trường đó, nên với server ấy `agent.events` không xin trang nào và đọc cả run trong một lần gọi, đúng như server đó trả lời. Trên wire, `run.events` trả lời
 từng message, và một message chứa tối đa `limits.max_message_bytes` của `server.info` (16 MiB)
 tính cả khung. Một request nhận được:
 

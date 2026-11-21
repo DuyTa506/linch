@@ -287,7 +287,7 @@ class Server:
             for item in opened.get("skipped", [])
         ]
         observers = _observers(config, telemetry)
-        return Agent(conn, handle, str(opened["contract"]), observers, skipped)
+        return Agent(conn, handle, str(opened["contract"]), observers, skipped, self.info)
 
     async def provider_capabilities(
         self, provider: Mapping[str, Any] | AgentConfig, model: str | None = None

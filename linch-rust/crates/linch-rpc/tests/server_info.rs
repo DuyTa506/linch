@@ -26,6 +26,7 @@ fn expected() -> Value {
             "cache_isolation",
             "exec_idempotency_key",
             "provider_info",
+            "run_events_paging",
             "run_steer",
             "schedule",
             "workflow",
