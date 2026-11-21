@@ -31,7 +31,9 @@
 //! through another service: `systemd-run`, `at`, `cron`, a D-Bus activation)
 //! and can be killed by the command it supervises, which runs as the same
 //! user; the server then still kills the shell's group, but not what had
-//! left it. A kernel without
+//! left it. A helper killed before the server has checked the shell's pid
+//! is not passed over (the shell may run): the server finds the shell by
+//! the output pipes only it holds. A kernel without
 //! `/proc/<pid>/task/<tid>/children` (`CONFIG_PROC_CHILDREN`) or
 //! `pidfd_open` (before 5.3) can only have the program's group killed.
 
