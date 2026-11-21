@@ -202,7 +202,7 @@ A complete model response.
 
 | Field | What it is |
 |---|---|
-| `message` | `{"role": "assistant", "content": [blocks]}`: `text`, `thinking`, `tool_use` blocks. A `tool_use` block is `{"type", "id", "name", "input"}`, and carries `raw_input` (the arguments as the model wrote them) only when they were not a JSON object: `input` is then `{}` and the call is answered with an error, never run ([Troubleshooting](./troubleshooting.md)) |
+| `message` | `{"role": "assistant", "content": [blocks]}`: `text`, `thinking`, `tool_use` blocks. A `tool_use` block is `{"type", "id", "name", "input"}`, and carries `raw_input` (the arguments as the model wrote them) only when they were not a JSON object or nest deeper than 64 levels: `input` is then `{}` and the call is answered with an error, never run ([Troubleshooting](./troubleshooting.md)) |
 | `stop_reason` | `end_turn`, `tool_use`, `max_tokens`, `stop_sequence`, `refusal`, `error`, `lease_lost` or `interrupted` |
 
 ### `PartialAssistantEvent` (`partial_assistant`), stream-only

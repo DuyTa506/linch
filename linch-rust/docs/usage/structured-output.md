@@ -94,9 +94,9 @@ Your previous response failed structured-output validation: <error>
 Respond again with ONLY a JSON object matching the required schema.
 ```
 
-`<error>` is `JSON parse error: ...`, `Expected a JSON object, got array`, or
-`Schema validation error:` followed by one `- path: message` line per
-violation.
+`<error>` is `JSON parse error: ...`, `Expected a JSON object, got array`,
+`JSON nests deeper than 64 levels`, or `Schema validation error:` followed by
+one `- path: message` line per violation.
 
 When the retries are spent, or with `structured_output_retries` 0, the next
 failing answer ends the run: a `verification` event with `action: "stop"`,

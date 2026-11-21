@@ -5,7 +5,8 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::json::JsonObject;
+use crate::canonical::{JOURNAL_MAX_DEPTH, check_depth};
+use crate::json::{JsonObject, JsonValue};
 use crate::message::{ContentBlock, Message, Role, TextBlock, ThinkingBlock, ToolUseBlock};
 use crate::run::StopReason;
 use crate::usage::Usage;
@@ -288,15 +289,21 @@ impl Assembler {
             });
         };
         let (id, name) = (end.id, call.name);
-        match serde_json::from_str(&call.input) {
-            Ok(serde_json::Value::Object(input)) => {
+        // An input nested deeper than the journal's limit is as broken as
+        // one that is not JSON: the stores write it but cannot read it back.
+        let input = match serde_json::from_str(&call.input) {
+            Ok(JsonValue::Object(input)) => journalable(input),
+            _ => None,
+        };
+        match input {
+            Some(input) => {
                 let block = ToolUseBlock::new(id, name, input);
                 self.content.push(ContentBlock::ToolUse(block));
             }
             // A call the model can be told about: kept, marked, and never
             // run. `message_end`'s stop reason says whether the output
             // limit cut it off instead, which drops it.
-            _ => {
+            None => {
                 self.broken_calls.insert(id.clone());
                 let block = ToolUseBlock::invalid(id, name, call.input);
                 self.content.push(ContentBlock::ToolUse(block));
@@ -350,7 +357,9 @@ impl Assembler {
         }
         self.stop_reason = Some(stop_reason);
         self.usage = usage;
-        self.provider_metadata = provider_metadata;
+        // Metadata nested deeper than the journal's limit is left out, as
+        // the stores could not read the message back with it.
+        self.provider_metadata = provider_metadata.and_then(journalable);
         self.message_ended = true;
         Ok(())
     }
@@ -381,6 +390,17 @@ impl Assembler {
             usage: self.usage,
             model: self.model,
         })
+    }
+}
+
+/// `object` when the journal can hold it: nested no deeper than
+/// [`JOURNAL_MAX_DEPTH`].
+fn journalable(object: JsonObject) -> Option<JsonObject> {
+    let value = JsonValue::Object(object);
+    check_depth(&value, JOURNAL_MAX_DEPTH).ok()?;
+    match value {
+        JsonValue::Object(object) => Some(object),
+        _ => None,
     }
 }
 

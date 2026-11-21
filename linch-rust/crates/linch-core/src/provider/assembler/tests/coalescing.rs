@@ -170,3 +170,30 @@ fn message_end_provider_metadata_becomes_the_message_provider_metadata() {
     .unwrap();
     assert_eq!(assembly.message.provider_metadata, Some(metadata));
 }
+
+/// The message, with `provider_metadata` of `objects` nested objects, as
+/// the assembler returns it.
+fn with_nested_metadata(objects: usize) -> Message {
+    let text = format!("{}1{}", "{\"a\":".repeat(objects), "}".repeat(objects));
+    let metadata: JsonObject = serde_json::from_str(&text).unwrap();
+    let assembly = assemble([
+        start("m"),
+        ProviderEvent::MessageEnd(MessageEndEvent {
+            stop_reason: StopReason::EndTurn,
+            usage: Some(Usage::default()),
+            provider_metadata: Some(metadata),
+        }),
+    ])
+    .unwrap();
+    assembly.message
+}
+
+/// The stores write the message with its metadata but read it back only
+/// up to the journal's depth limit: the response is kept without the
+/// metadata that would make it unreadable.
+#[test]
+fn provider_metadata_nested_past_the_journal_limit_is_not_kept() {
+    let limit = crate::JOURNAL_MAX_DEPTH + 1;
+    assert!(with_nested_metadata(limit).provider_metadata.is_some());
+    assert!(with_nested_metadata(limit + 1).provider_metadata.is_none());
+}

@@ -77,7 +77,8 @@ On connect, and on every relist, each listed tool becomes one registration
   `(no content)`. An `isError` result becomes a `ToolOutputError` with code
   `mcp_tool_error` and the same text.
 
-A tool the registry refuses (name too long, name taken, invalid schema) is
+A tool the registry refuses (name too long, name taken, invalid schema, an
+input schema nested deeper than 64 levels) is
 left out and reported by `McpServer::skipped()`; it does not fail the connect
 (`crates/linch-mcp/src/catalog.rs:10-18`).
 

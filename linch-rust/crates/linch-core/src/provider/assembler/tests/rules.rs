@@ -259,6 +259,54 @@ fn non_object_tool_input_is_kept_marked() {
     );
 }
 
+/// A call whose input is an object of `objects` objects nested in one
+/// another, written as the model streams it.
+fn nested_call(objects: usize) -> AssistantAssembly {
+    let input = format!("{}1{}", "{\"a\":".repeat(objects), "}".repeat(objects));
+    assemble([
+        start("m"),
+        ProviderEvent::ToolUseStart(ToolUseStartEvent {
+            id: "c1".into(),
+            name: "Read".into(),
+        }),
+        ProviderEvent::ToolUseInputDelta(ToolUseInputDeltaEvent {
+            id: "c1".into(),
+            json_delta: input,
+        }),
+        ProviderEvent::ToolUseEnd(ToolUseEndEvent { id: "c1".into() }),
+        end(StopReason::ToolUse),
+    ])
+    .unwrap()
+}
+
+/// The deepest input the journal takes is kept: its root is depth 0, so it
+/// holds `JOURNAL_MAX_DEPTH + 1` nested objects.
+#[test]
+fn a_tool_input_at_the_journal_depth_limit_is_kept() {
+    let assembly = nested_call(crate::JOURNAL_MAX_DEPTH + 1);
+    let call = assembly.message.tool_uses().next().unwrap();
+    assert!(call.raw_input.is_none());
+    assert!(!call.input.is_empty());
+}
+
+/// One level deeper is a broken call, as malformed text is: kept marked
+/// with the model's text, never run, and the model is told why. The stores
+/// write a response with a deeper input but cannot read it back.
+#[test]
+fn a_tool_input_past_the_journal_depth_limit_is_kept_marked() {
+    let assembly = nested_call(crate::JOURNAL_MAX_DEPTH + 2);
+    let call = assembly.message.tool_uses().next().unwrap();
+    assert!(call.input.is_empty());
+    assert!(call.raw_input.is_some());
+    let told = call.input_error().unwrap();
+    assert!(
+        told.starts_with(
+            "invalid JSON arguments for Read: the arguments nest deeper than 64 levels"
+        ),
+        "{told}"
+    );
+}
+
 /// The model is shown the first 200 characters of what it wrote, on a
 /// character boundary.
 #[test]
