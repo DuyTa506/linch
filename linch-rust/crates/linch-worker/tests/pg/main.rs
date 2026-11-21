@@ -3,6 +3,7 @@
 mod common;
 mod drain;
 mod exclusive;
+mod faults;
 mod fixtures;
 mod isolation;
 mod one_job;

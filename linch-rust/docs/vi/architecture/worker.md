@@ -126,6 +126,13 @@ vi transaction cho hàng đợi đó, đếm các job đang được giữ bởi
 đâu (có chủ, vẫn đang ẩn, chưa thất bại), và không lấy gì khi đã tới giới hạn
 (`lease.rs:134-157`). Các job đang được giữ khi giới hạn bị hạ xuống vẫn tiếp tục chạy.
 
+Việc chờ lock đó có giới hạn. Transaction của dequeue đặt `lock_timeout` là 250 ms ngay trong
+câu lệnh bắt đầu nó (`begin_bounded` trong `lib.rs`, không thêm round trip), và một lần chờ
+hết hạn (SQLSTATE `55P03`) trả lời "không lấy gì" cho hàng đợi đó, như với một hàng đợi
+trống: lượt poll chuyển sang các hàng đợi khác và hỏi lại hàng đợi này ở lượt poll kế tiếp.
+Một tiến trình chậm hoặc bị tạm dừng trong một transaction đang giữ lock vì thế chỉ làm lượt
+poll của worker chậm tối đa 250 ms cho mỗi hàng đợi như vậy, thay vì làm nó dừng hẳn.
+
 ## Lease và fencing
 
 Hai lớp fence bảo vệ một run, mỗi lớp một tầng:
@@ -273,6 +280,13 @@ kích hoạt này, hoặc sau bây giờ khi tick đó cũng đã qua, tất c�
   `schedule:{id}:{fire time}`; có `session_id`, mỗi lần kích hoạt là một run mới trong đó.
 - Một timing đã lưu mà không còn parse được sẽ tạm dừng lịch của nó (có ghi log) thay vì
   chặn các lịch khác.
+- **Một lock root đang bị giữ không làm worker đứng.** Các root bị giới hạn của batch được
+  khóa bằng `pg_try_advisory_xact_lock`, không bao giờ chờ. Một root mà transaction khác đang
+  giữ lock (một `enqueue` chậm của root đó) bị loại khỏi lời gọi này: các lịch của nó vẫn đến
+  hạn và lời gọi kế tiếp (lượt poll kế tiếp của worker) kích hoạt từng lịch đúng một lần, còn
+  các root khác của batch kích hoạt ngay. Transaction cũng đặt `lock_timeout` là 250 ms
+  (`begin_bounded`), nên mọi lần chờ lock khác trong đó kết thúc lời gọi với 0 và không giữ lại
+  gì. Worker poll các hàng đợi ngay sau đó, nên không hàng đợi nào phải chờ bên đang giữ lock.
 
 ### Cap
 
@@ -281,7 +295,8 @@ namespace dưới một root (đoạn đầu tiên phân tách bằng `/` của 
 tenant) được giữ: số lịch cho `create_schedule`, số job chưa xong cho `enqueue` và cho lần kích hoạt của một lịch. Việc đếm
 chạy trong transaction của lần insert sau một advisory lock phạm vi transaction trên root,
 nên các writer trên mọi server đếm các hàng của nhau; vượt quá thì `LimitReached`, hoặc với
-một lần kích hoạt thì bỏ qua.
+một lần kích hoạt thì bỏ qua. `enqueue` và `create_schedule` chờ lock bao lâu cũng được; chỉ
+lần kích hoạt của worker là bỏ cuộc (xem ở trên).
 
 ## Định nghĩa agent
 

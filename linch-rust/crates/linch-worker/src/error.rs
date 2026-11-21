@@ -69,3 +69,14 @@ pub(crate) fn non_blank(value: &str, what: &str) -> Result<(), WorkerError> {
     }
     Ok(())
 }
+
+/// Whether `error` is a lock wait that ran out under `lock_timeout`
+/// (SQLSTATE 55P03): another transaction holds the lock, and the caller
+/// skips this round and tries again at the next.
+pub(crate) fn lock_unavailable(error: &WorkerError) -> bool {
+    let WorkerError::Database(error) = error else {
+        return false;
+    };
+    let code = error.as_database_error().and_then(|error| error.code());
+    code.as_deref() == Some("55P03")
+}

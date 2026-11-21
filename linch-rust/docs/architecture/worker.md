@@ -126,6 +126,14 @@ lock for that queue, counts the jobs held by live workers anywhere (owned,
 still hidden, not failed), and takes nothing at the limit
 (`lease.rs:134-157`). Jobs held when the limit is lowered keep running.
 
+The wait for that lock is bounded. The dequeue's transaction sets
+`lock_timeout` to 250 ms in the statement that begins it (`begin_bounded` in
+`lib.rs`, no extra round trip), and a wait that runs out (SQLSTATE `55P03`)
+answers "nothing taken" for that queue, as for an empty one: the poll goes on
+to its other queues and asks this one again at the next poll. A process that
+is slow or paused inside a transaction that holds the lock therefore delays
+a worker's poll by at most 250 ms per such queue instead of stopping it.
+
 ## Leases and fencing
 
 Two fences protect a run, one per layer:
@@ -281,6 +289,15 @@ has passed too, all in one transaction:
   `schedule:{id}:{fire time}`; with one, every fire is a new run in it.
 - A stored timing that no longer parses pauses its schedule (logged)
   instead of blocking the others.
+- **A held root lock does not stall the worker.** The batch's capped roots
+  are locked with `pg_try_advisory_xact_lock`, which never waits. A root
+  whose lock another transaction holds (a slow `enqueue` of that root) is
+  left out of this call: its schedules stay due and the next call (the
+  worker's next poll) fires each of them once, while the other roots of the
+  batch fire now. The transaction also sets `lock_timeout` to 250 ms
+  (`begin_bounded`), so any other lock wait in it ends the call with 0 and
+  nothing kept. The worker polls its queues right after, so no queue waits
+  on the holder.
 
 ### Caps
 
@@ -290,7 +307,8 @@ tenant's name) may hold: schedules for `create_schedule`, unfinished jobs
 for `enqueue` and for a schedule's fire. The count runs in the insert's
 transaction after a transaction-scoped advisory lock on the root, so writers
 on any server count each other's rows; past it, `LimitReached`, or for a
-fire a skip.
+fire a skip. `enqueue` and `create_schedule` wait for the lock as long as it
+takes; only the worker's fire gives up (see above).
 
 ## Agent definitions
 

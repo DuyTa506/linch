@@ -270,3 +270,38 @@ async fn a_heartbeat_after_another_workers_dequeue_changes_nothing() {
     assert!(matches!(stale_release, Ok(false)), "{stale_release:?}");
     assert!(matches!(stale_ack, Ok(false)), "{stale_ack:?}");
 }
+
+/// The dequeue of a limited queue whose lock another transaction keeps does
+/// not wait for it: it answers `None`, as for an empty queue, and the job
+/// is taken at the next call once the lock is free.
+#[tokio::test]
+async fn a_limited_queue_whose_lock_is_held_elsewhere_is_skipped() {
+    let Some(db) = Db::new("limited_lock").await else {
+        return;
+    };
+    crate::set_queue_limit(&db.pool, "q", 2).await.unwrap();
+    let session = SessionId::new("s1");
+    enqueue_run(&db.pool, "q", "ns", &session, "go")
+        .await
+        .unwrap();
+    let served = Served {
+        namespaces: vec!["ns".to_owned()],
+        roots: Vec::new(),
+    };
+    let timeout = Duration::from_secs(30);
+    let mut holder = db.pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("{QUEUE_LOCK}q"))
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let started = Instant::now();
+    let skipped = dequeue(&db.pool, "q", &served, "w", timeout).await;
+    let waited = started.elapsed();
+    holder.rollback().await.unwrap();
+    let taken = dequeue(&db.pool, "q", &served, "w", timeout).await;
+    db.finish().await;
+    assert!(matches!(skipped, Ok(None)), "{skipped:?}");
+    assert!(waited < Duration::from_secs(5), "waited {waited:?}");
+    assert!(matches!(taken, Ok(Some(_))), "{taken:?}");
+}

@@ -31,7 +31,7 @@ use linch_postgres::PgPool;
 use sqlx::{Postgres, Transaction};
 
 use crate::definition::{self, Cap, Counted};
-use crate::error::{WorkerError, chain, non_blank};
+use crate::error::{WorkerError, chain, lock_unavailable, non_blank};
 use crate::job::{Inserted, NewJob, insert, principal_json};
 use crate::timing::{Parsed, Timing};
 
@@ -477,7 +477,11 @@ pub async fn delete_agent_schedule(
 /// this once per poll interval; a host may call it too.
 ///
 /// A stored timing that no longer parses pauses its schedule (logged)
-/// instead of blocking the others.
+/// instead of blocking the others. A capped root's lock that another
+/// transaction (a slow `enqueue` of that root) holds is not waited for: the
+/// schedules of that root stay due and the next call fires each of them once,
+/// while the other roots fire now. Any other lock wait of the call ends
+/// after 250 ms with 0 and nothing kept.
 ///
 /// Args:
 ///     pool: Pool for the queue's database.
@@ -491,7 +495,17 @@ pub async fn delete_agent_schedule(
 /// Raises:
 ///     WorkerError: If a query fails; nothing of the call is kept then.
 pub async fn fire_due_schedules(pool: &PgPool, caps: &[Cap]) -> Result<u64, WorkerError> {
-    let mut tx = crate::begin(pool).await?;
+    match fire_batch(pool, caps).await {
+        Err(error) if lock_unavailable(&error) => {
+            tracing::debug!("a lock is held elsewhere; the fires wait for the next call");
+            Ok(0)
+        }
+        fired => fired,
+    }
+}
+
+async fn fire_batch(pool: &PgPool, caps: &[Cap]) -> Result<u64, WorkerError> {
+    let mut tx = crate::begin_bounded(pool).await?;
     let due: Vec<Row> = sqlx::query_as(concat!(
         "SELECT ",
         columns!(),
@@ -507,18 +521,26 @@ pub async fn fire_due_schedules(pool: &PgPool, caps: &[Cap]) -> Result<u64, Work
         let root = root(&schedule.namespace);
         caps.iter().find(|cap| cap.root == root)
     };
-    // The batch's capped roots, locked in one order, so two firers never
-    // wait on each other's roots.
+    // The batch's capped roots, locked in one order. A root whose lock
+    // another transaction holds (a slow `enqueue`) is not waited for: its
+    // schedules stay due for the next call, and the other roots fire.
     let mut capped: Vec<&str> = (due.iter().filter_map(cap_of))
         .map(|cap| cap.root.as_str())
         .collect();
     capped.sort_unstable();
     capped.dedup();
+    let mut held = Vec::new();
     for root in capped {
-        definition::lock(&mut tx, Counted::Jobs, root).await?;
+        if !definition::try_lock(&mut tx, Counted::Jobs, root).await? {
+            tracing::debug!(%root, "a root's lock is held elsewhere; its fires wait for the next call");
+            held.push(root);
+        }
     }
     let mut fired = 0;
     for schedule in &due {
+        if held.contains(&root(&schedule.namespace)) {
+            continue;
+        }
         if fire(&mut tx, schedule, now, cap_of(schedule)).await? {
             fired += 1;
         }
