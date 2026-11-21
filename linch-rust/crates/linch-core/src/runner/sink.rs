@@ -22,6 +22,7 @@ use async_trait::async_trait;
 
 use super::Outbox;
 use super::hooks::{event_emit, push_records};
+use crate::canonical::journalable;
 use crate::events::kinds::{
     SkillCompletedEvent, SkillInvokedEvent, ToolCallEndEvent, ToolCallStartEvent,
     ToolProgressEvent, ToolRetryEvent,
@@ -263,15 +264,16 @@ impl ToolSink for JournalSink<'_> {
             result: outcome.block.clone(),
             duration_ms: u64::try_from(outcome.duration.as_millis()).unwrap_or(u64::MAX),
             canonical_output: None,
+            // Left out when nested deeper than the stores read back.
             metadata: match &outcome.result {
                 Ok(output) if !output.metadata.is_empty() => {
-                    Some(Box::new(output.metadata.clone()))
+                    journalable(output.metadata.clone()).map(Box::new)
                 }
                 // A failed call's host-facing facts are its `details` object.
                 Err(ToolOutputError {
                     details: Some(JsonValue::Object(details)),
                     ..
-                }) if !details.is_empty() => Some(Box::new(details.clone())),
+                }) if !details.is_empty() => journalable(details.clone()).map(Box::new),
                 _ => None,
             },
             error_code: match &outcome.result {

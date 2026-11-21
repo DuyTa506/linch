@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::canonical::{JOURNAL_MAX_DEPTH, check_depth};
+use crate::canonical::journalable;
 use crate::json::{JsonObject, JsonValue};
 use crate::message::{ContentBlock, Message, Role, TextBlock, ThinkingBlock, ToolUseBlock};
 use crate::run::StopReason;
@@ -390,17 +390,6 @@ impl Assembler {
             usage: self.usage,
             model: self.model,
         })
-    }
-}
-
-/// `object` when the journal can hold it: nested no deeper than
-/// [`JOURNAL_MAX_DEPTH`].
-fn journalable(object: JsonObject) -> Option<JsonObject> {
-    let value = JsonValue::Object(object);
-    check_depth(&value, JOURNAL_MAX_DEPTH).ok()?;
-    match value {
-        JsonValue::Object(object) => Some(object),
-        _ => None,
     }
 }
 
