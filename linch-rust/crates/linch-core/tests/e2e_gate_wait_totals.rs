@@ -18,8 +18,9 @@ use linch_core::hooks::{BeforeProviderCall, BeforeProviderCallResponse};
 use linch_core::provider::scripted::{ScriptedError, TurnBuilder};
 use linch_core::store::faulty::{FaultTiming, Faulty};
 use linch_core::{
-    Agent, AgentBuilder, AgentSpec, Envelope, Event, Hooks, PermissionMode, Provider, ProviderGate,
-    ProviderPermit, ProviderRetry, RunId, RunOptions, RunStore, SessionStore, ToolScope, Usage,
+    Agent, AgentBuilder, AgentSpec, Envelope, Event, Hooks, PermissionMode, Phase, Provider,
+    ProviderGate, ProviderPermit, ProviderRetry, RunId, RunOptions, RunStore, SessionStore,
+    ToolScope, Usage,
 };
 
 const FALLBACK: &str = "fallback-a";
@@ -55,6 +56,17 @@ fn gated<S: RunStore + SessionStore + 'static>(
 
 fn gate() -> ProviderGate {
     ProviderGate::new(std::num::NonZeroU32::new(1).unwrap())
+}
+
+/// The stored checkpoint is still in the phase of the failed or abandoned
+/// call (attempt 1): only its totals moved.
+async fn assert_phase_kept(stores: &Stores, run_id: &RunId) {
+    let checkpoint = stores.runs.load(NS, run_id).await.unwrap().checkpoint;
+    let phase = checkpoint.phase;
+    assert!(
+        matches!(phase, Phase::ProviderPending { attempt: 1 }),
+        "{phase:?}"
+    );
 }
 
 async fn durable(stores: &Stores, run_id: &RunId) -> Vec<Envelope> {
@@ -147,6 +159,7 @@ async fn a_stop_while_waiting_for_the_gate_keeps_the_usage_incomplete() {
     let provider = Arc::new(Replay::new(vec![text_turn("done")]));
     let agent = gated(spec(), provider, Hooks::default(), &gate, stores.clone());
     stop_at_the_gate(&agent, &gate, &stores, &run_id, 1).await;
+    assert_phase_kept(&stores, &run_id).await;
     finish(agent.resume(run_id.clone(), RunOptions::new("s1"))).await;
     let events = durable(&stores, &run_id).await;
     let receipts = receipts(&events);
@@ -263,6 +276,7 @@ async fn a_stop_while_a_failover_waits_for_the_gate_keeps_the_paid_failure() {
     waiting.abort();
     let _ = waiting.await;
     held.lock().unwrap().take();
+    assert_phase_kept(&stores, &run_id).await;
     let failed = receipts(&durable(&stores, &run_id).await);
     assert_eq!(failed[0].usage, Some(usage(7, 3)), "the failure was paid");
 
@@ -350,6 +364,7 @@ async fn a_stop_right_after_a_steer_is_written_keeps_the_paid_failure() {
     let landed = durable(&stores, &RunId::new("r1")).await;
     assert_eq!(kinds(&landed).last().unwrap(), "steer_received");
     assert_eq!(receipts(&landed).len(), 1, "{:?}", kinds(&landed));
+    assert_phase_kept(&stores, &RunId::new("r1")).await;
 
     let hooks = filling(None, Arc::default());
     let turns = vec![text_turn("done"), text_turn("done")];

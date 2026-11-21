@@ -908,15 +908,25 @@ fn gated_compacting_agent<S: RunStore + SessionStore + 'static>(
 #[tokio::test]
 async fn a_stop_while_a_resumed_summary_waits_for_the_gate_keeps_the_usage_incomplete() {
     let gate = linch_core::ProviderGate::new(std::num::NonZeroU32::new(1).unwrap());
-    // The write that holds the first summary's delivery: the second
-    // delivery of the run, after the first turn's.
+    // The write that holds the first summary's delivery: the n-th write
+    // that holds a delivery, n counted among the run's deliveries.
     let clean = Arc::new(Stores::default());
     let run = gated_compacting_agent(clean.clone(), &gate).run("go", RunOptions::new("s1"));
+    let clean_id = run.run_id().clone();
     finish(run).await;
+    let events = clean.runs.events(NS, &clean_id, 0).await.unwrap();
+    let mut first_summary = events.iter().filter_map(|e| match &e.event {
+        Event::ModelCallDelivery(delivery) => Some(delivery.kind),
+        _ => None,
+    });
+    let first_summary = first_summary.position(|kind| kind == ModelCallKind::Compaction);
     let log = clean.log.lock().unwrap().clone();
-    let deliveries = |write: &Write| matches!(write, Write::Commit(kinds) if kinds.iter().any(|k| k == "model_call_delivery"));
-    let summary_write = log.iter().enumerate().filter(|(_, w)| deliveries(w)).nth(1);
-    let summary_write = summary_write.expect("a summary call").0 as u64 + 1;
+    let holds = |write: &Write| matches!(write, Write::Commit(kinds) if kinds.iter().any(|k| k == "model_call_delivery"));
+    let writes = log.iter().enumerate().filter(|(_, write)| holds(write));
+    let summary_write = writes
+        .map(|(at, _)| at)
+        .nth(first_summary.expect("a summary call"));
+    let summary_write = summary_write.unwrap() as u64 + 1;
 
     let stores = Arc::new(Stores::default());
     let faulty = Arc::new(Faulty::new(
@@ -930,8 +940,8 @@ async fn a_stop_while_a_resumed_summary_waits_for_the_gate_keeps_the_usage_incom
     let landed = stores.runs.events(NS, &run_id, 0).await.unwrap();
     assert_eq!(kinds(&landed).last().unwrap(), "model_call_delivery");
 
-    // Resume while the gate is full; stop once the abandoned receipt is
-    // durable, as a kill would.
+    // Resume while the gate is full; stop once the abandoned receipt (the
+    // third, after two answered calls) is durable, as a kill would.
     let agent = gated_compacting_agent(stores.clone(), &gate);
     let place = gate.try_acquire().expect("the gate is free");
     let waiting = tokio::spawn(drain(agent.resume(run_id.clone(), RunOptions::new("s1"))));
@@ -940,7 +950,7 @@ async fn a_stop_while_a_resumed_summary_waits_for_the_gate_keeps_the_usage_incom
         let receipts = events
             .iter()
             .filter(|e| kind(&e.event) == "model_call_receipt");
-        if receipts.count() == 2 {
+        if receipts.count() == 3 {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -948,6 +958,10 @@ async fn a_stop_while_a_resumed_summary_waits_for_the_gate_keeps_the_usage_incom
     waiting.abort();
     let _ = waiting.await;
     drop(place);
+    let stopped = stores.runs.load(NS, &run_id).await.unwrap().checkpoint;
+    assert!(!stopped.usage_complete);
+    let phase = format!("{:?}", stopped.phase);
+    assert_eq!(phase, "CompactionPending { attempt: 1 }");
 
     let envelopes = finish(agent.resume(run_id.clone(), RunOptions::new("s1"))).await;
     let Some(Event::Result(result)) = envelopes.last().map(|e| &e.event) else {
@@ -956,5 +970,128 @@ async fn a_stop_while_a_resumed_summary_waits_for_the_gate_keeps_the_usage_incom
     assert!(
         !result.usage_complete,
         "an abandoned summary has no usage, but the result says the usage is complete"
+    );
+}
+
+/// `Keyed`, except that the third primary call of the run is refused as
+/// too long once, after its response began: that call is paid, and it left
+/// no usage.
+struct RefusesOnce {
+    inner: Arc<Keyed>,
+    refused: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait]
+impl Provider for RefusesOnce {
+    fn id(&self) -> &str {
+        "refuses-once"
+    }
+
+    fn context_window(&self, model: &str) -> u64 {
+        self.inner.context_window(model)
+    }
+
+    async fn stream(
+        &self,
+        request: ProviderRequest,
+        cancel: CancellationToken,
+    ) -> Result<ProviderStream, ProviderError> {
+        let third = !is_summary_call(&request) && primary_turn(&request) == 2;
+        if third && !self.refused.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            let start =
+                linch_core::ProviderEvent::MessageStart(linch_core::provider::MessageStartEvent {
+                    model: request.model.clone(),
+                });
+            let refusal = ProviderError::ContextLength {
+                status: Some(400),
+                message: "too long".into(),
+            };
+            return Ok(futures::stream::iter([Ok(start), Err(refusal)]).boxed());
+        }
+        self.inner.stream(request, cancel).await
+    }
+}
+
+/// A call refused as too long after it began is paid with no usage; the
+/// run goes on to a forced summary, which waits for a place in the gate and
+/// writes the staged events first. The process stops there; the resumed
+/// run's result must still say its usage is incomplete.
+#[tokio::test]
+async fn a_stop_while_a_summary_after_a_refusal_waits_for_the_gate_keeps_the_usage_incomplete() {
+    let gate = linch_core::ProviderGate::new(std::num::NonZeroU32::new(1).unwrap());
+    let stores = Arc::new(Stores::default());
+    let held = Arc::new(Mutex::new(None));
+    // The same hook on both runs (a run has its hooks' ids in its contract),
+    // taking the gate's place only on the first.
+    let hooks = |fills: bool| {
+        let (take, taken) = (gate.clone(), held.clone());
+        let fill = hook::<PreCompact>("fill", move |_| {
+            if fills {
+                *taken.lock().unwrap() = take.try_acquire();
+            }
+            Ok(())
+        });
+        let hooks = Hooks::default();
+        let _ = hooks.pre_compact.register(fill.arc()).unwrap();
+        hooks
+    };
+    let build = |hooks: Hooks| {
+        let provider = Arc::new(RefusesOnce {
+            inner: Keyed::new(),
+            refused: std::sync::atomic::AtomicBool::new(false),
+        });
+        let mut spec = spec();
+        // Never due by size: only the refusal compacts.
+        spec.compaction = Some(CompactionSpec {
+            keep_recent_turns: 1,
+            ..CompactionSpec::new(1_000_000)
+        });
+        let tools = registry(vec![Echo::new("Read", ToolScope::Read, &Runs::default())]);
+        AgentBuilder::new(spec)
+            .provider(provider)
+            .tools(tools)
+            .permissions(policy(PermissionMode::SkipDangerous))
+            .hooks(Arc::new(hooks))
+            .run_store(stores.clone())
+            .session_store(stores.clone())
+            .namespace(NS)
+            .provider_gate(gate.clone())
+            .build()
+            .unwrap()
+    };
+    let stream = build(hooks(true)).run("go", RunOptions::new("s1"));
+    let run_id = stream.run_id().clone();
+    let waiting = tokio::spawn(drain(stream));
+    // Two answered calls and the refused one.
+    for _ in 0..500 {
+        let events = stores.runs.events(NS, &run_id, 0).await.unwrap_or_default();
+        let receipts = events
+            .iter()
+            .filter(|e| kind(&e.event) == "model_call_receipt");
+        if receipts.count() == 3 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    waiting.abort();
+    let _ = waiting.await;
+    held.lock().unwrap().take();
+    let stopped = stores.runs.load(NS, &run_id).await.unwrap().checkpoint;
+    assert!(
+        !stopped.usage_complete,
+        "a call without usage is durable, but the checkpoint says the usage is complete"
+    );
+    assert!(matches!(
+        stopped.phase,
+        linch_core::Phase::ProviderPending { attempt: 1 }
+    ));
+
+    let envelopes = finish(build(hooks(false)).resume(run_id, RunOptions::new("s1"))).await;
+    let Some(Event::Result(result)) = envelopes.last().map(|e| &e.event) else {
+        panic!("no result");
+    };
+    assert!(
+        !result.usage_complete,
+        "a call without usage is durable, but the result says the usage is complete"
     );
 }

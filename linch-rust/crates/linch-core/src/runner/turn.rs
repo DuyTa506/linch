@@ -632,6 +632,10 @@ impl Runner {
         if !failure.free {
             self.stage_usage(usage, cost, served);
         }
+        // The receipt is staged, and no save follows when the run goes on
+        // to a failover or a summary: a flush that is not a save saves the
+        // totals that count it.
+        self.unsaved = Some(Phase::ProviderPending { attempt });
         if matches!(failure.error, ProviderError::Cancelled) {
             self.abort().await?;
             return Ok(None);

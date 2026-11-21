@@ -90,9 +90,6 @@ impl Runner {
             to_model: to_model.clone(),
             error: failure.event.error.clone(),
         }));
-        // The failed call's receipt and usage are staged: the next flush
-        // saves the totals that count them.
-        self.unsaved = Some(Phase::ProviderPending { attempt });
         Ok(Recovered::Call(next))
     }
 

@@ -419,7 +419,7 @@ write past a barrier. Three kinds of write do not wait for the next barrier:
   `ProviderPending` again, at the totals that count its receipt, and flushes
   with its `provider_retry` event before the wait (`runner/retry.rs:69-72`).
   A receipt settled with no save after it (the abandoned call of a resumed
-  run, a failed call before a failover) leaves the run's phase in
+  run, a failed call the run goes on from: a failover, a forced summary) leaves the run's phase in
   `Runner::unsaved`; a flush that is not a save (the wait for the provider
   gate, a steer: `Runner::flush_staged`) saves that phase first, held, so the
   same write carries the receipt and a checkpoint at the totals that count it.
