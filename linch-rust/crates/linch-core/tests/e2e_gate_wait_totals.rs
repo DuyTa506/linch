@@ -374,3 +374,77 @@ async fn a_stop_right_after_a_steer_is_written_keeps_the_paid_failure() {
     let events = durable(&stores, &RunId::new("r1")).await;
     assert_totals(&events);
 }
+
+/// `filling` for any call of the run: takes the gate's place before call
+/// `at`, and says in `reached` that it did.
+fn filling_at(
+    at: u32,
+    gate: Option<ProviderGate>,
+    held: Arc<Mutex<Option<ProviderPermit>>>,
+    reached: Arc<AtomicBool>,
+) -> Hooks {
+    let hooks = Hooks::default();
+    let calls = Mutex::new(0);
+    let fill = hook::<BeforeProviderCall>("fill", move |_| {
+        let mut calls = calls.lock().unwrap();
+        *calls += 1;
+        if let (true, Some(gate)) = (*calls == at, &gate) {
+            *held.lock().unwrap() = gate.try_acquire();
+            reached.store(true, Ordering::SeqCst);
+        }
+        Ok(BeforeProviderCallResponse::Continue)
+    });
+    let _ = hooks.before_provider_call.register(fill.arc()).unwrap();
+    hooks
+}
+
+/// The phase left for the next flush must not
+/// outlive the save that follows it. A paid failure, a failover that
+/// answers with a tool call (saved, run, results saved), then the next
+/// turn's call waits for the gate and the process stops there. A flush that
+/// saved the failed call's `ProviderPending` again would leave a checkpoint
+/// of the earlier turn's phase at the later turn.
+#[tokio::test]
+async fn a_gate_wait_a_turn_after_a_failover_saves_no_earlier_phase() {
+    let (gate, stores) = (gate(), Arc::new(Stores::default()));
+    let (held, reached) = (Arc::new(Mutex::new(None)), Arc::new(AtomicBool::new(false)));
+    let hooks = filling_at(3, Some(gate.clone()), held.clone(), reached.clone());
+    let turns = || vec![tool_turn(0, 1, "Read"), text_turn("done")];
+    let provider = paid_failure_then(turns());
+    let agent = gated(
+        failover_spec(),
+        provider.clone(),
+        hooks,
+        &gate,
+        stores.clone(),
+    );
+    let stream = agent.run("go", RunOptions::new("s1"));
+    let run_id = stream.run_id().clone();
+    let waiting = tokio::spawn(drain(stream));
+    for _ in 0..500 {
+        if reached.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(reached.load(Ordering::SeqCst), "the third call never came");
+    // The wait's flush, if it writes, has written by now.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    waiting.abort();
+    let _ = waiting.await;
+    held.lock().unwrap().take();
+    let checkpoint = stores.runs.load(NS, &run_id).await.unwrap().checkpoint;
+    assert!(
+        !matches!(checkpoint.phase, Phase::ProviderPending { .. }),
+        "the stored phase went back to a call's: turn {} {:?}",
+        checkpoint.turn,
+        checkpoint.phase
+    );
+
+    let hooks = filling(None, Arc::default());
+    let agent = gated(failover_spec(), provider, hooks, &gate, stores.clone());
+    finish(agent.resume(run_id.clone(), RunOptions::new("s1"))).await;
+    let events = durable(&stores, &run_id).await;
+    assert_eq!(receipts(&events).len(), 3, "{:?}", kinds(&events));
+    assert_totals(&events);
+}

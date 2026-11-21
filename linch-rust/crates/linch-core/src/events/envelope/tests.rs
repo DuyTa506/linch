@@ -515,3 +515,32 @@ mod stored {
         assert!(!message_reads_back(&message));
     }
 }
+
+/// The deepest input the assembler keeps, in a
+/// child's response wrapped by every allowed level of subagent nesting,
+/// still reads back from the stored text.
+#[test]
+fn the_deepest_kept_input_reads_back_under_the_deepest_subagent_nesting() {
+    let text = format!(
+        "{}1{}",
+        "{\"a\":".repeat(crate::JOURNAL_MAX_DEPTH + 1),
+        "}".repeat(crate::JOURNAL_MAX_DEPTH + 1)
+    );
+    let input: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let mut event = json!({
+        "type": "assistant", "stop_reason": "tool_use",
+        "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "c1", "name": "Read", "input": input},
+        ]},
+    });
+    for _ in 0..super::MAX_SUBAGENT_DEPTH {
+        event = json!({
+            "type": "subagent", "child_run_id": "child-1", "tool_use_id": "call-1", "ts_ms": 5,
+            "event": event,
+        });
+    }
+    let wire = json!({"v": WIRE_VERSION, "seq": 1, "run_id": "r1", "ts_ms": 7, "event": event});
+    let envelope: Envelope = serde_json::from_value(wire).expect("the wire form is taken");
+    let stored = envelope.to_value().unwrap().to_string();
+    assert!(stored.parse::<Envelope>().is_ok(), "does not read back");
+}
