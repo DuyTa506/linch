@@ -46,6 +46,7 @@ from linch_rust import (
 from linch_rust._rpc import Connection, RunEnd, StreamTransport
 from linch_rust.errors import error_from
 from linch_rust.events import decode_envelope, decode_event
+from linch_rust.info import ServerInfo
 from linch_rust.run import Run
 
 
@@ -118,7 +119,7 @@ async def test_events_follows_the_cursor_until_the_last_page() -> None:
     reader = asyncio.StreamReader()
     writer = Paging(reader, [1, 2, 3, 4, 5])
     conn = Connection(StreamTransport(reader, cast(asyncio.StreamWriter, writer)))
-    agent = Agent(conn, "agent-1", "digest")
+    agent = Agent(conn, "agent-1", "digest", info=PAGING_INFO)
 
     envelopes = await agent.events("r1", after_seq=0)
 
@@ -151,11 +152,16 @@ def _envelope(seq: int) -> dict[str, Any]:
     return {"v": 1, "seq": seq, "run_id": "r1", "ts_ms": 0, "event": {"type": "custom"}}
 
 
-async def _read_events(answer: Any) -> tuple[Agent, Scripted, asyncio.StreamReader]:
+PAGING_INFO = ServerInfo("0.3.0", 1, 1, frozenset({"run_events_paging"}), (), 0, 0)
+
+
+async def _read_events(
+    answer: Any, info: ServerInfo = PAGING_INFO
+) -> tuple[Agent, Scripted, asyncio.StreamReader]:
     reader = asyncio.StreamReader()
     writer = Scripted(reader, answer)
     conn = Connection(StreamTransport(reader, cast(asyncio.StreamWriter, writer)))
-    return Agent(conn, "agent-1", "digest"), writer, reader
+    return Agent(conn, "agent-1", "digest", info=info), writer, reader
 
 
 async def test_a_cursor_that_does_not_advance_ends_with_an_error() -> None:
@@ -201,6 +207,20 @@ async def test_events_are_always_asked_for_in_pages() -> None:
     agent, writer, reader = await _read_events(answer)
     assert [e.seq for e in await agent.events("r1")] == [1, 2]
     assert [request.get("max_bytes") for request in writer.requests] == [8 * 1024 * 1024] * 2
+    reader.feed_eof()
+
+
+async def test_events_name_no_page_to_a_server_without_paging() -> None:
+    # A server that predates `run_events_paging` refuses the `max_bytes` member
+    # and answers the whole run.
+    def answer(nth: int, params: dict[str, Any]) -> dict[str, Any]:
+        return {"result": {"events": [_envelope(1), _envelope(2)]}}
+
+    agent, writer, reader = await _read_events(
+        answer, ServerInfo("0.2.0", 1, 1, frozenset(), (), 0, 0)
+    )
+    assert [e.seq for e in await agent.events("r1", after_seq=0)] == [1, 2]
+    assert writer.requests == [{"agent": "agent-1", "run_id": "r1", "after_seq": 0}]
     reader.feed_eof()
 
 
