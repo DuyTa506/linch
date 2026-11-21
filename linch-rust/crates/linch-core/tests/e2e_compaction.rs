@@ -877,3 +877,84 @@ async fn a_crash_does_not_lift_the_hold_on_ineffective_summaries() {
 async fn status(stores: &Stores, run_id: &RunId) -> RunStatus {
     stores.runs.load(NS, run_id).await.unwrap().status
 }
+
+/// A compacting run on `stores`, its provider calls going through `gate`.
+fn gated_compacting_agent<S: RunStore + SessionStore + 'static>(
+    stores: Arc<S>,
+    gate: &linch_core::ProviderGate,
+) -> Agent {
+    let mut spec = spec();
+    spec.compaction = Some(CompactionSpec {
+        keep_recent_turns: 1,
+        ..CompactionSpec::new(1)
+    });
+    let tools = registry(vec![Echo::new("Read", ToolScope::Read, &Runs::default())]);
+    AgentBuilder::new(spec)
+        .provider(Keyed::new())
+        .tools(tools)
+        .permissions(policy(PermissionMode::SkipDangerous))
+        .run_store(stores.clone())
+        .session_store(stores)
+        .namespace(NS)
+        .provider_gate(gate.clone())
+        .build()
+        .unwrap()
+}
+
+/// A run stopped in its first summary call has no receipt for it; the
+/// resume writes an abandoned one before it takes a place in the gate. The
+/// process stops while that resume waits, and the run resumed again says in
+/// its result that the abandoned summary had no usage.
+#[tokio::test]
+async fn a_stop_while_a_resumed_summary_waits_for_the_gate_keeps_the_usage_incomplete() {
+    let gate = linch_core::ProviderGate::new(std::num::NonZeroU32::new(1).unwrap());
+    // The write that holds the first summary's delivery: the second
+    // delivery of the run, after the first turn's.
+    let clean = Arc::new(Stores::default());
+    let run = gated_compacting_agent(clean.clone(), &gate).run("go", RunOptions::new("s1"));
+    finish(run).await;
+    let log = clean.log.lock().unwrap().clone();
+    let deliveries = |write: &Write| matches!(write, Write::Commit(kinds) if kinds.iter().any(|k| k == "model_call_delivery"));
+    let summary_write = log.iter().enumerate().filter(|(_, w)| deliveries(w)).nth(1);
+    let summary_write = summary_write.expect("a summary call").0 as u64 + 1;
+
+    let stores = Arc::new(Stores::default());
+    let faulty = Arc::new(Faulty::new(
+        stores.clone(),
+        summary_write,
+        FaultTiming::After,
+    ));
+    let stream = gated_compacting_agent(faulty, &gate).run("go", RunOptions::new("s1"));
+    let run_id = stream.run_id().clone();
+    assert!(drain(stream).await.1.is_some(), "the run must stop");
+    let landed = stores.runs.events(NS, &run_id, 0).await.unwrap();
+    assert_eq!(kinds(&landed).last().unwrap(), "model_call_delivery");
+
+    // Resume while the gate is full; stop once the abandoned receipt is
+    // durable, as a kill would.
+    let agent = gated_compacting_agent(stores.clone(), &gate);
+    let place = gate.try_acquire().expect("the gate is free");
+    let waiting = tokio::spawn(drain(agent.resume(run_id.clone(), RunOptions::new("s1"))));
+    for _ in 0..500 {
+        let events = stores.runs.events(NS, &run_id, 0).await.unwrap();
+        let receipts = events
+            .iter()
+            .filter(|e| kind(&e.event) == "model_call_receipt");
+        if receipts.count() == 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    waiting.abort();
+    let _ = waiting.await;
+    drop(place);
+
+    let envelopes = finish(agent.resume(run_id.clone(), RunOptions::new("s1"))).await;
+    let Some(Event::Result(result)) = envelopes.last().map(|e| &e.event) else {
+        panic!("no result");
+    };
+    assert!(
+        !result.usage_complete,
+        "an abandoned summary has no usage, but the result says the usage is complete"
+    );
+}

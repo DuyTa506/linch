@@ -105,6 +105,9 @@ impl Runner {
         if let Some(mut receipt) = abandoned {
             self.settle(&mut receipt);
             self.journal.stage(Event::ModelCallReceipt(receipt));
+            // The resumed phase: the summary call that attempt follows.
+            let attempt = attempt.saturating_sub(1);
+            self.unsaved = Some(Phase::CompactionPending { attempt });
         }
         if self.cancel.is_cancelled() {
             self.abort().await?;

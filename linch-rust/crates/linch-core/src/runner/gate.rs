@@ -28,7 +28,8 @@ impl Runner {
     /// what it was without a gate. Otherwise the events staged so far (a
     /// failed receipt and its usage, a fallback, a child's events) are made
     /// durable first: they must not wait in memory for a place that may
-    /// take long.
+    /// take long, with a checkpoint at the totals that count any receipt
+    /// among them.
     pub(super) async fn slot(&mut self) -> Result<Slot, RunError> {
         let Some(gate) = self.agent.gate.clone() else {
             return Ok(Slot::Ungated);
@@ -36,9 +37,7 @@ impl Runner {
         if let Some(permit) = gate.try_acquire() {
             return Ok(Slot::Held(permit));
         }
-        let ready = self.journal.flush().await?;
-        self.event_emit(&ready).await;
-        self.outbox.deliver(ready).await;
+        self.flush_staged().await?;
         Ok(match gate.acquire(&self.cancel).await {
             Some(permit) => Slot::Held(permit),
             None => Slot::Cancelled,

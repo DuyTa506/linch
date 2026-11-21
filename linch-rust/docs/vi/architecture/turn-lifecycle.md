@@ -396,6 +396,11 @@ Ba loại ghi không chờ barrier kế tiếp:
   (`compact.rs:23-29, 245-248`). Một lời gọi thất bại mà run thử lại sẽ lưu lại
   `ProviderPending`, ở tổng đã tính receipt của nó, và flush cùng event
   `provider_retry` của nó trước lúc chờ (`runner/retry.rs:69-72`).
+  Một receipt đã được tính mà không có lần lưu nào sau nó (lời gọi bị bỏ dở của một run
+  được resume, một lời gọi thất bại trước khi chuyển sang model dự phòng) để lại phase
+  của run trong `Runner::unsaved`; một lần flush không phải là lần lưu (chờ provider
+  gate, một steer: `Runner::flush_staged`) sẽ lưu phase đó trước, ở trạng thái giữ, nên
+  cùng một lần ghi mang cả receipt lẫn checkpoint ở tổng đã tính nó.
 - Phần kết thúc của một tool. Nó được flush ngay sau khi tool trả về, từ
   `tool_finished`, nên một lần resume tìm thấy kết quả và không chạy lại tool
   (`sink.rs:284-286`, `journal/reconcile.rs:381-385`).
