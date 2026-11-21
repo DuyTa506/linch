@@ -468,6 +468,12 @@ Where the helper comes from:
   executable that does not know `--linch-reaper`, say), is passed over with one
   warning in the log: the command runs as it does without one. A helper that
   does not answer in 5 s fails the call, since it may be running the command.
+  A helper that is killed by a signal before the server has checked the pid
+  line (a command that kills its parent at once can do it) is not passed over,
+  because the shell may be running: the command does not run again, and the
+  server finds the shell as the group leader that holds the command's
+  stdout or stderr pipes, which no other process has, and kills its group
+  as for a helper killed later. The call then ends with the signal.
 - The server does not trust the pid line: before it signals that group it
   reads `/proc/<pid>/stat` and requires a child of the helper that leads its
   own group (or one that has already ended, which is not signalled). Any other
