@@ -15,6 +15,7 @@ host chung 64 thread, host này cũng chạy các việc khác, nên hãy đọc
 | Postgres | 16.15, loopback, `max_connections` 100, `synchronous_commit on`, `fsync on` |
 | Toolchain | rustc 1.99.0, release profile của repository (`lto = "fat"`, `codegen-units = 1`); Python 3.14.10 cho cả hai phía Python |
 | Lần chạy đo lại ("final") | `origin/master` `617715b3` (gồm bản sửa độ bền vững lúc bắt đầu run, tool schema dùng chung, các bản sửa SGLang), `linch-server` sha256 `3749f7e79789ac69...`, 2026-11-19, load average 1 phút từ 2.3 đến 9.2 qua các round, 3 round xen kẽ |
+| Lần chạy đo lại case 6 ("lần chạy case 6") | `origin/master` `1da43ee3` (gồm bản viết lại tách khung SSE, #211), bản build release của `linch-server` và `bench_driver`, các phía Python từ cùng cây mã với `linch-native` build từ `crates/linch-python`, 2026-11-21, load average 1 phút từ 2.2 đến 2.9 qua các round, 4 round đổi thứ tự các phía, mọi tiến trình ghim vào một core (xem [Giải mã stream](#giải-mã-stream-case-6-lần-chạy-case-6-4-round-x-20-lần-lặp)) |
 | Lần chạy trước ("earlier") | `origin/master` `50eda478`, 2026-11-18, load average 1.9 đến 6.9, một lượt (3 lượt cho các ô bộ nhớ) |
 | Provider | fixture có kịch bản và server loopback cho mọi con số hiệu năng và bộ nhớ; provider thật chỉ có trong [Quy mô và chạy thật](#quy-mô-và-chạy-thật) |
 
@@ -105,53 +106,64 @@ round còn lại đọc 5.1 và 5.3 s) và `rs-client` ở M=1000 (6.85 đến 8
 event loop của nó ở khoảng 85 đến 90 lượt mỗi giây từ M=500 trở lên (CPU 20.7 s ở M=500,
 87.6 s ở M=2000); linch-rust tiếp tục mở rộng. Có 0 run thất bại ở mọi ô của mọi round.
 
-### Giải mã stream, case 6 (lần chạy final, 3 lượt x 20 lần lặp)
+### Giải mã stream, case 6 (lần chạy case 6, 4 round x 20 lần lặp)
 
-Một server loopback phát lại cùng một stream SSE có dạng đã ghi cho mỗi vendor; con số là wall
-time của một lần lặp. Một ô có thể chuyển giữa một mức nhanh và một mức chậm; hai mức đó là mức tần số CPU (xem
-[Chưa giải thích được](#chưa-giải-thích-được)), nên bảng liệt kê 3 trung vị theo từng lượt.
+Một server loopback (`sse_server.py`) phát lại cùng một stream SSE có dạng đã ghi cho mỗi vendor, và mỗi phía giải mã nó
+qua adapter provider của chính nó; một lần lặp là một run chỉ có văn bản. Phần này thay các bảng case 6 trước đó, vốn đến
+từ các bản build trước khi viết lại tách khung SSE (#211) và không còn được hiển thị.
 
-| Vendor | py (ms) | rs-client (ms) | rs-kernel (ms) |
-|---|---|---|---|
-| DeepSeek | 1266, 1255, 1261 | 461, 459, 444 | 364, 219, 365 |
-| OpenAI chat | 1243, 1258, 1259 | 445, 425, 303 | 315, 361, 364 |
-| OpenAI responses | 2186, 2144, 2137 | 612, 407, 414 | 316, 530, 533 |
-| Gemini | 1795, 1829, 1810 | 299, 455, 466 | 214, 216, 214 |
+Cách đo: harness `linch-rust/bench/run_all.py --cases 6` ở `1da43ee3`, mặc định 20 lần lặp tính giờ mỗi ô (1 lần khởi
+động), mỗi ô một tiến trình. Mỗi phía được chạy riêng, và ba phía chạy nối tiếp nhau trong 4 round, đổi thứ tự
+(py, rs-client, rs-kernel; rồi rs-kernel, rs-client, py; và cứ thế). Toàn bộ harness (coordinator, server phát lại, tiến
+trình của phía được đo và, với `rs-client`, cả sidecar) được ghim vào một core bằng `taskset -c 26`, nên ba phía dùng
+chung core đó với server phát lại. Governor là `powersave` và không đổi được từ user space, nên `scaling_cur_freq` của
+core được đọc mỗi 50 ms trong từng lần chạy. Load average của host là 2.2 đến 2.9 do các việc khác, không có việc nào trên
+core đã ghim. Giá trị mỗi round là trung vị của 20 lần lặp; bảng cho trung vị qua 4 round và, trong ngoặc, round thấp nhất
+và cao nhất.
 
-Rust giải mã các stream DeepSeek, OpenAI và Gemini nhanh hơn Python khoảng 2.7x đến 8.5x trong harness này. Bốn
-hàng này được đo trên bản build `617715b3` mà không ghi mức tần số, nên trung vị mỗi lượt có thể trộn hai mức; chúng
-không được đo lại. Anthropic được đo lại ở cùng mức (bên dưới), và ở đó Rust không dẫn đầu.
+| Vendor (sự kiện, byte) | Phía | Wall ms | MB/s | sự kiện/s |
+|---|---|---|---|---|
+| DeepSeek (20 004, 4.07 MB) | py | 1260 (1254 đến 1270) | 3.2 (3.2 đến 3.2) | 15.9 k (15.7 đến 16.0) |
+| | rs-client | 94.4 (93.8 đến 98.8) | 43.1 (41.2 đến 43.4) | 211.8 k (202.5 đến 213.3) |
+| | rs-kernel | 26.1 (25.7 đến 26.2) | 156.1 (155.6 đến 158.2) | 767.2 k (764.9 đến 777.5) |
+| OpenAI chat (20 004, 4.03 MB) | py | 1268 (1263 đến 1290) | 3.2 (3.1 đến 3.2) | 15.8 k (15.5 đến 15.8) |
+| | rs-client | 94.1 (93.3 đến 96.7) | 42.8 (41.7 đến 43.2) | 212.6 k (206.9 đến 214.3) |
+| | rs-kernel | 25.9 (25.8 đến 26.5) | 155.4 (152.2 đến 156.3) | 771.7 k (755.6 đến 776.0) |
+| OpenAI responses (20 008, 4.36 MB) | py | 2181 (2172 đến 2191) | 2.0 (2.0 đến 2.0) | 9.2 k (9.1 đến 9.2) |
+| | rs-client | 93.9 (93.4 đến 95.9) | 46.4 (45.4 đến 46.6) | 213.0 k (208.6 đến 214.3) |
+| | rs-kernel | 24.2 (24.0 đến 24.5) | 180.1 (178.0 đến 181.2) | 827.6 k (817.8 đến 832.5) |
+| Anthropic (20 005, 2.49 MB) | py | 287.7 (285.7 đến 293.7) | 8.7 (8.5 đến 8.7) | 69.5 k (68.1 đến 70.0) |
+| | rs-client | 90.3 (89.7 đến 95.8) | 27.6 (26.0 đến 27.8) | 221.5 k (208.7 đến 223.1) |
+| | rs-kernel | 23.2 (22.8 đến 23.9) | 107.1 (104.2 đến 109.0) | 860.7 k (837.4 đến 876.2) |
+| Gemini (20 000, 2.99 MB) | py | 1809 (1796 đến 1819) | 1.7 (1.6 đến 1.7) | 11.1 k (11.0 đến 11.1) |
+| | rs-client | 95.3 (94.8 đến 100.9) | 31.4 (29.6 đến 31.5) | 210.0 k (198.2 đến 210.9) |
+| | rs-kernel | 27.4 (27.2 đến 28.0) | 109.1 (106.6 đến 109.9) | 730.2 k (713.0 đến 735.3) |
 
-#### Anthropic ở cùng mức tần số CPU
+Tỉ lệ wall time (trung vị qua các round): `py` so với `rs-client` là 13.3x (DeepSeek), 13.5x (OpenAI chat), 23.2x (OpenAI
+responses), 3.2x (Anthropic) và 19.0x (Gemini); `py` so với `rs-kernel` là 48.3x, 48.9x, 90.2x, 12.4x và 66.1x;
+`rs-client` so với `rs-kernel` là 3.5x đến 3.9x ở mọi vendor. Các ô Python khớp với lần chạy trước (DeepSeek 1255 đến 1266
+ms trước đó, 1254 đến 1270 ms bây giờ; Anthropic 283 ms trước đó, 287.7 ms bây giờ).
 
-Lần chạy 2026-11-19 trên host nêu trên (tải trung bình 1.7 đến 3.1), build `d1f3cfe5` (các commit sau đó chỉ là tài liệu),
-sha256 của `linch-server` là `adfea51fe982f19f048d6d10634f6d1526fd363f31d544ce259c49d39e5c2198`. Fixture: 20 005 sự kiện
-SSE, 2.49 MB. Mỗi lần lặp có thời gian là một tiến trình riêng (1 lần chạy khởi động, 1 lần chạy tính giờ), ba phía xen kẽ
-nhau, ghim bằng `taskset`. Mỗi lần lặp được xếp mức theo tần số của core giải mã (core của sidecar với `rs-client`):
-nhanh là 3.4 GHz, chậm là 2.0 GHz. Không chọn được mức (một core bận thứ hai vẫn ở 2.0 GHz), nên các cách ghim đạt được
-từng mức được nêu tên. Wall ms mỗi lần lặp, n lần lặp.
+Tần số và khả năng so sánh: ở mọi ô của mọi round, trung vị các mẫu của core là 3.40 GHz. Mẫu thấp nhất của một ô là
+2.52 đến 3.38 GHz, và tỉ lệ mẫu dưới 3.3 GHz là 0 đến 9% với `rs-kernel`, 4 đến 25% với `rs-client` và 5 đến 16% với `py`,
+tùy vendor (các ô `rs-kernel` kéo dài khoảng 1 s, nên mỗi ô có khoảng 40 mẫu; các lần tụt nằm ở đâu trong một ô không được
+ghi lại). Trước lần chạy của một phía, core nhàn rỗi đọc 0.78 đến 2.7 GHz và sau đó là 2.4 đến 3.4 GHz. Trong một ô, lần
+lặp chậm nhất trong 80 lần (4 round) nhiều nhất là 1.38x lần nhanh nhất, nên sự tách hai mức của các lần chạy trước không
+xuất hiện. Cả 15 ô cùng một dải tần số và wall time của chúng so sánh được với nhau. Chúng không so sánh được với các con
+số case 6 trước đó: khác bản build, và các lần chạy trước không ghim harness theo cách này.
 
-| Mức | Ô | n | min | trung vị | p90 | sự kiện/s | MB/s |
-|---|---|---|---|---|---|---|---|
-| nhanh (3.4 GHz) | py | 185 | 277 | 283 | 287 | 70.7 k | 8.8 |
-| nhanh | rs-client, sidecar trên core riêng, core client rảnh ở 0.8 đến 2.0 GHz | 57 | 319 | 374 | 388 | 53.4 k | 6.6 |
-| nhanh | rs-client, client và sidecar dùng chung một core | 35 | 338 | 356 | 418 | 56.1 k | 7.0 |
-| nhanh | rs-kernel | 186 | 224 | 282 | 284 | 71.0 k | 8.8 |
-| chậm (2.0 GHz) | py | 13 | 283 | 479 | 490 | 41.7 k | 5.2 |
-| chậm | rs-client | 33 | 481 | 539 | 636 | 37.1 k | 4.6 |
-| chậm | rs-kernel | 29 | 303 | 508 | 524 | 39.4 k | 4.9 |
+Những gì các hàng không cho thấy: server phát lại dùng chung core đã ghim với phía được đo, nên mỗi wall time gồm cả thời
+gian server tạo stream trên core đó; phần này lớn bao nhiêu thì không được đo. `rs-client` chạy với client và sidecar
+trên cùng một core, không phải trên các core riêng.
 
-Ở cùng mức, Python ngang kernel trong tiến trình (1.00x ở 3.4 GHz: 283 so với 282 ms; 1.06x ở 2.0 GHz, nằm trong độ
-phân tán của 13 lần lặp py ở mức chậm) và nhanh hơn đường client và sidecar 1.26x đến 1.33x ở 3.4 GHz (1.13x ở
-2.0 GHz). Con số 594 so với 295 ms trước đó so một lần chạy 2.0 GHz với một lần chạy 3.4 GHz. Để lấy thang so sánh,
-`rs-kernel` trên fixture DeepSeek (20 004 sự kiện, 4.07 MB) mất 199 ms ở 3.4 GHz (n=187) và 373 ms ở 2.0 GHz (n=61):
-cùng kernel đó cần gấp 1.42 lần thời gian mỗi sự kiện cho Anthropic. Một microbenchmark dùng một lần của các bộ giải mã
-(3.4 GHz, 20 000 sự kiện) cho thấy giải mã JSON mất 325 ns mỗi sự kiện Anthropic với các enum serde có tag (237 ns với một
-struct phẳng) so với 312 ns mỗi chunk chat, và tách khung SSE khoảng 540 ns mỗi sự kiện ở cả hai, nên phần phân tích cú
-pháp chỉ khoảng 17 ms của mỗi ô và không giải thích được khoảng cách; chỗ nó nằm chưa xác định được. Đường Anthropic của
-Python nhanh vì SDK Anthropic kiểm tra một sự kiện bằng một lần gọi pydantic-core, còn SDK OpenAI, cũng phục vụ DeepSeek,
-dựng mỗi chunk bằng Python với khoảng 10 lần gọi `construct_type` (profile, tích lũy 0.67 s so với 8.0 s cho 40 000 sự
-kiện). Xem [Khoảng trống đã biết](#khoảng-trống-đã-biết).
+Chi phí kernel mỗi sự kiện (wall của `rs-kernel` chia cho số sự kiện, trung vị qua các round): DeepSeek 1.30 us, OpenAI chat
+1.30 us, OpenAI responses 1.21 us, Anthropic 1.16 us, Gemini 1.37 us. Thời gian mỗi sự kiện của Anthropic cao hơn DeepSeek
+1.42 lần ở lần chạy trước không còn trong lần chạy này: Anthropic mất 0.89 lần thời gian của DeepSeek mỗi sự kiện. Bản viết
+lại tách khung SSE (#211) nằm giữa các bản build trước (`d1f3cfe5`, `617715b3`) và bản này. Không có lần chạy nào của cùng
+một bản build trước và sau #211, nên việc sự thay đổi có đến từ nó hay không, và bao nhiêu, không được tách riêng ở đây. Đường Anthropic của Python trong lần chạy này cũng nhanh hơn
+các đường SDK OpenAI mỗi sự kiện (69.5 k so với 15.8 đến 15.9 k sự kiện/s); profile trước đó quy điều đó cho việc SDK
+Anthropic kiểm tra một sự kiện bằng một lần gọi pydantic-core so với khoảng 10 lần gọi `construct_type` mỗi chunk trong SDK
+OpenAI, và điều này không được profile lại. Xem [Khoảng trống đã biết](#khoảng-trống-đã-biết).
 
 ## Bộ nhớ theo session
 
@@ -309,16 +321,16 @@ cache gì trên model này (block của nó là 2176 token), nên không có k�
   ở 4 trong 12 ô của lần chạy earlier, trên `py` và `rs-kernel`, và không có ở `rs-client`.
   Ở lần chạy final: 0 trên 720 lần lặp vượt quá 5x trung vị của ô của nó. Chưa giải thích được;
   host và Postgres không được đặt công cụ đo trong các lần đứng hình của earlier.
-- Case 6 chuyển giữa hai mức trong một ô, cách nhau khoảng 1.7x (`rs-kernel` Anthropic 290 so với
+- Case 6 ở các lần chạy trước (các bản build trước #211) chuyển giữa hai mức trong một ô, cách nhau khoảng 1.7x (`rs-kernel` Anthropic 290 so với
   510 ms, `rs-client` 380 so với 580 ms), ở cả ba phía. Hai mức là mức tần số CPU: governor là
   `powersave` với `intel_pstate` và HWP, base 2.0 GHz, turbo 3.4 GHz, tỉ lệ 1.70. Trong một lần profile
   60 lần lặp client đã ghim với công việc giống hệt, 48 lần dùng 507 đến 626 ms CPU của server với
   core đọc được trung vị 1998 MHz, và 12 lần liên tiếp dùng 304 đến 313 ms ở trung vị 3358 MHz. Ghim
   không chọn được mức: một core bận vẫn ở 2.0 GHz hàng chục giây trong một microbenchmark giải mã.
-  Lần chạy final không ghi tần số, nên 594 so với 295 ms của nó trộn hai mức; hàng Anthropic đã được đo lại với mức ghi theo từng lần lặp (phần trên). Vì sao HWP giữ một
+  Lần chạy final không ghi tần số, nên 594 so với 295 ms của nó trộn hai mức; hàng Anthropic đã được đo lại với mức ghi theo từng lần lặp. Ở lần chạy case 6 (phần trên), trung vị tần số của core là 3.40 GHz ở mọi ô và không ô nào tách làm hai; vì sao các lần chạy trước tách thì chưa xác định được. Vì sao HWP giữ một
   core bận ở base trong nhiều giây chưa xác định được (cần công cụ root: MSR, `turbostat`).
 - Phương pháp: mỗi ô benchmark phải ghi mức tần số CPU của từng lần lặp và so sánh ở cùng mức.
-- Đường client của case 6 so với kernel, đã profile (3.4 GHz, pipe 64 KiB, 30 lần lặp mỗi nấc, trung
+- Đường client của case 6 so với kernel, đã profile trên một bản build trước #211 và chưa lặp lại từ đó (3.4 GHz, pipe 64 KiB, 30 lần lặp mỗi nấc, trung
   vị). Giả thuyết trước đó rằng chi phí theo số message JSON-RPC bị bác bỏ ở case này. Một run gửi
   khoảng 61 dòng cho 20 006 envelope, vì server nối các envelope đang xếp hàng của một run thành một
   dòng tối đa 64 KiB. `orjson.loads` ở client khoảng 12 ms trong khoảng 365 ms. Phần lớn khoảng cách
@@ -359,7 +371,7 @@ cache gì trên model này (block của nó là 2176 token), nên không có k�
 
 ### Chưa đo hoặc còn yếu
 
-- Các ô case 6 của lần chạy final, trừ Anthropic, không ghi mức tần số CPU, nên trung vị theo lượt của chúng trộn các mức; các hàng DeepSeek, OpenAI và Gemini không được đo lại ở cùng mức. Trong lần chạy Anthropic ở cùng mức, `rs-client` ở 3.4 GHz có core client ở 0.8 đến 2.0 GHz hoặc dùng chung core với sidecar (không cách ghim nào đặt cả hai ở 3.4 GHz trên các core riêng), và ô Python ở 2.0 GHz có n=13. Vì sao kernel mất gấp 1.42 lần thời gian mỗi sự kiện trên fixture Anthropic so với DeepSeek chưa xác định được. Các tỉ lệ cùng điều kiện đến từ lần profile sau đó (xem [Chưa giải thích được](#chưa-giải-thích-được)), chạy dưới tải host 2.3 đến 27 và không build lại các binary.
+- Case 6 (cả năm vendor) được đo lại trên `1da43ee3` ở một dải tần số, thay các ô trước đó. Chưa đo ở đó: cùng một bản build trước và sau #211 (nên ảnh hưởng của bản viết lại tách khung không được tách riêng), server phát lại trên một core riêng khác với phía được đo, `rs-client` với client và sidecar trên các core riêng ở 3.4 GHz, và profile đường client ở trên sau #211. Các mẫu dưới 3.3 GHz nằm ở đâu trong một ô không được ghi lại.
 - Loop, tool, khởi động, throughput 16 session và các provider giải mã khác là một lượt từ lần chạy earlier.
 - Bảng agent nhàn rỗi chỉ có memory store; các ô bộ nhớ của kho Postgres (backend cho mỗi
   agent, kích thước pool) không được lặp lại trong lần chạy final. Bộ nhớ của một run đang

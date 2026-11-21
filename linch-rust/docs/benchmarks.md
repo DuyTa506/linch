@@ -15,6 +15,7 @@ runs used a shared 64-thread host that also ran other work, so read absolute val
 | Postgres | 16.15, loopback, `max_connections` 100, `synchronous_commit on`, `fsync on` |
 | Toolchain | rustc 1.99.0, release profile of the repository (`lto = "fat"`, `codegen-units = 1`); Python 3.14.10 for both Python sides |
 | Re-measured run ("final") | `origin/master` `617715b3` (includes the run-start durability fix, the shared tool schema, the SGLang fixes), `linch-server` sha256 `3749f7e79789ac69...`, 2026-11-19, 1-minute load average 2.3 to 9.2 across the rounds, 3 rounds interleaved |
+| Case 6 re-measured run ("case 6 run") | `origin/master` `1da43ee3` (includes the SSE framing rewrite, #211), release builds of `linch-server` and `bench_driver`, Python sides from the same tree with `linch-native` built from `crates/linch-python`, 2026-11-21, 1-minute load average 2.2 to 2.9 across the rounds, 4 rounds alternating side order, every process pinned to one core (see [Stream decoding](#stream-decoding-case-6-case-6-run-4-rounds-of-20-iterations)) |
 | Earlier run ("earlier") | `origin/master` `50eda478`, 2026-11-18, load average 1.9 to 6.9, one pass (3 for the memory cells) |
 | Providers | scripted fixtures and loopback servers for every performance and memory number; live providers only in [Scale and live](#scale-and-live) |
 
@@ -104,52 +105,65 @@ read 5.1 and 5.3 s) and `rs-client` at M=1000 (6.85 to 8.59 s). Python saturates
 to 90 turns per second from M=500 up (CPU 20.7 s at M=500, 87.6 s at M=2000); linch-rust keeps scaling.
 There were 0 failed runs in every cell of every round.
 
-### Stream decoding, case 6 (final run, 3 passes of 20 iterations)
+### Stream decoding, case 6 (case 6 run, 4 rounds of 20 iterations)
 
-A loopback server replays the same recorded-shape SSE stream per vendor; the figure is the wall time of
-one iteration. A cell can switch between a fast and a slow level; the levels are CPU frequency levels (see
-[Unexplained](#unexplained)), so the table lists the 3 per-pass medians.
+A loopback server (`sse_server.py`) replays the same recorded-shape SSE stream per vendor and each side decodes it
+through its own provider adapter; one iteration is one text-only run. This section replaces the earlier case 6
+tables, which came from builds before the SSE framing rewrite (#211) and are no longer shown.
 
-| Vendor | py (ms) | rs-client (ms) | rs-kernel (ms) |
-|---|---|---|---|
-| DeepSeek | 1266, 1255, 1261 | 461, 459, 444 | 364, 219, 365 |
-| OpenAI chat | 1243, 1258, 1259 | 445, 425, 303 | 315, 361, 364 |
-| OpenAI responses | 2186, 2144, 2137 | 612, 407, 414 | 316, 530, 533 |
-| Gemini | 1795, 1829, 1810 | 299, 455, 466 | 214, 216, 214 |
+How it was measured: harness `linch-rust/bench/run_all.py --cases 6` at `1da43ee3`, default 20 timed iterations per
+cell (1 warm-up), one process per cell. Each side was run on its own, and the three sides ran back to back in 4 rounds,
+alternating the order (py, rs-client, rs-kernel; then rs-kernel, rs-client, py; and so on). The whole harness
+(coordinator, replay server, side process and, for `rs-client`, the sidecar) was pinned to one core with `taskset -c 26`,
+so the three sides share that core with the replay server. The governor is `powersave` and cannot be changed from user
+space, so the core's `scaling_cur_freq` was read every 50 ms during each run. Host load average was 2.2 to 2.9 from
+other work, none on the pinned core. Each round's value is the median of 20 iterations; the table gives the median over
+the 4 rounds and, in brackets, the lowest and highest round.
 
-Rust decodes DeepSeek, OpenAI and Gemini streams about 2.7x to 8.5x faster than Python in this harness. These
-four rows were measured on build `617715b3` without a recorded frequency level, so each per-pass median can mix the two
-levels; they were not re-measured. Anthropic was re-measured at equal level (below), and there Rust does not lead.
+| Vendor (events, bytes) | Side | Wall ms | MB/s | events/s |
+|---|---|---|---|---|
+| DeepSeek (20 004, 4.07 MB) | py | 1260 (1254 to 1270) | 3.2 (3.2 to 3.2) | 15.9 k (15.7 to 16.0) |
+| | rs-client | 94.4 (93.8 to 98.8) | 43.1 (41.2 to 43.4) | 211.8 k (202.5 to 213.3) |
+| | rs-kernel | 26.1 (25.7 to 26.2) | 156.1 (155.6 to 158.2) | 767.2 k (764.9 to 777.5) |
+| OpenAI chat (20 004, 4.03 MB) | py | 1268 (1263 to 1290) | 3.2 (3.1 to 3.2) | 15.8 k (15.5 to 15.8) |
+| | rs-client | 94.1 (93.3 to 96.7) | 42.8 (41.7 to 43.2) | 212.6 k (206.9 to 214.3) |
+| | rs-kernel | 25.9 (25.8 to 26.5) | 155.4 (152.2 to 156.3) | 771.7 k (755.6 to 776.0) |
+| OpenAI responses (20 008, 4.36 MB) | py | 2181 (2172 to 2191) | 2.0 (2.0 to 2.0) | 9.2 k (9.1 to 9.2) |
+| | rs-client | 93.9 (93.4 to 95.9) | 46.4 (45.4 to 46.6) | 213.0 k (208.6 to 214.3) |
+| | rs-kernel | 24.2 (24.0 to 24.5) | 180.1 (178.0 to 181.2) | 827.6 k (817.8 to 832.5) |
+| Anthropic (20 005, 2.49 MB) | py | 287.7 (285.7 to 293.7) | 8.7 (8.5 to 8.7) | 69.5 k (68.1 to 70.0) |
+| | rs-client | 90.3 (89.7 to 95.8) | 27.6 (26.0 to 27.8) | 221.5 k (208.7 to 223.1) |
+| | rs-kernel | 23.2 (22.8 to 23.9) | 107.1 (104.2 to 109.0) | 860.7 k (837.4 to 876.2) |
+| Gemini (20 000, 2.99 MB) | py | 1809 (1796 to 1819) | 1.7 (1.6 to 1.7) | 11.1 k (11.0 to 11.1) |
+| | rs-client | 95.3 (94.8 to 100.9) | 31.4 (29.6 to 31.5) | 210.0 k (198.2 to 210.9) |
+| | rs-kernel | 27.4 (27.2 to 28.0) | 109.1 (106.6 to 109.9) | 730.2 k (713.0 to 735.3) |
 
-#### Anthropic at equal CPU level
+Wall time ratios (median over rounds): `py` over `rs-client` 13.3x (DeepSeek), 13.5x (OpenAI chat), 23.2x (OpenAI
+responses), 3.2x (Anthropic) and 19.0x (Gemini); `py` over `rs-kernel` 48.3x, 48.9x, 90.2x, 12.4x and 66.1x;
+`rs-client` over `rs-kernel` 3.5x to 3.9x on every vendor. Python's cells match the earlier run's (DeepSeek 1255 to 1266
+ms before, 1254 to 1270 ms now; Anthropic 283 ms before, 287.7 ms now).
 
-Run 2026-11-19 on the host above (load average 1.7 to 3.1), build `d1f3cfe5` (the later commits are documentation only),
-`linch-server` sha256 `adfea51fe982f19f048d6d10634f6d1526fd363f31d544ce259c49d39e5c2198`. Fixture: 20 005 SSE events,
-2.49 MB. One process per timed iteration (1 warm-up run, 1 timed run), the three sides interleaved, pinned with
-`taskset`. Each iteration is classified by the frequency of the core that decodes (the sidecar's core for `rs-client`):
-fast is 3.4 GHz, slow is 2.0 GHz. The level cannot be chosen (a second busy core stayed at 2.0 GHz), so the layouts that
-reached each level are named. Wall ms per iteration, n iterations.
+Frequency and comparability: in every cell of every round the median of the core's samples was 3.40 GHz. The lowest
+sample of a cell was 2.52 to 3.38 GHz, and the share of samples below 3.3 GHz was 0 to 9% for `rs-kernel`, 4 to 25% for
+`rs-client` and 5 to 16% for `py`, by vendor (`rs-kernel` cells last about 1 s, so they have about 40 samples each;
+where in a cell the dips fall was not recorded). Before a side's run the idle core read 0.78 to 2.7 GHz and after it 2.4 to
+3.4 GHz. Within one cell, the slowest of its 80 iterations (4 rounds) was at most 1.38x the fastest, so the two-level
+split of the earlier runs did not appear. All 15 cells are in the same frequency band and their wall times can be
+compared with each other. They cannot be compared with the earlier case 6 numbers: different builds, and the earlier
+runs did not pin the harness this way.
 
-| Level | Cell | n | min | median | p90 | events/s | MB/s |
-|---|---|---|---|---|---|---|---|
-| fast (3.4 GHz) | py | 185 | 277 | 283 | 287 | 70.7 k | 8.8 |
-| fast | rs-client, sidecar on its own core, client core idle at 0.8 to 2.0 GHz | 57 | 319 | 374 | 388 | 53.4 k | 6.6 |
-| fast | rs-client, client and sidecar sharing one core | 35 | 338 | 356 | 418 | 56.1 k | 7.0 |
-| fast | rs-kernel | 186 | 224 | 282 | 284 | 71.0 k | 8.8 |
-| slow (2.0 GHz) | py | 13 | 283 | 479 | 490 | 41.7 k | 5.2 |
-| slow | rs-client | 33 | 481 | 539 | 636 | 37.1 k | 4.6 |
-| slow | rs-kernel | 29 | 303 | 508 | 524 | 39.4 k | 4.9 |
+What the rows do not show: the replay server shares the pinned core with the side under test, so each wall time
+includes the time the server spends producing the stream on that core; how large that share is was not measured.
+`rs-client` ran with its client
+and sidecar on the same core, not on separate cores.
 
-At equal level Python ties the in-process kernel (1.00x at 3.4 GHz: 283 against 282 ms; 1.06x at 2.0 GHz, within the
-spread of the 13 slow py iterations) and is 1.26x to 1.33x faster than the client and sidecar path at 3.4 GHz (1.13x at
-2.0 GHz). The earlier 594 against 295 ms compared a 2.0 GHz run with a 3.4 GHz run. For scale, `rs-kernel` on the
-DeepSeek fixture (20 004 events, 4.07 MB) took 199 ms at 3.4 GHz (n=187) and 373 ms at 2.0 GHz (n=61): the same kernel
-needs 1.42x as long per event for Anthropic. A throwaway microbenchmark of the decoders (3.4 GHz, 20 000 events) put JSON
-decoding at 325 ns per Anthropic event with the tagged serde enums (237 ns with one flat struct) against 312 ns per chat
-chunk, and SSE framing at about 540 ns per event for both, so parsing is about 17 ms of either cell and does not
-explain the gap; where it sits is not located. Python's Anthropic path is fast because the Anthropic SDK validates one
-event in one pydantic-core call, while the OpenAI SDK, which also serves DeepSeek, builds each chunk in Python with
-about 10 `construct_type` calls (profile, cumulative 0.67 s against 8.0 s for 40 000 events). See
+Kernel cost per event (`rs-kernel` wall over events, median over rounds): DeepSeek 1.30 us, OpenAI chat 1.30 us, OpenAI
+responses 1.21 us, Anthropic 1.16 us, Gemini 1.37 us. The earlier run's 1.42x higher per-event time on Anthropic than on
+DeepSeek is not present in this run: Anthropic takes 0.89x the DeepSeek time per event. The SSE framing rewrite (#211)
+landed between the earlier builds (`d1f3cfe5`, `617715b3`) and this one. No run of one build before and after #211 was
+made, so whether and how much of the change comes from it is not isolated here. Python's Anthropic path is faster per event than its OpenAI-SDK paths in this run too (69.5
+k against 15.8 to 15.9 k events/s); the earlier profile attributed that to the Anthropic SDK validating one event in one
+pydantic-core call against about 10 `construct_type` calls per chunk in the OpenAI SDK, which was not re-profiled. See
 [Known gaps](#known-gaps).
 
 ## Memory per session
@@ -300,17 +314,17 @@ The `cache_salt` field itself was not captured on the wire; the evidence is the 
 - Case 3 Postgres cells had runs of iterations of 3 to 22 s (against 0.1 to 1 s) in 4 of the 12 cells of the
   earlier run, on `py` and `rs-kernel`, and none on `rs-client`. In the final run: 0 of 720 iterations exceeded 5x their cell's median. Not explained; the host and
   Postgres were not instrumented during the earlier stalls.
-- Case 6 moves between two levels inside one cell, about 1.7x apart (`rs-kernel` Anthropic 290 against
+- Case 6 in the earlier runs (builds before #211) moves between two levels inside one cell, about 1.7x apart (`rs-kernel` Anthropic 290 against
   510 ms, `rs-client` 380 against 580 ms), on all three sides. The levels are CPU frequency levels: the governor is
   `powersave` with `intel_pstate` and HWP, base 2.0 GHz, turbo 3.4 GHz, ratio 1.70. In a profile of 60 pinned client
   iterations of identical work, 48 used 507 to 626 ms of server CPU with the core read at a median of 1998 MHz,
   and 12 consecutive ones used 304 to 313 ms at a median of 3358 MHz. Pinning does not select the level: a busy
   core stayed at 2.0 GHz for tens of seconds in a decode microbenchmark. The final run did not record the
   frequency, so its 594 against 295 ms mixes the two levels; the Anthropic row was
-  re-measured with the level recorded per iteration (section above). Why HWP holds a busy core at base for seconds is not
+  re-measured with the level recorded per iteration. In the case 6 run (section above) the core's median was 3.40 GHz in every cell and no cell split in two; why the earlier runs did split is not determined. Why HWP holds a busy core at base for seconds is not
   determined (it needs root tooling: MSRs, `turbostat`).
 - Method: a benchmark cell must record the CPU frequency level per iteration and compare at equal level.
-- Case 6 client path against the kernel, profiled (3.4 GHz, 64 KiB pipe, 30 iterations per rung, medians). The
+- Case 6 client path against the kernel, profiled on a build before #211 and not repeated since (3.4 GHz, 64 KiB pipe, 30 iterations per rung, medians). The
   earlier hypothesis that the cost follows the number of JSON-RPC messages is refuted for this case. A run sends
   about 61 lines for 20 006 envelopes, because the server joins the queued envelopes of a run into one line of up
   to 64 KiB. Client `orjson.loads` is about 12 ms of roughly 365 ms. Most of the remaining gap is the server
@@ -347,7 +361,7 @@ The `cache_salt` field itself was not captured on the wire; the evidence is the 
 
 ### Not measured or weak
 
-- Case 6 cells of the final run, except Anthropic, have no recorded CPU frequency level, so their per-pass medians mix levels; the DeepSeek, OpenAI and Gemini rows were not re-measured at equal level. In the Anthropic equal-level run, `rs-client` at 3.4 GHz had its client core at 0.8 to 2.0 GHz or shared with the sidecar (no layout put both at 3.4 GHz on separate cores), and the 2.0 GHz Python cell has n=13. Why the kernel takes 1.42x as long per event on the Anthropic fixture as on the DeepSeek one is not located. The like-for-like ratios come from the later profile (see [Unexplained](#unexplained)), which ran under host load of 2.3 to 27 and did not rebuild the binaries.
+- Case 6 (all five vendors) was re-measured on `1da43ee3` at one frequency band, replacing the earlier cells. Not measured there: one build before and after #211 (so the effect of the framing rewrite is not isolated), the replay server on a separate core from the side under test, `rs-client` with its client and sidecar on separate cores at 3.4 GHz, and the client-path profile above after #211. Where inside a cell the sub-3.3 GHz samples fall was not recorded.
 - Loop, tools, startup, 16-session throughput and the other decode providers are one pass from the earlier run.
 - The idle-agent table is memory stores only; the Postgres-store memory cells (backends per agent, pool size) were not repeated in the final run. The memory of a run in flight and of an agent that has run once cannot be told apart in these data: the peak equals the after-runs figure.
 - Single-sample cells: vLLM and SGLang ramps at N=512 and 1024, every DeepSeek and vLLM load point, the cache-salt check (one run per row), the `SIGTERM` and fault rows (one pass).
