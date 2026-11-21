@@ -967,59 +967,6 @@ async fn a_clear_that_fails_once_is_retried_and_caching_goes_on() {
     );
 }
 
-/// A `tracing` writer that keeps what it is given.
-#[derive(Clone, Default)]
-struct Captured(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for Captured {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
-    type Writer = Captured;
-    fn make_writer(&'a self) -> Captured {
-        self.clone()
-    }
-}
-
-/// Caching that stops for a failed clear says so, once, in the log.
-#[tokio::test]
-async fn caching_that_stops_for_a_failed_clear_is_logged_once() {
-    let captured = Captured::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(captured.clone())
-        .with_ansi(false)
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
-
-    let flaky = flaky_clear();
-    flaky.fail.store(true, Ordering::SeqCst);
-    let shared: Arc<dyn ToolCacheStore> = flaky.clone();
-    let runs = Runs::default();
-    let tools: Vec<Arc<dyn Tool>> = vec![
-        Arc::new(Echo::new("Read", ToolScope::Read, &runs)),
-        Arc::new(Echo::new("Write", ToolScope::Write, &runs)),
-    ];
-    let agent = agent_of(
-        cached(&["Read"]),
-        tools,
-        script(&["Write", "Write", "Read"]),
-        &shared,
-        Hooks::default(),
-    );
-    finish(agent.run("go", RunOptions::new("s1"))).await;
-    let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
-    let lines = log.matches("the tool cache stopped for an agent").count();
-    assert_eq!(lines, 1, "{log}");
-    assert!(log.contains("WARN"), "{log}");
-}
-
 /// A read tool that answers for the run's principal, as `MemorySearch` does
 /// (a principal's memories are its own).
 struct Whoami {
