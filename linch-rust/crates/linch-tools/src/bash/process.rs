@@ -726,11 +726,14 @@ mod tests {
     }
 
     /// A helper (a shell that starts the program with `setsid`, so it leads
-    /// a group) that starts the program, then writes `report` and kills itself: what a
-    /// command that kills its parent at once does to the real helper, before
-    /// or after the helper's first line.
+    /// a group) that starts the program, waits until the program has written
+    /// its `shell` file (the real helper starts the shell in its own group at
+    /// once; `setsid` does so a moment after the fork), then writes `report`
+    /// and kills itself: what a command that kills its parent at once does to
+    /// the real helper, before or after the helper's first line.
     fn killed_helper(report: &str) -> ReaperCommand {
-        let script = format!("setsid \"$@\" & {report} kill -9 $$");
+        let script =
+            format!("setsid \"$@\" & until [ -s shell ]; do sleep 0.01; done; {report} kill -9 $$");
         ReaperCommand {
             program: "/bin/sh".into(),
             args: vec!["-c".into(), script.into()],
