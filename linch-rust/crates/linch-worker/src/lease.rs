@@ -13,7 +13,7 @@ use linch_core::{Principal, RunId, SessionId};
 use linch_postgres::{LeaseLine, PgPool};
 use tokio::time::Instant;
 
-use crate::error::{WorkerError, non_blank};
+use crate::error::{WorkerError, lock_unavailable, non_blank};
 use crate::job::{Approvals, JobId};
 
 /// Key space of the per-queue advisory locks that serialize dequeues on a
@@ -144,6 +144,11 @@ pub async fn set_queue_limit(pool: &PgPool, queue: &str, limit: u32) -> Result<(
 /// Take the oldest visible job of `queue` that `served` covers, hiding it
 /// for `timeout`. When the queue has a limit, take none while that many of
 /// its jobs are held by live workers anywhere.
+///
+/// A limited queue's lock that another transaction keeps for longer than
+/// the lock wait ends the call with `None`, as for an empty queue: the
+/// poll goes on to its other queues and asks this one again at its next
+/// round.
 pub(crate) async fn dequeue(
     pool: &PgPool,
     queue: &str,
@@ -151,8 +156,24 @@ pub(crate) async fn dequeue(
     owner: &str,
     timeout: Duration,
 ) -> Result<Option<JobLease>, WorkerError> {
+    match take(pool, queue, served, owner, timeout).await {
+        Err(error) if lock_unavailable(&error) => {
+            tracing::info!(%queue, "a lock is held elsewhere; skipping the queue this poll");
+            Ok(None)
+        }
+        taken => taken,
+    }
+}
+
+async fn take(
+    pool: &PgPool,
+    queue: &str,
+    served: &Served,
+    owner: &str,
+    timeout: Duration,
+) -> Result<Option<JobLease>, WorkerError> {
     let since = Instant::now();
-    let mut tx = crate::begin(pool).await?;
+    let mut tx = crate::begin_bounded(pool).await?;
     let limit: Option<i32> = sqlx::query_scalar(
         "SELECT max_held FROM linch_worker_queues WHERE name = $1 AND max_held > 0",
     )

@@ -126,6 +126,16 @@ lock for that queue, counts the jobs held by live workers anywhere (owned,
 still hidden, not failed), and takes nothing at the limit
 (`lease.rs:134-157`). Jobs held when the limit is lowered keep running.
 
+The wait for that lock is bounded. The dequeue's transaction sets
+`lock_timeout` to 250 ms in the statement that begins it (`begin_bounded` in
+`lib.rs`, no extra round trip), and a wait that runs out (SQLSTATE `55P03`)
+answers "nothing taken" for that queue, as for an empty one: the poll goes on
+to its other queues and asks this one again at the next poll. A process that
+is slow or paused inside a transaction that holds the lock therefore delays
+a worker's poll by at most 250 ms per such queue instead of stopping it; a
+queue that skips is logged at `info`. The lock key names no schema, so a
+holder in another schema of the same database counts.
+
 ## Leases and fencing
 
 Two fences protect a run, one per layer:
@@ -281,6 +291,21 @@ has passed too, all in one transaction:
   `schedule:{id}:{fire time}`; with one, every fire is a new run in it.
 - A stored timing that no longer parses pauses its schedule (logged)
   instead of blocking the others.
+- **A held root lock delays the worker by at most 750 ms.** The batch's
+  capped roots are locked in sorted order with a blocking advisory lock, so
+  the fire waits its turn behind `enqueue` calls of the root like they wait
+  for each other, but the transaction sets `lock_timeout` to 250 ms
+  (`begin_bounded`). A root whose lock is still held then (a slow `enqueue`
+  of that root) makes the round roll back with nothing kept, and the call
+  selects again without that root: its schedules take no place in the
+  64-schedule batch, stay due, and fire once in a later call, while the
+  other roots fire in this one. A call makes at most three rounds
+  (`FIRE_ROUNDS`), so it waits at most 750 ms, and roots still held after
+  that wait for the next call; any other lock wait in the call ends it with
+  0 and nothing kept. A root that stays held skips on every call, logged at
+  `info`. The worker polls its queues right after, so no queue waits on the
+  holder. The advisory lock keys name no schema: a holder in another schema
+  of the same database counts as a holder.
 
 ### Caps
 
@@ -290,7 +315,8 @@ tenant's name) may hold: schedules for `create_schedule`, unfinished jobs
 for `enqueue` and for a schedule's fire. The count runs in the insert's
 transaction after a transaction-scoped advisory lock on the root, so writers
 on any server count each other's rows; past it, `LimitReached`, or for a
-fire a skip.
+fire a skip. `enqueue` and `create_schedule` wait for the lock as long as it
+takes; only the worker's fire gives up, after 250 ms (see above).
 
 ## Agent definitions
 

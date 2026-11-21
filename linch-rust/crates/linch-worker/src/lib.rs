@@ -124,6 +124,22 @@ pub(crate) async fn begin(pool: &PgPool) -> Result<Transaction<'static, Postgres
         .await
 }
 
+/// Begin a transaction like [`begin`] that gives up on a lock another
+/// transaction holds after 250 ms (SQLSTATE 55P03, see
+/// [`error::lock_unavailable`]), in the one round trip that begins it.
+///
+/// The worker's poll loop takes the root cap lock (a capped fire) and a
+/// limited queue's lock (a dequeue) inline, and a writer that is slow
+/// inside its transaction holds them: an unbounded wait there stops every
+/// queue and schedule of the worker. The writers themselves (`enqueue`,
+/// `create_schedule`) keep [`begin`] and wait as before.
+pub(crate) async fn begin_bounded(
+    pool: &PgPool,
+) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+    pool.begin_with("BEGIN ISOLATION LEVEL READ COMMITTED; SET LOCAL lock_timeout = '250ms'")
+        .await
+}
+
 fn migrator() -> Migrator {
     let simple = |version, name, sql: &'static str| {
         let sql = sql.into_sql_str();

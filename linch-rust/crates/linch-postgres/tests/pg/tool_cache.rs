@@ -222,3 +222,212 @@ async fn a_put_sweeps_expired_rows_of_other_namespaces() {
     assert_eq!(rows().await, 1i64, "only the live row is left");
     db.finish().await;
 }
+/// Store `a` and `b` at once, each over an entry that had expired, 20
+/// times: how many puts failed, how many fresh entries are missing after,
+/// and the slowest pair.
+async fn refresh_at_once(name: &str, a: (&str, &str), b: (&str, &str)) -> (usize, u32, Duration) {
+    let Some(db) = TestDb::migrated(name).await else {
+        return (0, 0, Duration::ZERO);
+    };
+    let cache = PgToolCache::new(db.pool.clone());
+    let long = room(LONG, 64);
+    let (mut failed, mut lost, mut slowest) = (0, 0, Duration::ZERO);
+    for _ in 0..20 {
+        for (ns, key) in [a, b] {
+            assert!(put(&cache, ns, key, "old", &long).await);
+        }
+        sqlx::query("UPDATE linch_tool_cache SET expires_at = now() - interval '1 minute'")
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        let epochs = (
+            cache.get(a.0, a.1).await.unwrap().epoch,
+            cache.get(b.0, b.1).await.unwrap().epoch,
+        );
+        let new = out("new");
+        let started = std::time::Instant::now();
+        let stored = tokio::join!(
+            cache.put(a.0, a.1, &new, epochs.0, &long),
+            cache.put(b.0, b.1, &new, epochs.1, &long),
+        );
+        slowest = slowest.max(started.elapsed());
+        for stored in [&stored.0, &stored.1] {
+            match stored {
+                // Both lookups saw the current epoch: no put is refused.
+                Ok(stored) => assert!(*stored, "a put was refused"),
+                Err(error) => {
+                    failed += 1;
+                    eprintln!("{name}: a put failed: {error:?}");
+                }
+            }
+        }
+        for (ns, key) in [a, b] {
+            if held(&cache, ns, key).await != Some(new.clone()) {
+                lost += 1;
+            }
+        }
+    }
+    eprintln!(
+        "{name}: {failed} puts failed, {lost} of 40 fresh entries missing, slowest pair {slowest:?}"
+    );
+    db.finish().await;
+    (failed, lost, slowest)
+}
+
+/// Two calls that ran side by side (a parallel batch of read tools, or two
+/// sessions of one namespace) store their results at once, each over an
+/// entry that had expired: both entries are stored.
+#[tokio::test]
+async fn two_puts_over_expired_entries_both_store() {
+    let (failed, lost, _) = refresh_at_once("tool_cache_pair", ("ns", "a"), ("ns", "b")).await;
+    assert_eq!(failed, 0, "puts failed");
+    assert_eq!(lost, 0, "entries that a put reported stored are gone");
+}
+
+/// The same across two namespaces: one namespace's put never deletes what
+/// another namespace has just stored.
+#[tokio::test]
+async fn puts_of_two_namespaces_over_expired_entries_both_store() {
+    let (failed, lost, _) = refresh_at_once("tool_cache_pair2", ("one", "a"), ("two", "b")).await;
+    assert_eq!(failed, 0, "puts failed");
+    assert_eq!(lost, 0, "entries that a put reported stored are gone");
+}
+
+/// Over 20 rounds of two puts at once into a group that holds `cap` entries
+/// (`rest` stored first, the oldest first, `a` replacing one of them): how
+/// many puts failed and how many rounds ended wrong. A round ends right
+/// when `a` and `b` are both stored (whatever the order of the two puts, a
+/// put never deletes what the other has just stored) and one more put
+/// afterwards brings the group back to `cap` entries (a surplus entry that
+/// a put skipped because the other put held it is trimmed by the next).
+async fn race_rounds(
+    name: &str,
+    limits: impl Fn(&str) -> PutLimits,
+    cap: usize,
+    rest: [(&str, &str); 2],
+    a: (&str, &str),
+    b: (&str, &str),
+) -> (usize, usize) {
+    let Some(db) = TestDb::migrated(name).await else {
+        return (0, 0);
+    };
+    let cache = PgToolCache::new(db.pool.clone());
+    let (mut failed, mut wrong) = (0, 0);
+    for round in 0..20 {
+        sqlx::query("DELETE FROM linch_tool_cache")
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        for (ns, key) in rest {
+            assert!(put(&cache, ns, key, "old", &limits(ns)).await);
+        }
+        let epochs = (
+            cache.get(a.0, a.1).await.unwrap().epoch,
+            cache.get(b.0, b.1).await.unwrap().epoch,
+        );
+        let new = out("new");
+        let (la, lb) = (limits(a.0), limits(b.0));
+        let stored = tokio::join!(
+            cache.put(a.0, a.1, &new, epochs.0, &la),
+            cache.put(b.0, b.1, &new, epochs.1, &lb),
+        );
+        for stored in [&stored.0, &stored.1] {
+            match stored {
+                Ok(stored) => assert!(*stored, "a put was refused"),
+                Err(error) => {
+                    failed += 1;
+                    eprintln!("{name}: round {round}: a put failed: {error:?}");
+                }
+            }
+        }
+        let left = || async {
+            let rows = "SELECT namespace, key FROM linch_tool_cache";
+            let rows: Vec<(String, String)> =
+                sqlx::query_as(rows).fetch_all(&db.pool).await.unwrap();
+            rows
+        };
+        let stored = left().await;
+        let both = [a, b].map(|(ns, key)| stored.contains(&(ns.into(), key.into())));
+        assert!(put(&cache, a.0, "z", "new", &limits(a.0)).await);
+        let settled = left().await;
+        if both != [true, true] || settled.len() > cap {
+            wrong += 1;
+            eprintln!("{name}: round {round}: {stored:?}, then {settled:?}");
+        }
+    }
+    eprintln!("{name}: {failed} puts failed, {wrong} of 20 rounds ended wrong");
+    db.finish().await;
+    (failed, wrong)
+}
+
+/// A namespace holds two entries of room. Two puts at once, one replacing an
+/// entry and one adding another, store both: the trim of one put does not
+/// delete the other's entry.
+#[tokio::test]
+async fn two_puts_into_a_full_namespace_both_store() {
+    let full = |_: &str| room(LONG, 2);
+    let rest = [("ns", "a"), ("ns", "b")];
+    let (failed, wrong) =
+        race_rounds("tool_cache_full", full, 2, rest, ("ns", "a"), ("ns", "c")).await;
+    assert_eq!((failed, wrong), (0, 0));
+}
+
+/// A quota group holds two entries of bytes. Two puts at once, one replacing
+/// an entry and one adding another in a second namespace, store both: the
+/// quota trim of one put does not delete the other's entry.
+#[tokio::test]
+async fn two_puts_into_a_full_quota_group_both_store() {
+    let size = serde_json::to_string(&out("old")).unwrap().len() as u64;
+    let quota = move |_: &str| PutLimits {
+        ttl: LONG,
+        max_entries: 64,
+        quota: Some(ByteQuota {
+            group: "acme".into(),
+            max_bytes: size * 2,
+        }),
+    };
+    let rest = [("one", "a"), ("two", "b")];
+    let (failed, wrong) = race_rounds(
+        "tool_cache_quota_pair",
+        quota,
+        2,
+        rest,
+        ("one", "a"),
+        ("three", "c"),
+    )
+    .await;
+    assert_eq!((failed, wrong), (0, 0));
+}
+
+/// A put's sweep of expired rows never deletes an entry a concurrent put of
+/// another namespace has just stored over an expired one.
+#[tokio::test]
+async fn a_sweep_does_not_delete_an_entry_stored_over_an_expired_one() {
+    let Some(db) = TestDb::migrated("tool_cache_sweep_race").await else {
+        return;
+    };
+    let cache = PgToolCache::new(db.pool.clone());
+    let long = room(LONG, 64);
+    let mut missing = 0;
+    for _ in 0..20 {
+        assert!(put(&cache, "one", "k", "old", &long).await);
+        sqlx::query("UPDATE linch_tool_cache SET expires_at = now() - interval '1 minute'")
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        let epoch = cache.get("one", "k").await.unwrap().epoch;
+        let new = out("new");
+        let (stored, other) = tokio::join!(
+            cache.put("one", "k", &new, epoch, &long),
+            put(&cache, "two", "k", "new", &long),
+        );
+        assert!(stored.unwrap() && other);
+        for ns in ["one", "two"] {
+            if held(&cache, ns, "k").await != Some(new.clone()) {
+                missing += 1;
+            }
+        }
+    }
+    db.finish().await;
+    assert_eq!(missing, 0, "fresh entries are gone");
+}

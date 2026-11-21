@@ -411,6 +411,52 @@ async fn the_schedule_cap_counts_the_whole_root() {
 }
 
 /// Run a start job per session in `sessions`, and wait until they end.
+/// A capped fire whose root's lock another transaction keeps (a slow
+/// `enqueue` of that root) gives up on it after the lock wait: that root's
+/// schedule stays due while another root's fires in the same call, and the
+/// next call fires the first once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fire_whose_root_lock_is_held_elsewhere_waits_for_the_next_call() {
+    let Some(db) = TestDb::new("fire_lock").await else {
+        return;
+    };
+    let caps = [NS, "p9x"].map(|root| Cap {
+        root: root.into(),
+        max: 10,
+    });
+    create_schedule(&db.pool, &hourly("a"), None).await.unwrap();
+    let mut elsewhere = hourly("b");
+    elsewhere.namespace = "p9x".into();
+    create_schedule(&db.pool, &elsewhere, None).await.unwrap();
+    db.sql("UPDATE linch_worker_schedules SET next_fire = now() - interval '1 second'")
+        .await;
+    let due = next_fire(&db, "a").await;
+    let mut holder = db.pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("linch_worker_cap:jobs:{NS}"))
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    let skipped = fire_due_schedules(&db.pool, &caps).await;
+    let waited = started.elapsed();
+    let (jobs, still_due) = (db.jobs().await, next_fire(&db, "a").await);
+    holder.rollback().await.unwrap();
+    let fired = fire_due_schedules(&db.pool, &caps).await;
+    let again = fire_due_schedules(&db.pool, &caps).await;
+    let after = db.jobs().await;
+    db.finish().await;
+    assert!(
+        matches!(skipped, Ok(1)),
+        "the other root fires: {skipped:?}"
+    );
+    assert!(waited < Duration::from_secs(5), "waited {waited:?}");
+    assert_eq!((jobs, still_due), (1, due), "the held root kept its fire");
+    assert!(matches!(fired, Ok(1)), "{fired:?}");
+    assert!(matches!(again, Ok(0)), "{again:?}");
+    assert_eq!(after, 2, "each schedule fired once");
+}
+
 async fn run_jobs(db: &TestDb, probe: &Probe, sessions: std::ops::Range<u32>) {
     for i in sessions.clone() {
         let session = SessionId::new(format!("s{i}"));

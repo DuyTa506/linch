@@ -17,6 +17,13 @@
 //! group to its byte cap (newest first), and, after it commits, deletes a
 //! bounded batch of expired rows of any namespace, so a namespace nobody
 //! uses again does not keep its rows forever.
+//!
+//! **Puts never wait for each other's rows.** A put stores its entry first,
+//! then picks the rows to delete with `FOR UPDATE SKIP LOCKED` and a bound
+//! that a replaced row no longer meets, so one put never deletes an entry
+//! another has just stored and two puts cannot deadlock. A row skipped
+//! because another put holds it is trimmed by the next put, so a group can
+//! hold an entry or two past its caps until then.
 
 use async_trait::async_trait;
 use linch_core::{ByteQuota, Lookup, PutLimits, ToolCacheError, ToolCacheStore, ToolOutput};
@@ -40,47 +47,65 @@ const LOCK_EXCLUSIVE: &str = "SELECT pg_advisory_xact_lock(hashtextextended(\
 const EPOCH: &str = "SELECT COALESCE((SELECT epoch FROM linch_tool_cache_epoch \
      WHERE namespace = $1), 0)";
 
-/// Store or replace an entry, then trim the namespace to `$5` live entries:
-/// the new one and the newest `$5 - 1` others (the delete does not see the
-/// upsert, so it keeps one less). The upsert's new `seq` makes the entry the
-/// newest.
-const PUT: &str = "WITH put AS ( \
-         INSERT INTO linch_tool_cache \
-             (namespace, key, output, bytes, quota_group, expires_at) \
-         VALUES ($1, $2, $3, $6, $7, now() + make_interval(secs => $4)) \
-         ON CONFLICT (namespace, key) DO UPDATE \
-         SET output = EXCLUDED.output, bytes = EXCLUDED.bytes, \
-             quota_group = EXCLUDED.quota_group, \
-             expires_at = EXCLUDED.expires_at, seq = DEFAULT \
-         RETURNING key \
-     ) \
-     DELETE FROM linch_tool_cache \
-     WHERE namespace = $1 AND key <> $2 AND ( \
-         expires_at <= now() \
-         OR key NOT IN ( \
-             SELECT key FROM linch_tool_cache \
-             WHERE namespace = $1 AND key <> $2 AND expires_at > now() \
-             ORDER BY seq DESC LIMIT GREATEST($5 - 1, 0) \
+/// Store or replace an entry. The upsert's new `seq` makes it the newest.
+///
+/// It runs as a statement of its own, before the trims: its row is locked
+/// before the transaction picks any victim, so no put holds a victim's lock
+/// while it waits for its own row, and two puts cannot wait for each other.
+const PUT: &str = "INSERT INTO linch_tool_cache \
+         (namespace, key, output, bytes, quota_group, expires_at) \
+     VALUES ($1, $2, $3, $5, $6, now() + make_interval(secs => $4)) \
+     ON CONFLICT (namespace, key) DO UPDATE \
+     SET output = EXCLUDED.output, bytes = EXCLUDED.bytes, \
+         quota_group = EXCLUDED.quota_group, \
+         expires_at = EXCLUDED.expires_at, seq = DEFAULT";
+
+/// Trim the namespace to `$5` live entries: the entry under `$2` and the
+/// newest `$5 - 1` others.
+///
+/// The victims are the other entries that expired and the live ones whose
+/// `seq` is at or below the first one past the newest `$5 - 1`, picked with
+/// `FOR UPDATE SKIP LOCKED`. A row another put is replacing is locked, so it
+/// is skipped (the next put trims it if it is still surplus) instead of
+/// waited for, and a row replaced after the statement's snapshot is
+/// rechecked and no longer qualifies: its new `seq` is above the bound.
+const TRIM: &str = "DELETE FROM linch_tool_cache \
+     WHERE (namespace, key) IN ( \
+         SELECT namespace, key FROM linch_tool_cache \
+         WHERE namespace = $1 AND key <> $2 AND ( \
+             expires_at <= now() \
+             OR seq <= ( \
+                 SELECT seq FROM linch_tool_cache \
+                 WHERE namespace = $1 AND key <> $2 AND expires_at > now() \
+                 ORDER BY seq DESC OFFSET GREATEST($3 - 1, 0) LIMIT 1 \
+             ) \
          ) \
+         FOR UPDATE SKIP LOCKED \
      )";
 
 /// Delete the quota group's entries past `$2` bytes, counting from the
-/// newest.
-const QUOTA: &str = "DELETE FROM linch_tool_cache AS c USING ( \
-         SELECT namespace, key FROM ( \
-             SELECT namespace, key, \
-                    sum(bytes) OVER (ORDER BY seq DESC) AS running \
-             FROM linch_tool_cache \
-             WHERE quota_group = $1 AND expires_at > now() \
-         ) AS counted WHERE running > $2::bigint \
-     ) AS over \
-     WHERE c.namespace = over.namespace AND c.key = over.key";
+/// newest: the live entries at or below the `seq` where the running total
+/// first passes `$2`, picked as the trim picks its victims.
+const QUOTA: &str = "DELETE FROM linch_tool_cache \
+     WHERE (namespace, key) IN ( \
+         SELECT namespace, key FROM linch_tool_cache \
+         WHERE quota_group = $1 AND expires_at > now() AND seq <= ( \
+             SELECT max(seq) FROM ( \
+                 SELECT seq, sum(bytes) OVER (ORDER BY seq DESC) AS running \
+                 FROM linch_tool_cache \
+                 WHERE quota_group = $1 AND expires_at > now() \
+             ) AS counted WHERE running > $2::bigint \
+         ) \
+         FOR UPDATE SKIP LOCKED \
+     )";
 
-/// Most expired rows one put deletes besides its own namespace's.
+/// Most expired rows one put deletes besides its own namespace's. A row
+/// another put has just replaced is locked or no longer expired: it stays.
 const SWEEP: &str = "DELETE FROM linch_tool_cache \
      WHERE (namespace, key) IN ( \
          SELECT namespace, key FROM linch_tool_cache \
          WHERE expires_at < now() LIMIT 100 \
+         FOR UPDATE SKIP LOCKED \
      )";
 
 /// A [`ToolCacheStore`] backed by Postgres. Run [`crate::migrate`] on the
@@ -163,9 +188,15 @@ impl ToolCacheStore for PgToolCache {
             .bind(key)
             .bind(text)
             .bind(limits.ttl.as_secs_f64())
-            .bind(i64::from(limits.max_entries))
             .bind(bytes)
             .bind(group)
+            .execute(&mut *tx)
+            .await
+            .map_err(backend)?;
+        sqlx::query(TRIM)
+            .bind(namespace)
+            .bind(key)
+            .bind(i64::from(limits.max_entries))
             .execute(&mut *tx)
             .await
             .map_err(backend)?;

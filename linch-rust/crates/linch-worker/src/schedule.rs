@@ -31,12 +31,25 @@ use linch_postgres::PgPool;
 use sqlx::{Postgres, Transaction};
 
 use crate::definition::{self, Cap, Counted};
-use crate::error::{WorkerError, chain, non_blank};
+use crate::error::{WorkerError, chain, lock_unavailable, non_blank};
 use crate::job::{Inserted, NewJob, insert, principal_json};
 use crate::timing::{Parsed, Timing};
 
 /// Most due schedules one [`fire_due_schedules`] call fires.
 const FIRE_BATCH: i64 = 64;
+
+/// Most rounds one [`fire_due_schedules`] call makes: each round after the
+/// first leaves out the roots whose lock ran out the wait in the one before.
+const FIRE_ROUNDS: usize = 3;
+
+/// How one round of a call ended.
+enum Round {
+    /// It committed, having fired this many schedules.
+    Fired(u64),
+    /// It gave up and rolled back: this capped root's lock is held by
+    /// another transaction.
+    Held(String),
+}
 
 /// Most missed ticks of a cron schedule one coalesced fire counts in
 /// `skips`, so a catch-up of a seconds-field pattern after a long downtime
@@ -479,6 +492,16 @@ pub async fn delete_agent_schedule(
 /// A stored timing that no longer parses pauses its schedule (logged)
 /// instead of blocking the others.
 ///
+/// A capped root's lock is waited for in turn, like `enqueue` does, but for
+/// at most 250 ms. When that runs out (another transaction, such as a slow
+/// `enqueue` of the root, holds it) the round is rolled back and the call
+/// goes on without that root, so its schedules stay due, take no place in
+/// the batch, and fire in a later call, once; the other roots fire in this
+/// one. At most three rounds are made, so a call waits at most 750 ms; roots
+/// still held after that wait for the next call. Any other lock wait ends
+/// the call with 0 and nothing kept. The lock is the database's, not the
+/// schema's: a holder in another schema of the database counts too.
+///
 /// Args:
 ///     pool: Pool for the queue's database.
 ///     caps: The most unfinished jobs each root may hold, as `enqueue`
@@ -491,14 +514,37 @@ pub async fn delete_agent_schedule(
 /// Raises:
 ///     WorkerError: If a query fails; nothing of the call is kept then.
 pub async fn fire_due_schedules(pool: &PgPool, caps: &[Cap]) -> Result<u64, WorkerError> {
-    let mut tx = crate::begin(pool).await?;
+    let mut held: Vec<String> = Vec::new();
+    for _ in 0..FIRE_ROUNDS {
+        match fire_batch(pool, caps, &held).await {
+            Ok(Round::Fired(fired)) => return Ok(fired),
+            Ok(Round::Held(root)) => {
+                tracing::info!(%root, "a root's lock is held elsewhere; its fires wait for a later call");
+                held.push(root);
+            }
+            Err(error) if lock_unavailable(&error) => {
+                tracing::info!("a lock is held elsewhere; the fires wait for the next call");
+                return Ok(0);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(0)
+}
+
+/// One round: fire the due schedules of the roots not in `held`, or give up
+/// with nothing kept on the first capped root whose lock is held elsewhere.
+async fn fire_batch(pool: &PgPool, caps: &[Cap], held: &[String]) -> Result<Round, WorkerError> {
+    let mut tx = crate::begin_bounded(pool).await?;
     let due: Vec<Row> = sqlx::query_as(concat!(
         "SELECT ",
         columns!(),
         " FROM linch_worker_schedules WHERE enabled AND next_fire <= now() \
+         AND split_part(namespace, '/', 1) <> ALL($2) \
          ORDER BY next_fire LIMIT $1 FOR UPDATE SKIP LOCKED"
     ))
     .bind(FIRE_BATCH)
+    .bind(held)
     .fetch_all(&mut *tx)
     .await?;
     let now = now(&mut tx).await?;
@@ -515,7 +561,10 @@ pub async fn fire_due_schedules(pool: &PgPool, caps: &[Cap]) -> Result<u64, Work
     capped.sort_unstable();
     capped.dedup();
     for root in capped {
-        definition::lock(&mut tx, Counted::Jobs, root).await?;
+        match definition::lock(&mut tx, Counted::Jobs, root).await {
+            Err(error) if lock_unavailable(&error) => return Ok(Round::Held(root.to_owned())),
+            locked => locked?,
+        }
     }
     let mut fired = 0;
     for schedule in &due {
@@ -524,7 +573,7 @@ pub async fn fire_due_schedules(pool: &PgPool, caps: &[Cap]) -> Result<u64, Work
         }
     }
     tx.commit().await?;
-    Ok(fired)
+    Ok(Round::Fired(fired))
 }
 
 /// The fire after `fire_at` that is still to come at `now`, and how many

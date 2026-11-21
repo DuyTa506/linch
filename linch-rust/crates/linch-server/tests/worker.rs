@@ -392,6 +392,108 @@ async fn a_run_whose_server_was_killed_finishes_on_another() {
     db.drop().await;
 }
 
+/// Send `signal` (`STOP`, `CONT`) to a server.
+async fn signal(child: &Child, signal: &str) {
+    let pid = child.id().unwrap().to_string();
+    let flag = format!("-{signal}");
+    let sent = Command::new("kill")
+        .args([flag.as_str(), &pid])
+        .status()
+        .await;
+    assert!(sent.unwrap().success());
+}
+
+/// A server that is paused in the middle of a run (slow, not dead) loses
+/// the run to another server; when it continues it writes nothing more,
+/// runs nothing again, and still stops cleanly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_paused_servers_run_is_taken_over_and_it_writes_nothing_after() {
+    let Some(db) = TestDb::empty("run_pause").await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(workspace.path()).unwrap();
+    let allow = json!({"exec_tools": true, "workspace_roots": [root],
+                       "permission_modes": ["skip_dangerous"]});
+    let config = server_config(&db, true, allow);
+    let (first, socket) = server(dir.path(), "a", &config).await;
+    let a = client(&socket).await;
+    let mark = root.join("ran");
+    let command = format!("sleep 1; echo ran >> {}", mark.display());
+    let working = TurnBuilder::new(MODEL)
+        .tool_call("call_0", "Bash", &json!({"command": command}))
+        .build();
+    let turns = vec![working, TurnBuilder::new(MODEL).text("done").build()];
+    let extra = json!({"workspace": root,
+                       "permissions": {"mode": "skip_dangerous", "project_root": root}});
+    let agent = open(&a, &agent_config(&db, turns, extra)).await;
+    let enqueue = json!({"agent": agent, "session_id": "s1", "prompt": "Work."});
+    let queued: JobInfo = a.call(method::JOB_ENQUEUE, &enqueue).await.unwrap();
+    let pool = pool(&db).await;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while scalar(
+        &pool,
+        "SELECT count(*) FROM linch_run_events WHERE envelope LIKE '%tool_call_start%'",
+    )
+    .await
+        == 0
+    {
+        assert!(Instant::now() < deadline, "the tool never started");
+        sleep(Duration::from_millis(20)).await;
+    }
+    // Paused while its tool runs; the command itself goes on.
+    signal(&first, "STOP").await;
+    let (second, _socket) = server(dir.path(), "b", &config).await;
+    all_ended(&pool).await;
+    let state = || async {
+        let events = scalar(&pool, "SELECT count(*) FROM linch_run_events").await;
+        let entries = scalar(&pool, "SELECT count(*) FROM linch_session_entries").await;
+        let runs = scalar(&pool, "SELECT count(*) FROM linch_runs").await;
+        let completed = scalar(
+            &pool,
+            "SELECT count(*) FROM linch_runs WHERE status = 'completed'",
+        )
+        .await;
+        let jobs = scalar(&pool, "SELECT count(*) FROM linch_worker_jobs").await;
+        let history = scalar(&pool, "SELECT count(*) FROM linch_worker_history").await;
+        let epoch = scalar(&pool, "SELECT max(epoch)::bigint FROM linch_runs").await;
+        (events, entries, runs, completed, jobs, history, epoch)
+    };
+    let before = state().await;
+    assert_eq!(
+        (before.2, before.3, before.4, before.5),
+        (1, 1, 0, 1),
+        "{before:?}"
+    );
+    // The paused server continues: its job and its run are no longer its own.
+    signal(&first, "CONT").await;
+    sleep(Duration::from_secs(4)).await;
+    assert_eq!(state().await, before, "the paused server changed something");
+    let attempts: i32 =
+        sqlx::query_scalar("SELECT attempts FROM linch_worker_history WHERE id = $1")
+            .bind(queued.job_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(attempts >= 2, "{attempts}");
+    // The interrupted call is not run again on resume. The scripted
+    // provider of the second server starts its script over, so the model
+    // asks for the command once more: twice in all, never a third time.
+    let interrupted = scalar(
+        &pool,
+        "SELECT count(*) FROM linch_run_events WHERE envelope LIKE '%\"type\":\"tool_interrupted\"%'",
+    )
+    .await;
+    assert_eq!(interrupted, 1);
+    let ran = std::fs::read_to_string(&mark).unwrap_or_default();
+    assert_eq!(ran.lines().count(), 2, "{ran:?}");
+    terminate(first).await;
+    terminate(second).await;
+    assert_eq!(state().await, before, "a stopping server changed something");
+    db.drop().await;
+}
+
 /// With `worker.retention` a server deletes the runs and sessions that
 /// ended or idled past the windows, and a client that asks for a deleted
 /// run gets the code of its own (`-32050`), not a plain not-found (`-32021`).
