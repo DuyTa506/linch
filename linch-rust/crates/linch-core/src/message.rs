@@ -183,6 +183,10 @@ impl ToolUseBlock {
         let raw = self.raw_input.as_deref()?;
         let why = match serde_json::from_str::<serde_json::Value>(raw) {
             Err(error) => error.to_string(),
+            Ok(serde_json::Value::Object(_)) => format!(
+                "the arguments nest deeper than {} levels",
+                crate::canonical::JOURNAL_MAX_DEPTH
+            ),
             Ok(_) => "the arguments must be a JSON object".to_owned(),
         };
         let mut quoted: String = raw.chars().take(QUOTED_ARGUMENTS).collect();

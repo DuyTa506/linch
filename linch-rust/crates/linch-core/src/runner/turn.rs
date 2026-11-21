@@ -165,6 +165,11 @@ pub(super) struct Runner {
     /// Where the run stands on its fallback models and in this turn's
     /// provider retries (see `runner/retry.rs`).
     pub(super) standing: Standing,
+    /// The phase the run is in, when a receipt was settled since the last
+    /// save (an abandoned call's, a failed call before a failover): the
+    /// totals that count it are not in a checkpoint yet, so a flush that is
+    /// not a save saves this phase first (see [`Runner::flush_staged`]).
+    pub(super) unsaved: Option<Phase>,
     /// The schema the run's final answer must satisfy; `None` takes any
     /// text (see `runner/structured.rs`).
     pub(super) output: Option<Arc<OutputContract>>,
@@ -276,6 +281,7 @@ impl Runner {
             steers: Steers::default(),
             final_answer_retries: 0,
             standing: progress.standing,
+            unsaved: None,
             output,
             schema_retries: 0,
             verify_retries: 0,
@@ -473,6 +479,9 @@ impl Runner {
         if let Some(mut receipt) = abandoned {
             self.settle(&mut receipt);
             self.journal.stage(Event::ModelCallReceipt(receipt));
+            // The resumed phase: the call that attempt follows.
+            let attempt = attempt.saturating_sub(1);
+            self.unsaved = Some(Phase::ProviderPending { attempt });
         }
         if self.cancel.is_cancelled() {
             self.abort().await?;
@@ -623,6 +632,10 @@ impl Runner {
         if !failure.free {
             self.stage_usage(usage, cost, served);
         }
+        // The receipt is staged, and no save follows when the run goes on
+        // to a failover or a summary: a flush that is not a save saves the
+        // totals that count it.
+        self.unsaved = Some(Phase::ProviderPending { attempt });
         if matches!(failure.error, ProviderError::Cancelled) {
             self.abort().await?;
             return Ok(None);

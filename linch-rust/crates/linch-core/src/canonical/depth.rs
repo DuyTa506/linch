@@ -1,6 +1,6 @@
 //! Bounding container nesting before it reaches an unbounded encoder.
 
-use crate::json::JsonValue;
+use crate::json::{JsonObject, JsonValue};
 
 use super::CanonicalError;
 
@@ -8,6 +8,19 @@ use super::CanonicalError;
 /// depth 0). Mirrors `MAX_DEPTH` in `linch-python`'s `check_journal_json`,
 /// which this crate's journal-record callers reuse as their limit.
 pub const JOURNAL_MAX_DEPTH: usize = 64;
+
+/// `object` when the journal can hold it: nested no deeper than
+/// [`JOURNAL_MAX_DEPTH`]. What a model or a tool controls goes through it
+/// before it is written, because the stores nest it a few levels deeper
+/// and cannot read back what `serde_json` would not parse.
+pub(crate) fn journalable(object: JsonObject) -> Option<JsonObject> {
+    let value = JsonValue::Object(object);
+    check_depth(&value, JOURNAL_MAX_DEPTH).ok()?;
+    match value {
+        JsonValue::Object(object) => Some(object),
+        _ => None,
+    }
+}
 
 /// Deepest container nesting [`check_depth`] or the canonical encoder
 /// (`to_canonical_string`, `digest`, `digest_with_domain`) will ever

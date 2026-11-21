@@ -113,3 +113,55 @@ async fn the_model_reads_an_error_for_the_call_and_the_log_keeps_its_text() {
         .count();
     assert_eq!(ended, 1);
 }
+
+/// A model call whose input nests `objects` objects, and the run it ends in:
+/// the number of times the tool ran and the model's error for the call.
+async fn deep_call(objects: usize) -> (usize, Option<String>) {
+    // The root holds `chars`, which makes the test tool return at once.
+    let inner = objects - 1;
+    let text = format!(
+        "{{\"chars\":0,\"a\":{}1{}}}",
+        "{\"a\":".repeat(inner),
+        "}".repeat(inner)
+    );
+    let input: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let turn = TurnBuilder::new(MODEL)
+        .tool_call("c1", "Read", &input)
+        .build();
+    let runs = Runs::default();
+    let provider = Arc::new(Flaky::new(vec![turn, text_turn("done")]));
+    let stores = Arc::new(Stores::default());
+    let tools = registry(vec![Echo::new("Read", ToolScope::Read, &runs)]);
+    let permissions = policy(PermissionMode::SkipDangerous);
+    let agent = agent_with(spec(), provider, tools, permissions, stores.clone());
+    finish(agent.run("go", RunOptions::new("s1"))).await;
+    let ran = runs.lock().unwrap().len();
+    let log = messages(&*stores, "s1").await;
+    let told = match &log[2].content[0] {
+        ContentBlock::ToolResult(result) if result.is_error => match &result.content[0] {
+            ToolResultPart::Text(text) => Some(text.text.clone()),
+            ToolResultPart::Image(_) => None,
+        },
+        _ => None,
+    };
+    (ran, told)
+}
+
+/// The stores read back a response only up to the journal's depth limit:
+/// an input at the limit runs, one level deeper is refused as a broken
+/// call, with the reason, and the run goes on.
+#[tokio::test]
+async fn a_tool_input_nested_past_the_journal_limit_is_a_broken_call() {
+    let limit = linch_core::JOURNAL_MAX_DEPTH + 1;
+    let (ran, told) = deep_call(limit).await;
+    assert_eq!((ran, told), (1, None), "an input at the limit runs");
+    let (ran, told) = deep_call(limit + 1).await;
+    assert_eq!(ran, 0, "the tool ran on an input past the limit");
+    let told = told.expect("the model is told");
+    assert!(
+        told.starts_with(
+            "invalid JSON arguments for Read: the arguments nest deeper than 64 levels"
+        ),
+        "{told}"
+    );
+}

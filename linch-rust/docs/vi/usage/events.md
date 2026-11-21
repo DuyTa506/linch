@@ -205,7 +205,7 @@ Một phản hồi hoàn chỉnh của model.
 
 | Trường | Ý nghĩa |
 |---|---|
-| `message` | `{"role": "assistant", "content": [blocks]}`: các block `text`, `thinking`, `tool_use`. Một block `tool_use` là `{"type", "id", "name", "input"}`, và chỉ mang `raw_input` (các đối số đúng như model viết) khi chúng không phải một đối tượng JSON: `input` khi đó là `{}` và lời gọi được trả lời bằng lỗi, không bao giờ chạy ([Khắc phục sự cố](./troubleshooting.md)) |
+| `message` | `{"role": "assistant", "content": [blocks]}`: các block `text`, `thinking`, `tool_use`. Một block `tool_use` là `{"type", "id", "name", "input"}`, và chỉ mang `raw_input` (các đối số đúng như model viết) khi chúng không phải một đối tượng JSON hoặc lồng sâu hơn 64 cấp: `input` khi đó là `{}` và lời gọi được trả lời bằng lỗi, không bao giờ chạy ([Khắc phục sự cố](./troubleshooting.md)) |
 | `stop_reason` | `end_turn`, `tool_use`, `max_tokens`, `stop_sequence`, `refusal`, `error`, `lease_lost` hoặc `interrupted` |
 
 ### `PartialAssistantEvent` (`partial_assistant`), chỉ có trong stream
@@ -268,7 +268,7 @@ Một lời gọi tool đã kết thúc.
 | `result` | Block kết quả tool mà model đọc: `{"tool_use_id", "content": [blocks], "is_error"?}` |
 | `duration_ms` | Lời gọi mất bao lâu |
 | `canonical_output` | Giá trị có cấu trúc, với các tool khai báo output schema; ngược lại là `None` |
-| `metadata` | Chi tiết chỉ dành cho host, không bao giờ hiển thị cho model: những gì một host tool trả về trong [`ToolOutput.metadata`](./tools.md#metadata-cho-host), hoặc nơi một kết quả được offload đã đi tới; với lời gọi thất bại, là object `details` của lỗi (`status` và `exit_code` của một lệnh `Bash`, xem [Workspace tool](./tools.md#workspace-tool)); `None` với tool không đặt gì |
+| `metadata` | Chi tiết chỉ dành cho host, không bao giờ hiển thị cho model: những gì một host tool trả về trong [`ToolOutput.metadata`](./tools.md#metadata-cho-host), hoặc nơi một kết quả được offload đã đi tới; với lời gọi thất bại, là object `details` của lỗi (`status` và `exit_code` của một lệnh `Bash`, xem [Workspace tool](./tools.md#workspace-tool)); `None` với tool không đặt gì, hoặc có object lồng sâu hơn 64 cấp (các store không đọc lại được sâu hơn) |
 | `error_code` | Mã máy đọc được của một lời gọi thất bại (`invalid_input`, `not_found`, ...), khi tool của nó cung cấp; ngược lại là `None`. `tool_interrupted` đánh dấu phần end thay thế của một lời gọi mà start đã bền vững khi crash đến: tác động của nó không rõ và nó không bao giờ được chạy lại ([Runs: Tool chạy tối đa một lần](./runs.md#tools-run-at-most-once-never-exactly-once)) |
 | `cache_hit` | Việc [`spec.tool_cache`](./tools.md#tool_cache) có phục vụ kết quả hay không: tool không chạy, và `tool_call_start` của lời gọi được ghi cùng với event này, không phải trước nó. Ngược lại là `False` |
 | `tool_use_id` | Property: `result["tool_use_id"]` |

@@ -6,6 +6,7 @@ mod claim;
 mod common;
 mod conformance;
 mod crash;
+mod deep_input;
 mod exhausted;
 mod fence;
 mod files;
