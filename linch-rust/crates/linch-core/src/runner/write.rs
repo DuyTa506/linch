@@ -131,6 +131,7 @@ impl Runner {
     /// Save a checkpoint for `phase` and deliver what a write-through made
     /// durable.
     pub(super) async fn save(&mut self, phase: Phase) -> Result<(), RunError> {
+        self.unsaved = None;
         let checkpoint = Checkpoint {
             turn: self.turn,
             usage: self.usage,
@@ -141,6 +142,21 @@ impl Runner {
             phase,
         };
         let ready = self.journal.save(checkpoint).await?;
+        self.event_emit(&ready).await;
+        self.outbox.deliver(ready).await;
+        Ok(())
+    }
+
+    /// Make every staged event durable, for a caller that is not a save
+    /// (the wait for the provider gate, a steer). A receipt settled since
+    /// the last save is never durable without a checkpoint at the totals
+    /// that count it: that phase is saved first, held, so the same write
+    /// carries both.
+    pub(super) async fn flush_staged(&mut self) -> Result<(), RunError> {
+        if let Some(phase) = self.unsaved.take() {
+            self.save(phase).await?;
+        }
+        let ready = self.journal.flush().await?;
         self.event_emit(&ready).await;
         self.outbox.deliver(ready).await;
         Ok(())

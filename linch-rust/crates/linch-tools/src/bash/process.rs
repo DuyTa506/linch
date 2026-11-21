@@ -261,7 +261,10 @@ pub(crate) fn start_shell(
 /// ended without starting the shell (it does not know its arguments, say),
 /// with [`ErrorKind::TimedOut`] when it did not answer, and with
 /// [`ErrorKind::InvalidData`] when the line is not such a pid: a helper that
-/// might be running the command.
+/// might be running the command. A helper killed by a signal before the pid
+/// was checked (the command killed its parent at once) did start the shell:
+/// the shell is then found by the output pipes only it holds, and the
+/// command is not run again.
 fn start_helped(
     helper: &ReaperCommand,
     program: &Command,
@@ -281,7 +284,7 @@ fn start_helped(
         .arg(inner.get_program())
         .args(inner.get_args());
     // A helper is stopped by its stdin closing, not killed outright.
-    let child = launch(wrapped, cwd, env, Stdio::from(OwnedFd::from(theirs)), false)?;
+    let mut child = launch(wrapped, cwd, env, Stdio::from(OwnedFd::from(theirs)), false)?;
     link.set_read_timeout(Some(HANDSHAKE))?;
     let shell = read_pid(&link).and_then(|pid| led_by(pid, child.id()));
     match shell {
@@ -290,6 +293,21 @@ fn start_helped(
             cleanup: None,
             helper: Some(Helper { link, shell }),
         }),
+        // Killed (by the command, say) before the shell could be checked: it
+        // started, so it must neither run again nor be left running.
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::UnexpectedEof | ErrorKind::InvalidData
+            ) && killed_by_signal(&mut child) =>
+        {
+            let shell = orphaned_shell(&child);
+            Ok(Spawned {
+                child,
+                cleanup: None,
+                helper: Some(Helper { link, shell }),
+            })
+        }
         Err(error) => {
             // Whatever answered, and did not end, is not the helper.
             if error.kind() != ErrorKind::UnexpectedEof {
@@ -298,6 +316,75 @@ fn start_helped(
             Err(error)
         }
     }
+}
+
+/// How long to wait for a helper that is being killed to be reaped.
+const KILLED: Duration = Duration::from_millis(200);
+
+/// Whether `child` ended by a signal, waiting briefly for one that is
+/// being killed: only such a helper can have started the shell without
+/// saying so.
+fn killed_by_signal(child: &mut Child) -> bool {
+    let until = std::time::Instant::now() + KILLED;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.signal().is_some(),
+            Ok(None) if std::time::Instant::now() < until => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            _ => return false,
+        }
+    }
+}
+
+/// The shell of a helper that was killed before the server learned its
+/// pid: the group leader that holds the pipes of `child`, which are unique to
+/// this command. `None` when no such process runs (it ended already).
+fn orphaned_shell(child: &Child) -> Option<u32> {
+    let pipes: Vec<String> = [
+        (child.stdout.as_ref()).map(|pipe| rustix::fs::fstat(pipe).map(|stat| stat.st_ino)),
+        (child.stderr.as_ref()).map(|pipe| rustix::fs::fstat(pipe).map(|stat| stat.st_ino)),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(Result::ok)
+    .map(|inode| format!("pipe:[{inode}]"))
+    .collect();
+    let mut found: Option<(u64, u32)> = None;
+    for entry in std::fs::read_dir("/proc").ok()?.flatten() {
+        let Some(pid) = (entry.file_name().to_str()).and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let holds = std::fs::read_dir(entry.path().join("fd"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|fd| std::fs::read_link(fd.path()).ok())
+            .any(|target| pipes.iter().any(|pipe| target.as_os_str() == pipe.as_str()));
+        if !holds || pid == std::process::id() {
+            continue;
+        }
+        // The shell leads its group; the earliest one started is the shell.
+        if let Some(started) = leader_started(pid)
+            && found.is_none_or(|(first, _)| started < first)
+        {
+            found = Some((started, pid));
+        }
+    }
+    found.map(|(_, pid)| pid)
+}
+
+/// When `pid` started (clock ticks since boot) if it leads its own group.
+fn leader_started(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // After the name: `state ppid pgrp session tty tpgid flags minflt
+    // cminflt majflt cmajflt utime stime cutime cstime priority nice threads
+    // itrealvalue starttime`.
+    let rest: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
+    (rest.get(2)?.parse::<u32>().ok()? == pid)
+        .then(|| rest.get(19)?.parse().ok())
+        .flatten()
 }
 
 /// The pid on the helper's first line.
@@ -610,6 +697,85 @@ mod tests {
             let output = spawned.child.wait_with_output().await.unwrap();
             assert_eq!(output.stdout, b"ran\n", "{helper:?}");
         }
+    }
+
+    /// Kills the pids the command wrote to `pid` files when dropped, so a
+    /// failed test leaves nothing behind.
+    struct Pids(std::path::PathBuf);
+
+    impl Drop for Pids {
+        fn drop(&mut self) {
+            if let Ok(text) = std::fs::read_to_string(self.0.join("shell"))
+                && let Ok(pid) = text.trim().parse::<i32>()
+                && let Some(pid) = Pid::from_raw(pid)
+            {
+                let _ = rustix::process::kill_process_group(pid, Signal::KILL);
+                let _ = rustix::process::kill_process(pid, Signal::KILL);
+            }
+        }
+    }
+
+    /// Whether process `pid` runs (a zombie does not count).
+    fn runs(pid: u32) -> bool {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => !stat
+                .rsplit_once(')')
+                .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z')),
+            Err(_) => false,
+        }
+    }
+
+    /// A helper (a shell that starts the program with `setsid`, so it leads
+    /// a group) that starts the program, then writes `report` and kills itself: what a
+    /// command that kills its parent at once does to the real helper, before
+    /// or after the helper's first line.
+    fn killed_helper(report: &str) -> ReaperCommand {
+        let script = format!("setsid \"$@\" & {report} kill -9 $$");
+        ReaperCommand {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), script.into()],
+        }
+    }
+
+    /// The command ends with the call, and ran once, whichever side of
+    /// the helper's first line the helper was killed on.
+    async fn a_killed_helper_leaves_nothing(report: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let _pids = Pids(dir.path().to_path_buf());
+        let env = BTreeMap::from([("PATH".to_owned(), "/usr/bin:/bin".to_owned())]);
+        let command = sh("echo $$ > shell; echo run >> ran; exec sleep 20");
+        let helper = killed_helper(report);
+        let spawned = start_shell(Some(&helper), command, dir.path(), &env, false).unwrap();
+        let shell = (spawned.helper.as_ref())
+            .and_then(|helper| helper.shell)
+            .expect("the shell is found though its helper was killed");
+        let cancel = CancellationToken::new();
+        let finished = run(spawned.into(), Duration::from_secs(10), &cancel)
+            .await
+            .unwrap();
+        assert_eq!(finished.end, End::Exited(Exit::Signal(9)));
+        let until = Instant::now() + Duration::from_secs(3);
+        while runs(shell) && Instant::now() < until {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!runs(shell), "the shell {shell} ran on");
+        let ran = std::fs::read_to_string(dir.path().join("ran")).unwrap_or_default();
+        assert!(ran.lines().count() <= 1, "the command ran twice: {ran:?}");
+    }
+
+    /// The helper is killed after it started the shell and before its first
+    /// line: the call must not rerun the command without a helper, and the
+    /// shell must end.
+    #[tokio::test]
+    async fn a_helper_killed_before_its_first_line_leaves_no_shell_and_no_rerun() {
+        a_killed_helper_leaves_nothing("").await;
+    }
+
+    /// The helper is killed right after its first line, so the shell may no
+    /// longer be its child when the server checks it.
+    #[tokio::test]
+    async fn a_helper_killed_right_after_its_first_line_leaves_no_shell() {
+        a_killed_helper_leaves_nothing("echo $! >&0;").await;
     }
 
     /// The helper's first line must be a pid that can lead a group.

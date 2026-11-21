@@ -94,9 +94,9 @@ Your previous response failed structured-output validation: <error>
 Respond again with ONLY a JSON object matching the required schema.
 ```
 
-`<error>` là `JSON parse error: ...`, `Expected a JSON object, got array`, hoặc
-`Schema validation error:` theo sau là một dòng `- path: message` cho mỗi vi
-phạm.
+`<error>` là `JSON parse error: ...`, `Expected a JSON object, got array`,
+`JSON nests deeper than 64 levels`, hoặc `Schema validation error:` theo sau là
+một dòng `- path: message` cho mỗi vi phạm.
 
 Khi các lần retry đã dùng hết, hoặc với `structured_output_retries` bằng 0, câu
 trả lời không đạt kế tiếp kết thúc run: một event `verification` với

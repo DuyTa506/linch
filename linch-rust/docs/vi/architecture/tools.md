@@ -453,7 +453,11 @@ Chương trình phụ trợ đến từ đâu:
 - Một chương trình phụ trợ không khởi động được, hoặc thoát mà không khởi động shell (một tệp
   thực thi không biết `--linch-reaper`, chẳng hạn), bị bỏ qua với một cảnh báo trong log: lệnh
   chạy như khi không có nó. Một chương trình phụ trợ không trả lời trong 5 s làm lời gọi thất
-  bại, vì nó có thể đang chạy lệnh.
+  bại, vì nó có thể đang chạy lệnh. Một chương trình phụ trợ bị signal giết trước khi server
+  kiểm tra dòng pid (một lệnh giết process cha của nó ngay lập tức có thể làm vậy) không bị bỏ
+  qua, vì shell có thể đang chạy: lệnh không chạy lại, và server tìm shell là group leader đang
+  giữ pipe stdout hoặc stderr của lệnh, thứ không process nào khác có, rồi giết group của nó
+  như với chương trình phụ trợ bị giết muộn hơn. Lời gọi khi đó kết thúc với signal đó.
 - Server không tin dòng pid: trước khi gửi signal tới group đó nó đọc `/proc/<pid>/stat` và
   yêu cầu một process con của chương trình phụ trợ, dẫn đầu group riêng (hoặc một process đã
   kết thúc, không được gửi signal). Mọi pid khác làm lời gọi thất bại, group của chương trình

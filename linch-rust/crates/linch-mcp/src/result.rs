@@ -177,6 +177,19 @@ mod tests {
     }
 
     /// A kept image's MIME type is the server's text too: the bound counts it.
+    /// A tool's metadata goes into the journal, which the stores read back
+    /// only up to a depth limit; a server's result fixes the shape of the
+    /// metadata, so nothing it sends makes it deeper.
+    #[test]
+    fn the_metadata_is_shallow_whatever_the_server_sends() {
+        let nested = json!({"a": {"a": {"a": {"a": 1}}}});
+        let mut result = CallToolResult::success(vec![ContentBlock::image("AAAA", "image/png")]);
+        result.structured_content = Some(nested);
+        let output = tool_result(result).unwrap();
+        let metadata = JsonValue::Object(output.metadata);
+        assert!(linch_core::check_depth(&metadata, 3).is_ok());
+    }
+
     #[test]
     fn the_images_metadata_is_bounded_whatever_the_mime_type() {
         let mime = "m".repeat(255);

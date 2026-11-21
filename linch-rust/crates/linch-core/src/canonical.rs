@@ -53,6 +53,7 @@ mod float;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use depth::journalable;
 pub use depth::{JOURNAL_MAX_DEPTH, MAX_ENCODE_DEPTH, check_depth};
 pub use digest::{Digest, digest, digest_with_domain};
 pub use encode::to_canonical_string;

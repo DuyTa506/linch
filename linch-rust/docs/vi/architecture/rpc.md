@@ -165,7 +165,7 @@ docs (`lib.rs:518-569`) và các mã nằm trong `crates/linch-rpc/src/error.rs:
 | -32049 | `WORKFLOW_NO_JOURNAL` | `WorkflowNoJournal` | `workflow.start` với câu trả lời `resume` cho một workflow mà journal trống (nó chưa chạy ở đây, hoặc journal của agent memory-store nằm ở connection khác). Chưa claim gì |
 | -32050 | `RUN_PRUNED` | `RunPruned` (một `RunNotFound`) | Một run mà đợt retention đã xóa (bản ghi và event của nó): `run.events`, resume, approve, answer, steer, cancel hoặc report của nó. `data.run_id`. Server nhớ run đã bị xóa trong thời hạn tombstone (mặc định 30 ngày); sau đó cùng lần đọc ấy là `-32021`. Một id sai luôn là `-32021` |
 | -32051 | `EVENT_TOO_LARGE` | `EventTooLarge` (một `RunError`) | `run.events` gặp một envelope không vừa một message cùng khung của nó; `data.seq` là seq của nó. Hỏi lại với `after_seq` bằng giá trị đó để đi tiếp sau nó; bản thân envelope nằm trong các kho lưu trữ |
-| -32052 | `EVENTS_TOO_LONG` | `RpcError` | `run.events` không có `limit` lẫn `max_bytes` thấy nhiều envelope hơn một message chứa được, và không trả lời gì; `data.seq` là envelope đầu tiên không vừa. Hỏi lại với `max_bytes` hoặc `limit` để đọc run theo trang; `Agent.events` luôn làm vậy |
+| -32052 | `EVENTS_TOO_LONG` | `RpcError` | `run.events` không có `limit` lẫn `max_bytes` thấy nhiều envelope hơn một message chứa được, và không trả lời gì; `data.seq` là envelope đầu tiên không vừa. Hỏi lại với `max_bytes` hoặc `limit` để đọc run theo trang; `Agent.events` làm vậy khi server có `run_events_paging` |
 
 `RunError::ContractMismatch {expected, found}` nêu tên các contract từ phía của agent:
 `expected` là contract của agent đã cố tiếp tục run, `found` là contract được lưu cùng
@@ -495,7 +495,7 @@ từ chối ngay khi không khớp, thay vì lỗi ở method đầu tiên có h
 
 ```json
 {"server_version": "0.1.1", "protocol": 1, "contract_version": 1,
- "capabilities": ["cache_isolation", "exec_idempotency_key", "provider_info", "run_steer", "schedule", "workflow", "workflow_step_abandon"],
+ "capabilities": ["cache_isolation", "exec_idempotency_key", "provider_info", "run_events_paging", "run_steer", "schedule", "workflow", "workflow_step_abandon"],
  "backends": ["local", "sandbox", "docker", "remote"],
  "limits": {"max_message_bytes": 16777216, "default_max_runs": 16}}
 ```
@@ -505,7 +505,7 @@ từ chối ngay khi không khớp, thay vì lỗi ở method đầu tiên có h
 | `server_version` | Bản phát hành (`CARGO_PKG_VERSION`) | Mỗi bản phát hành |
 | `protocol` | `PROTOCOL_VERSION` (`protocol/info.rs`) | Một thay đổi mà client cũ sẽ đọc sai: member bị bỏ hoặc đổi kiểu, nghĩa bị đổi. Thêm method, member, capability hoặc param tùy chọn không làm tăng nó |
 | `contract_version` | `linch::CONTRACT_VERSION` (`linch-core/src/agent/spec.rs`) | Digest run contract của một agent không đổi bị đổi, nên các run đã lưu không resume được nữa. Nó không là đầu vào của digest; một test golden (`the_contract_version_names_the_golden_digest`) ghép nó với một digest cố định |
-| `capabilities` | Tên các tính năng tùy chọn (`CAPABILITIES`) | Thêm một tính năng; một tên không bao giờ được dùng lại cho hành vi khác |
+| `capabilities` | Tên các tính năng tùy chọn (`CAPABILITIES`), như `run_events_paging`: `run.events` nhận `limit` và `max_bytes` và trả `next_after_seq`. Server không có nó từ chối các trường đó (`-32602`), nên `Agent.events` chỉ gửi `max_bytes` khi `info.has("run_events_paging")`, nếu không thì đọc cả run trong một lần gọi | Thêm một tính năng; một tên không bao giờ được dùng lại cho hành vi khác |
 | `backends` | Các execution backend mà bản build cài đặt (`BACKENDS`: `sandbox` chỉ trên Linux) | Thêm một backend. Backend có chạy được trên host hay được cấp cho tenant hay không được quyết định ở `agent.open` |
 | `limits` | `max_message_bytes` (`MAX_LINE_BYTES`), `default_max_runs` (`DEFAULT_MAX_RUNS`) | Các hằng đổi |
 

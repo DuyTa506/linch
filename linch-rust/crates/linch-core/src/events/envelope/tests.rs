@@ -346,3 +346,201 @@ proptest::proptest! {
         proptest::prop_assert_eq!(decoded.ignorable, declared || envelope.event.contains_ignorable());
     }
 }
+
+mod stored {
+    //! What a store writes as JSON text it must read back: whatever the
+    //! assembler keeps of a model's tool call, at any depth it keeps.
+
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::events::kinds::{
+        AssistantEvent, PermissionRequestEvent, PermissionRequestItem, ToolCallEndEvent,
+        ToolCallStartEvent,
+    };
+    use crate::message::{ContentBlock, Message, Role, ToolResultBlock};
+    use crate::provider::{
+        MessageEndEvent, MessageStartEvent, ProviderEvent, ToolUseEndEvent, ToolUseInputDeltaEvent,
+        ToolUseStartEvent, assemble,
+    };
+    use crate::run::{Checkpoint, Phase, StopReason};
+    use crate::usage::Usage;
+
+    /// The deepest input `serde_json` parses: one more level is refused.
+    const PARSED: usize = 127;
+
+    /// `objects` objects nested in one another around a number.
+    fn nested(objects: usize) -> JsonObject {
+        let text = format!("{}1{}", "{\"a\":".repeat(objects), "}".repeat(objects));
+        serde_json::from_str(&text).expect("serde_json parses it")
+    }
+
+    /// The response the assembler makes of a model's call whose input nests
+    /// `objects` objects, and whether it kept the call as valid.
+    fn assembled(objects: usize) -> (Message, bool) {
+        let input = format!("{}1{}", "{\"a\":".repeat(objects), "}".repeat(objects));
+        let events = [
+            ProviderEvent::MessageStart(MessageStartEvent { model: "m".into() }),
+            ProviderEvent::ToolUseStart(ToolUseStartEvent {
+                id: "c1".into(),
+                name: "Read".into(),
+            }),
+            ProviderEvent::ToolUseInputDelta(ToolUseInputDeltaEvent {
+                id: "c1".into(),
+                json_delta: input,
+            }),
+            ProviderEvent::ToolUseEnd(ToolUseEndEvent { id: "c1".into() }),
+            ProviderEvent::MessageEnd(MessageEndEvent {
+                stop_reason: StopReason::ToolUse,
+                usage: None,
+                provider_metadata: None,
+            }),
+        ];
+        let message = assemble(events)
+            .expect("a broken call is not a stream error")
+            .message;
+        let valid = message.tool_uses().all(|call| call.raw_input.is_none());
+        (message, valid)
+    }
+
+    fn envelope(event: Event) -> Envelope {
+        Envelope {
+            v: WIRE_VERSION,
+            seq: 1,
+            run_id: RunId::from("r1".to_owned()),
+            ts_ms: 7,
+            ignorable: false,
+            event,
+        }
+    }
+
+    /// The Postgres codec of an event: `to_value().to_string()`, then
+    /// `str::parse`.
+    fn event_reads_back(event: Event) -> bool {
+        let stored = envelope(event).to_value().unwrap().to_string();
+        stored.parse::<Envelope>().is_ok()
+    }
+
+    fn checkpoint(phase: Phase) -> Checkpoint {
+        Checkpoint {
+            turn: 0,
+            usage: Usage::default(),
+            usage_complete: true,
+            usage_by_model: BTreeMap::new(),
+            cost_usd: None,
+            session_len: 1,
+            phase,
+        }
+    }
+
+    /// The Postgres codec of a checkpoint and of a session message.
+    fn checkpoint_reads_back(message: &Message) -> bool {
+        let phase = Phase::AssistantReceived {
+            message: message.clone(),
+            stop_reason: StopReason::ToolUse,
+            retry_feedback: None,
+        };
+        let stored = serde_json::to_string(&checkpoint(phase)).unwrap();
+        serde_json::from_str::<Checkpoint>(&stored).is_ok()
+    }
+
+    fn message_reads_back(message: &Message) -> bool {
+        let stored = serde_json::to_string(message).unwrap();
+        serde_json::from_str::<Message>(&stored).is_ok()
+    }
+
+    #[test]
+    fn a_tool_input_the_assembler_keeps_reads_back_as_an_event_a_checkpoint_and_a_message() {
+        let mut kept = 0;
+        for objects in 1..=PARSED + 1 {
+            let (message, valid) = assembled(objects);
+            if !valid {
+                continue;
+            }
+            kept = objects;
+            let event = Event::Assistant(AssistantEvent {
+                message: message.clone(),
+                stop_reason: StopReason::ToolUse,
+            });
+            assert!(event_reads_back(event), "the event of {objects} objects");
+            assert!(
+                checkpoint_reads_back(&message),
+                "the checkpoint of {objects}"
+            );
+            assert!(message_reads_back(&message), "the message of {objects}");
+        }
+        // The limit itself is kept, so the loop above is not empty.
+        assert_eq!(kept, crate::JOURNAL_MAX_DEPTH + 1);
+    }
+
+    /// The same input in the other events that carry a call's input: its
+    /// start, the request for its approval, and a tool's metadata.
+    #[test]
+    fn an_input_at_the_journal_depth_limit_reads_back_wherever_an_event_holds_it() {
+        let input = nested(crate::JOURNAL_MAX_DEPTH + 1);
+        let start = Event::ToolCallStart(ToolCallStartEvent {
+            tool_use_id: "c1".into(),
+            tool_name: "Read".into(),
+            input: input.clone(),
+            summary: "Read".into(),
+        });
+        let ask = Event::PermissionRequest(PermissionRequestEvent {
+            requests: vec![PermissionRequestItem {
+                tool_use_id: "c1".into(),
+                tool_name: "Read".into(),
+                input: input.clone(),
+                summary: "Read".into(),
+            }],
+        });
+        let end = Event::ToolCallEnd(ToolCallEndEvent {
+            tool_name: "Read".into(),
+            result: ToolResultBlock::text("c1", "done", false),
+            duration_ms: 1,
+            canonical_output: None,
+            metadata: Some(Box::new(input)),
+            error_code: None,
+            cache_hit: false,
+        });
+        assert!(event_reads_back(start), "tool start");
+        assert!(event_reads_back(ask), "permission request");
+        assert!(event_reads_back(end), "tool end metadata");
+    }
+
+    #[test]
+    fn the_stores_nest_a_response_a_few_levels_deeper_than_the_assembler_reads_it() {
+        // Why `JOURNAL_MAX_DEPTH` is far below `PARSED`: the extra levels
+        // the stores add around an input the parser still takes.
+        let call = crate::ToolUseBlock::new("c1", "Read", nested(PARSED));
+        let message = Message::new(Role::Assistant, vec![ContentBlock::ToolUse(call)]);
+        assert!(!message_reads_back(&message));
+    }
+}
+
+/// The deepest input the assembler keeps, in a
+/// child's response wrapped by every allowed level of subagent nesting,
+/// still reads back from the stored text.
+#[test]
+fn the_deepest_kept_input_reads_back_under_the_deepest_subagent_nesting() {
+    let text = format!(
+        "{}1{}",
+        "{\"a\":".repeat(crate::JOURNAL_MAX_DEPTH + 1),
+        "}".repeat(crate::JOURNAL_MAX_DEPTH + 1)
+    );
+    let input: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let mut event = json!({
+        "type": "assistant", "stop_reason": "tool_use",
+        "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "c1", "name": "Read", "input": input},
+        ]},
+    });
+    for _ in 0..super::MAX_SUBAGENT_DEPTH {
+        event = json!({
+            "type": "subagent", "child_run_id": "child-1", "tool_use_id": "call-1", "ts_ms": 5,
+            "event": event,
+        });
+    }
+    let wire = json!({"v": WIRE_VERSION, "seq": 1, "run_id": "r1", "ts_ms": 7, "event": event});
+    let envelope: Envelope = serde_json::from_value(wire).expect("the wire form is taken");
+    let stored = envelope.to_value().unwrap().to_string();
+    assert!(stored.parse::<Envelope>().is_ok(), "does not read back");
+}

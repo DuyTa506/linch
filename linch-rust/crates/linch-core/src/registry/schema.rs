@@ -7,6 +7,7 @@ use jsonschema::{ValidationError, Validator};
 use thiserror::Error;
 
 use super::RegistryError;
+use crate::canonical::{JOURNAL_MAX_DEPTH, check_depth};
 use crate::json::{JsonObject, JsonValue};
 use crate::provider::ToolDefinition;
 use crate::tool::{Tool, ToolOutput, ToolOutputError};
@@ -70,6 +71,16 @@ impl RegisteredTool {
         let input_schema = tool.input_schema().clone();
         if input_schema.get("type").and_then(JsonValue::as_str) != Some("object") {
             return Err(RegistryError::InputNotObject { name });
+        }
+        // The definition goes into the session's log, which the stores read
+        // back only up to the journal's depth limit.
+        let too_deep = check_depth(&JsonValue::Object(input_schema.clone()), JOURNAL_MAX_DEPTH);
+        if too_deep.is_err() {
+            return Err(RegistryError::InvalidSchema {
+                name,
+                kind: SchemaKind::Input,
+                message: format!("nests deeper than {JOURNAL_MAX_DEPTH} levels"),
+            });
         }
         let input = compile(&name, SchemaKind::Input, &input_schema)?;
         let output = tool
@@ -277,6 +288,50 @@ mod tests {
                 kind: SchemaKind::Output,
                 ..
             }
+        ));
+    }
+
+    /// An input schema of `objects` objects nested in one another under an
+    /// unknown keyword, which a schema may hold.
+    fn nested_schema(objects: usize) -> JsonValue {
+        let mut schema = json!({"type": "object"});
+        for _ in 1..objects {
+            schema = json!({"type": "object", "x": schema});
+        }
+        schema
+    }
+
+    /// A tool's definition goes into the session's log (its frozen prefix,
+    /// or a catalog change notice), which the stores read back only up to
+    /// the journal's depth limit; an MCP server lists a tool's schema.
+    #[test]
+    fn an_input_schema_the_registry_takes_reads_back_in_a_catalog_notice() {
+        use crate::message::{CatalogChangeBlock, ContentBlock, Message, Role};
+        let mut taken = 0;
+        for objects in 1..=130 {
+            let Ok(tool) = compiled(nested_schema(objects), None) else {
+                continue;
+            };
+            taken = objects;
+            let notice = CatalogChangeBlock {
+                text: "changed".into(),
+                added_tools: vec![],
+                removed_tools: vec![],
+                tool_definitions: vec![tool.definition().clone()],
+                skills: vec![],
+                removed_skills: vec![],
+            };
+            let message = Message::new(Role::User, vec![ContentBlock::CatalogChange(notice)]);
+            let stored = serde_json::to_string(&message).unwrap();
+            let read: Result<Message, _> = serde_json::from_str(&stored);
+            assert!(read.is_ok(), "the notice of {objects} objects: {read:?}");
+        }
+        assert_eq!(taken, crate::JOURNAL_MAX_DEPTH + 1);
+        let refused = compiled(nested_schema(taken + 1), None);
+        assert!(matches!(
+            refused.unwrap_err(),
+            RegistryError::InvalidSchema { kind: SchemaKind::Input, ref message, .. }
+                if message == "nests deeper than 64 levels"
         ));
     }
 

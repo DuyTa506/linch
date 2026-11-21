@@ -181,9 +181,7 @@ impl Runner {
         if !replies.is_empty() {
             // A failed write drops the replies: the callers learn the run
             // stopped, and a resent id is read back from what landed.
-            let ready = self.journal.flush().await?;
-            self.event_emit(&ready).await;
-            self.outbox.deliver(ready).await;
+            self.flush_staged().await?;
         }
         for reply in replies {
             let _ = reply.send(Ok(()));

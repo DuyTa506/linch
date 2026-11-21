@@ -16,6 +16,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use jsonschema::Validator;
 
+use crate::canonical::{JOURNAL_MAX_DEPTH, check_depth};
 use crate::events::Envelope;
 use crate::events::Event;
 use crate::events::kinds::VerificationAction;
@@ -92,6 +93,11 @@ impl OutputContract {
     pub(crate) fn check_value(&self, value: JsonValue) -> Result<JsonObject, String> {
         if !value.is_object() {
             return Err(format!("Expected a JSON object, got {}", kind(&value)));
+        }
+        // The answer goes into the run's `result`, which the stores read
+        // back only up to the journal's depth limit.
+        if check_depth(&value, JOURNAL_MAX_DEPTH).is_err() {
+            return Err(format!("JSON nests deeper than {JOURNAL_MAX_DEPTH} levels"));
         }
         if !self.validator.is_valid(&value) {
             let found = violations(&self.validator, &value);
@@ -366,6 +372,48 @@ mod tests {
     fn a_json_object_that_fits_is_the_value() {
         let value = invoice().check(" {\"total\": 4.5}\n").unwrap();
         assert_eq!(JsonValue::Object(value), json!({"total": 4.5}));
+    }
+
+    /// An answer of `objects` objects nested in one another.
+    fn nested(objects: usize) -> String {
+        format!("{}1{}", "{\"a\":".repeat(objects), "}".repeat(objects))
+    }
+
+    /// The answers the contract accepts end up in the run's `result` event,
+    /// which the stores must read back: the parser takes 127 levels, the
+    /// store of the event only a few less.
+    #[test]
+    fn an_answer_the_contract_accepts_reads_back_in_the_result_event() {
+        let open = contract(json!({"type": "object"})).unwrap();
+        let mut accepted = 0;
+        for objects in 1..=128 {
+            let Ok(answer) = open.check(&nested(objects)) else {
+                continue;
+            };
+            accepted = objects;
+            let envelope = json!({
+                "v": crate::WIRE_VERSION, "seq": 1, "run_id": "r1", "ts_ms": 1,
+                "event": {
+                    "type": "result", "subtype": "success", "stop_reason": "end_turn",
+                    "duration_ms": 1, "total_usage": {"input_tokens": 0, "output_tokens": 0},
+                    "usage_complete": true, "structured_output": answer,
+                },
+            });
+            let wire = serde_json::from_value::<crate::Envelope>(envelope);
+            let stored = wire.unwrap().to_value().unwrap().to_string();
+            assert!(
+                stored.parse::<crate::Envelope>().is_ok(),
+                "the answer of {objects} objects does not read back"
+            );
+        }
+        assert_eq!(accepted, crate::JOURNAL_MAX_DEPTH + 1);
+    }
+
+    #[test]
+    fn an_answer_nested_past_the_journal_depth_limit_says_so() {
+        let open = contract(json!({"type": "object"})).unwrap();
+        let refused = open.check(&nested(crate::JOURNAL_MAX_DEPTH + 2)).err();
+        assert_eq!(refused.as_deref(), Some("JSON nests deeper than 64 levels"));
     }
 
     #[test]

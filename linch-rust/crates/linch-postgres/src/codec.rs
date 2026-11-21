@@ -293,4 +293,78 @@ mod tests {
         assert!(matches!(to_u64(-1, "seq"), Err(StoreError::Backend(_))));
         assert_eq!(to_i64(7, "seq").unwrap(), 7);
     }
+
+    /// The response the assembler makes of a model's call whose input nests
+    /// `objects` objects, when it kept the call as valid.
+    fn assembled(objects: usize) -> Option<Message> {
+        let text = format!("{}1{}", "{\"a\":".repeat(objects), "}".repeat(objects));
+        let input: serde_json::Value = serde_json::from_str(&text).ok()?;
+        let turn = linch_core::provider::scripted::TurnBuilder::new("m")
+            .tool_call("call_1", "Read", &input)
+            .build();
+        let message = linch_core::assemble(turn.events).unwrap().message;
+        let valid = message.tool_uses().all(|call| call.raw_input.is_none());
+        valid.then_some(message)
+    }
+
+    /// Whatever the stores encode they must decode: a row that does not
+    /// read back makes its run or its session unreadable. The model's call
+    /// is kept by the assembler up to the journal's depth limit.
+    #[test]
+    fn a_tool_input_the_assembler_keeps_reads_back() {
+        let mut unreadable = Vec::new();
+        let mut kept = 0;
+        for objects in 1..=128 {
+            let Some(message) = assembled(objects) else {
+                continue;
+            };
+            kept = objects;
+            let entry = LogEntry::Message(MessageEntry {
+                message: Arc::new(message.clone()),
+                visible: true,
+                historical: true,
+            });
+            let stored = encode_entry(&entry).unwrap();
+            if decode_entry(&stored).is_err() {
+                unreadable.push(("entry", objects));
+            }
+            let checkpoint = linch_core::Checkpoint {
+                turn: 0,
+                usage: linch_core::Usage::default(),
+                usage_complete: true,
+                usage_by_model: Default::default(),
+                cost_usd: None,
+                session_len: 1,
+                phase: linch_core::Phase::AssistantReceived {
+                    message: message.clone(),
+                    stop_reason: linch_core::StopReason::ToolUse,
+                    retry_feedback: None,
+                },
+            };
+            let stored = encode_checkpoint(&checkpoint).unwrap();
+            if decode_checkpoint(&stored).is_err() {
+                unreadable.push(("checkpoint", objects));
+            }
+            let envelope = Envelope {
+                v: linch_core::events::WIRE_VERSION,
+                seq: 1,
+                run_id: RunId::new("r1"),
+                ts_ms: 0,
+                ignorable: false,
+                event: linch_core::Event::Assistant(linch_core::events::kinds::AssistantEvent {
+                    message,
+                    stop_reason: linch_core::StopReason::ToolUse,
+                }),
+            };
+            let (_, texts) = encode_events(&[envelope]).unwrap();
+            if decode_event(&texts[0]).is_err() {
+                unreadable.push(("event", objects));
+            }
+        }
+        assert!(
+            unreadable.is_empty(),
+            "written but unreadable: {unreadable:?}"
+        );
+        assert_eq!(kept, linch_core::JOURNAL_MAX_DEPTH + 1, "the limit is kept");
+    }
 }

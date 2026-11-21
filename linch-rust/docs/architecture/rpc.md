@@ -163,7 +163,7 @@ docs (`lib.rs:518-569`) and the codes in `crates/linch-rpc/src/error.rs:24-183`.
 | -32049 | `WORKFLOW_NO_JOURNAL` | `WorkflowNoJournal` | `workflow.start` with `resume` answers for a workflow whose journal holds nothing (it never ran here, or a memory-store agent's journal lived in another connection). Nothing was claimed |
 | -32050 | `RUN_PRUNED` | `RunPruned` (a `RunNotFound`) | A run a retention pass deleted (its record and events): `run.events`, a resume, approve, answer, steer, cancel or report of it. `data.run_id`. The server remembers a pruned run for its tombstone period (30 days by default); after that the same read is `-32021`. A wrong id is always `-32021` |
 | -32051 | `EVENT_TOO_LARGE` | `EventTooLarge` (a `RunError`) | `run.events` met one envelope that cannot fit a message with its framing; `data.seq` is its seq. Ask again with `after_seq` set to it to continue after it; the envelope itself is in the stores |
-| -32052 | `EVENTS_TOO_LONG` | `RpcError` | `run.events` without `limit` and `max_bytes` found more envelopes than one message holds, and answers nothing; `data.seq` is the first that did not fit. Ask again with `max_bytes` or `limit` to read the run in pages; `Agent.events` always does |
+| -32052 | `EVENTS_TOO_LONG` | `RpcError` | `run.events` without `limit` and `max_bytes` found more envelopes than one message holds, and answers nothing; `data.seq` is the first that did not fit. Ask again with `max_bytes` or `limit` to read the run in pages; `Agent.events` does when the server has `run_events_paging` |
 
 `RunError::ContractMismatch {expected, found}` names its contracts from the
 agent's side: `expected` is the contract of the agent that tried to
@@ -515,7 +515,7 @@ method whose shape changed.
 
 ```json
 {"server_version": "0.1.1", "protocol": 1, "contract_version": 1,
- "capabilities": ["cache_isolation", "exec_idempotency_key", "provider_info", "run_steer", "schedule", "workflow", "workflow_step_abandon"],
+ "capabilities": ["cache_isolation", "exec_idempotency_key", "provider_info", "run_events_paging", "run_steer", "schedule", "workflow", "workflow_step_abandon"],
  "backends": ["local", "sandbox", "docker", "remote"],
  "limits": {"max_message_bytes": 16777216, "default_max_runs": 16}}
 ```
@@ -525,7 +525,7 @@ method whose shape changed.
 | `server_version` | The release (`CARGO_PKG_VERSION`) | Every release |
 | `protocol` | `PROTOCOL_VERSION` (`protocol/info.rs`) | A change an older client would misread: a member removed or retyped, a meaning changed. Adding a method, member, capability or optional param does not bump it |
 | `contract_version` | `linch::CONTRACT_VERSION` (`linch-core/src/agent/spec.rs`) | The run contract digest of an unchanged agent changes, so stored runs no longer resume. It is not an input of the digest; a golden test (`the_contract_version_names_the_golden_digest`) pairs it with a fixed digest |
-| `capabilities` | Names of optional features (`CAPABILITIES`) | A feature is added; a name is never reused for other behavior |
+| `capabilities` | Names of optional features (`CAPABILITIES`), such as `run_events_paging`: `run.events` takes `limit` and `max_bytes` and answers `next_after_seq`. A server without it refuses those members (`-32602`), so `Agent.events` sends `max_bytes` only when `info.has("run_events_paging")` and otherwise reads the whole run in one call | A feature is added; a name is never reused for other behavior |
 | `backends` | The execution backends the build implements (`BACKENDS`: `sandbox` only on Linux) | A backend is added. Whether one works on the host or is allowed to a tenant is decided at `agent.open` |
 | `limits` | `max_message_bytes` (`MAX_LINE_BYTES`), `default_max_runs` (`DEFAULT_MAX_RUNS`) | The constants change |
 

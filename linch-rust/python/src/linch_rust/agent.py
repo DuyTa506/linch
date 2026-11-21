@@ -13,6 +13,7 @@ from ._rpc import Connection, RunQueue
 from .config import OutputSchema, Principal, ToolChoice
 from .errors import EventsIncomplete, LinchError
 from .events import Envelope, decode_envelope
+from .info import ServerInfo
 from .monitor import (
     CustomScorer,
     EvalCase,
@@ -26,7 +27,7 @@ from .run import Observer, Run
 from .schedule import CHECK_IN, Job, Schedule
 
 # The bytes of one `run.events` page `Agent.events` asks for (the most the
-# server gives a page).
+# server gives a page), from a server with the `run_events_paging` capability.
 _EVENTS_PAGE_BYTES = 8 * 1024 * 1024
 
 
@@ -110,11 +111,14 @@ class Agent:
         contract: str,
         observer: Callable[[], Observer | None] | None = None,
         skipped: Sequence[Skipped] = (),
+        info: ServerInfo | None = None,
     ) -> None:
         self.handle = handle
         self.contract = contract
         self.skipped = list(skipped)
         self._conn = conn
+        # What the server can do; `None` (unknown) asks it for nothing optional.
+        self._info = info
         # Makes the tracer of each run, resume or approve; None when untraced.
         self._observer = observer
         # One per call cancelled before its answer: cancels the run it started.
@@ -372,8 +376,10 @@ class Agent:
         """Return a run's durable envelopes with a seq above `after_seq`, in order.
 
         Stream-only kinds (`partial_assistant`, `tool_progress`, `hook`,
-        `cache_diagnostic`) are never replayed. The server answers a long run
-        in pages; this reads them all, one call per page.
+        `cache_diagnostic`) are never replayed. A server with the
+        `run_events_paging` capability answers a long run in pages; this reads
+        them all, one call per page. A server without it answers the whole run
+        in one call, or an error when it does not fit one message.
 
         Raises:
             RunError: The stores could not be read, or the run is unknown.
@@ -386,13 +392,15 @@ class Agent:
         envelopes: list[Envelope] = []
         while True:
             # Naming a page is what makes the server answer with a cursor: a
-            # request without limits is the whole run or an error.
-            params = {
+            # request without limits is the whole run or an error. A server
+            # without the capability refuses the member it does not know.
+            params: dict[str, Any] = {
                 "agent": self.handle,
                 "run_id": run_id,
                 "after_seq": after_seq,
-                "max_bytes": _EVENTS_PAGE_BYTES,
             }
+            if self._info is not None and self._info.has("run_events_paging"):
+                params["max_bytes"] = _EVENTS_PAGE_BYTES
             try:
                 answer = await self._conn.request("run.events", params)
             except EventsIncomplete as error:

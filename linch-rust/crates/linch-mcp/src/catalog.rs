@@ -227,6 +227,30 @@ mod tests {
         assert!(catalog.skipped().is_empty());
     }
 
+    /// A server lists the schema; the session's log must hold it, so a
+    /// schema nested past the journal's depth limit is skipped like any
+    /// other refused tool.
+    #[test]
+    fn a_tool_with_a_schema_nested_past_the_journal_limit_is_skipped() {
+        let registry = ToolRegistry::new();
+        let link = link();
+        let mut catalog = Catalog::default();
+        let mut deep = spec("deep", "Deep");
+        let mut nested = serde_json::json!({});
+        for _ in 0..=linch_core::JOURNAL_MAX_DEPTH {
+            nested = serde_json::json!({"x": nested});
+        }
+        deep.input_schema.insert("x".into(), nested);
+        catalog.sync(&registry, &link, vec![deep, spec("ok", "Ok")]);
+        assert_eq!(catalog.names(), ["mcp__s__ok"]);
+        let skipped = catalog.skipped();
+        assert!(
+            matches!(&skipped[..], [one] if one.remote_name == "deep"
+                && matches!(one.reason, RegistryError::InvalidSchema { .. })),
+            "{skipped:?}"
+        );
+    }
+
     #[test]
     fn a_tool_changed_into_an_invalid_one_is_removed() {
         let registry = ToolRegistry::new();

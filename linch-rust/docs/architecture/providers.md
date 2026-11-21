@@ -85,12 +85,14 @@ consumer of the stream and enforces the rules on every push; `assemble`
   calls of 32 tokens each.
 
 A call whose concatenated input is not a JSON object (malformed, cut off,
-an array) does not fail the stream: the block keeps an empty `input` and the
+an array) or nests deeper than `JOURNAL_MAX_DEPTH` (64 levels; the stores
+write a deeper response but cannot read it back) does not fail the stream: the block keeps an empty `input` and the
 model's text in `ToolUseBlock.raw_input`, the scheduler plans it as an error
 (`invalid JSON arguments for <tool>: <parse error>; received: <first 200
 characters>`, before hooks and permission) and never runs it, and the model
 reads that error and calls again. The provider request builders replay only
 `input`, so a provider sees `{}` for it; the raw text stays in the log. The
+`provider_metadata` of a response nested past the same limit is left out. The
 one exception is a `max_tokens` stop: a call still open, or with input that is
 not a whole object, is dropped instead. The turn
 then stops with `max_tokens` if no call is left and `tool_use` if finished

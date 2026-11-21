@@ -277,6 +277,7 @@ async with Server.connect(SOCKET, token=TOKEN) as server:
     info.contract_version    # 1: phiên bản digest của run contract
     info.has("cache_isolation")   # một tính năng tùy chọn, theo tên
     info.has("exec_idempotency_key")   # exec.start mang khóa của lời gọi
+    info.has("run_events_paging")   # run.events nhận limit và max_bytes
     info.backends            # ("local", "sandbox", "docker", "remote")
     info.max_message_bytes   # 16777216
     info.default_max_runs    # 16

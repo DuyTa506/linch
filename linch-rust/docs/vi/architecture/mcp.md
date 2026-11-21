@@ -76,7 +76,8 @@ Khi kết nối, và ở mỗi lần relist, mỗi tool được liệt kê tr�
   `(no content)`. Một kết quả `isError` trở thành `ToolOutputError` với mã
   `mcp_tool_error` và cùng văn bản.
 
-Một tool mà registry từ chối (tên quá dài, tên đã bị chiếm, schema không hợp lệ) bị
+Một tool mà registry từ chối (tên quá dài, tên đã bị chiếm, schema không hợp lệ, input
+schema lồng sâu hơn 64 cấp) bị
 bỏ qua và được báo bởi `McpServer::skipped()`; nó không làm kết nối thất bại
 (`crates/linch-mcp/src/catalog.rs:10-18`).
 
