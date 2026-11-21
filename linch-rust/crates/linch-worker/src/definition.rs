@@ -146,11 +146,6 @@ pub(crate) async fn check(
     Ok(())
 }
 
-/// The advisory lock key of the writers counting `counted` under `root`.
-fn lock_key(counted: Counted, root: &str) -> String {
-    format!("linch_worker_cap:{}:{root}", counted.name())
-}
-
 /// Take the transaction-scoped advisory lock that serializes the writers
 /// counting `counted` under `root`. A transaction may take it again.
 pub(crate) async fn lock(
@@ -159,23 +154,10 @@ pub(crate) async fn lock(
     root: &str,
 ) -> Result<(), WorkerError> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(lock_key(counted, root))
+        .bind(format!("linch_worker_cap:{}:{root}", counted.name()))
         .execute(&mut **tx)
         .await?;
     Ok(())
-}
-
-/// [`lock`] without waiting: whether another transaction does not hold it.
-pub(crate) async fn try_lock(
-    tx: &mut Transaction<'static, Postgres>,
-    counted: Counted,
-    root: &str,
-) -> Result<bool, WorkerError> {
-    let taken = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(lock_key(counted, root))
-        .fetch_one(&mut **tx)
-        .await?;
-    Ok(taken)
 }
 
 /// Whether `cap`'s root already holds its `max`, counted inside `tx`

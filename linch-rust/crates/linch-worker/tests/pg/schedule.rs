@@ -412,9 +412,9 @@ async fn the_schedule_cap_counts_the_whole_root() {
 
 /// Run a start job per session in `sessions`, and wait until they end.
 /// A capped fire whose root's lock another transaction keeps (a slow
-/// `enqueue` of that root) does not wait for it: that root's schedule stays
-/// due while another root's fires in the same call, and the next call fires
-/// the first once.
+/// `enqueue` of that root) gives up on it after the lock wait: that root's
+/// schedule stays due while another root's fires in the same call, and the
+/// next call fires the first once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_fire_whose_root_lock_is_held_elsewhere_waits_for_the_next_call() {
     let Some(db) = TestDb::new("fire_lock").await else {

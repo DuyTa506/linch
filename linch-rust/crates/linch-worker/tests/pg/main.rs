@@ -4,6 +4,7 @@ mod common;
 mod drain;
 mod exclusive;
 mod faults;
+mod fire_contention;
 mod fixtures;
 mod isolation;
 mod one_job;

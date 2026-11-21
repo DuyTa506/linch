@@ -132,7 +132,9 @@ The wait for that lock is bounded. The dequeue's transaction sets
 answers "nothing taken" for that queue, as for an empty one: the poll goes on
 to its other queues and asks this one again at the next poll. A process that
 is slow or paused inside a transaction that holds the lock therefore delays
-a worker's poll by at most 250 ms per such queue instead of stopping it.
+a worker's poll by at most 250 ms per such queue instead of stopping it; a
+queue that skips is logged at `info`. The lock key names no schema, so a
+holder in another schema of the same database counts.
 
 ## Leases and fencing
 
@@ -289,15 +291,21 @@ has passed too, all in one transaction:
   `schedule:{id}:{fire time}`; with one, every fire is a new run in it.
 - A stored timing that no longer parses pauses its schedule (logged)
   instead of blocking the others.
-- **A held root lock does not stall the worker.** The batch's capped roots
-  are locked with `pg_try_advisory_xact_lock`, which never waits. A root
-  whose lock another transaction holds (a slow `enqueue` of that root) is
-  left out of this call: its schedules stay due and the next call (the
-  worker's next poll) fires each of them once, while the other roots of the
-  batch fire now. The transaction also sets `lock_timeout` to 250 ms
-  (`begin_bounded`), so any other lock wait in it ends the call with 0 and
-  nothing kept. The worker polls its queues right after, so no queue waits
-  on the holder.
+- **A held root lock delays the worker by at most 750 ms.** The batch's
+  capped roots are locked in sorted order with a blocking advisory lock, so
+  the fire waits its turn behind `enqueue` calls of the root like they wait
+  for each other, but the transaction sets `lock_timeout` to 250 ms
+  (`begin_bounded`). A root whose lock is still held then (a slow `enqueue`
+  of that root) makes the round roll back with nothing kept, and the call
+  selects again without that root: its schedules take no place in the
+  64-schedule batch, stay due, and fire once in a later call, while the
+  other roots fire in this one. A call makes at most three rounds
+  (`FIRE_ROUNDS`), so it waits at most 750 ms, and roots still held after
+  that wait for the next call; any other lock wait in the call ends it with
+  0 and nothing kept. A root that stays held skips on every call, logged at
+  `info`. The worker polls its queues right after, so no queue waits on the
+  holder. The advisory lock keys name no schema: a holder in another schema
+  of the same database counts as a holder.
 
 ### Caps
 
@@ -308,7 +316,7 @@ for `enqueue` and for a schedule's fire. The count runs in the insert's
 transaction after a transaction-scoped advisory lock on the root, so writers
 on any server count each other's rows; past it, `LimitReached`, or for a
 fire a skip. `enqueue` and `create_schedule` wait for the lock as long as it
-takes; only the worker's fire gives up (see above).
+takes; only the worker's fire gives up, after 250 ms (see above).
 
 ## Agent definitions
 

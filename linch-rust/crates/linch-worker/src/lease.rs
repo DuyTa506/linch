@@ -158,7 +158,7 @@ pub(crate) async fn dequeue(
 ) -> Result<Option<JobLease>, WorkerError> {
     match take(pool, queue, served, owner, timeout).await {
         Err(error) if lock_unavailable(&error) => {
-            tracing::debug!(%queue, "a lock is held elsewhere; skipping the queue this poll");
+            tracing::info!(%queue, "a lock is held elsewhere; skipping the queue this poll");
             Ok(None)
         }
         taken => taken,

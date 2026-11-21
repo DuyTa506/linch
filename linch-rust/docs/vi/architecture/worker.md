@@ -131,7 +131,9 @@ câu lệnh bắt đầu nó (`begin_bounded` trong `lib.rs`, không thêm round
 hết hạn (SQLSTATE `55P03`) trả lời "không lấy gì" cho hàng đợi đó, như với một hàng đợi
 trống: lượt poll chuyển sang các hàng đợi khác và hỏi lại hàng đợi này ở lượt poll kế tiếp.
 Một tiến trình chậm hoặc bị tạm dừng trong một transaction đang giữ lock vì thế chỉ làm lượt
-poll của worker chậm tối đa 250 ms cho mỗi hàng đợi như vậy, thay vì làm nó dừng hẳn.
+poll của worker chậm tối đa 250 ms cho mỗi hàng đợi như vậy, thay vì làm nó dừng hẳn; hàng đợi
+bị bỏ qua được ghi log mức `info`. Khóa không chứa tên schema, nên bên giữ ở một schema khác
+của cùng database cũng được tính.
 
 ## Lease và fencing
 
@@ -280,13 +282,18 @@ kích hoạt này, hoặc sau bây giờ khi tick đó cũng đã qua, tất c�
   `schedule:{id}:{fire time}`; có `session_id`, mỗi lần kích hoạt là một run mới trong đó.
 - Một timing đã lưu mà không còn parse được sẽ tạm dừng lịch của nó (có ghi log) thay vì
   chặn các lịch khác.
-- **Một lock root đang bị giữ không làm worker đứng.** Các root bị giới hạn của batch được
-  khóa bằng `pg_try_advisory_xact_lock`, không bao giờ chờ. Một root mà transaction khác đang
-  giữ lock (một `enqueue` chậm của root đó) bị loại khỏi lời gọi này: các lịch của nó vẫn đến
-  hạn và lời gọi kế tiếp (lượt poll kế tiếp của worker) kích hoạt từng lịch đúng một lần, còn
-  các root khác của batch kích hoạt ngay. Transaction cũng đặt `lock_timeout` là 250 ms
-  (`begin_bounded`), nên mọi lần chờ lock khác trong đó kết thúc lời gọi với 0 và không giữ lại
-  gì. Worker poll các hàng đợi ngay sau đó, nên không hàng đợi nào phải chờ bên đang giữ lock.
+- **Một lock root đang bị giữ làm worker chậm tối đa 750 ms.** Các root bị giới hạn của batch
+  được khóa theo thứ tự đã sắp xếp bằng advisory lock có chờ, nên lần kích hoạt chờ đến lượt
+  sau các lời gọi `enqueue` của root, như chúng chờ nhau, nhưng transaction đặt `lock_timeout`
+  là 250 ms (`begin_bounded`). Một root mà lúc đó lock vẫn bị giữ (một `enqueue` chậm của root
+  đó) làm vòng đó rollback và không giữ lại gì, và lời gọi chọn lại mà không có root đó: các lịch
+  của nó không chiếm chỗ trong batch 64 lịch, vẫn đến hạn, và kích hoạt đúng một lần ở một lời
+  gọi sau, còn các root khác kích hoạt ngay trong lời gọi này. Một lời gọi chạy tối đa ba vòng
+  (`FIRE_ROUNDS`), nên chờ tối đa 750 ms, và các root vẫn bị giữ sau đó chờ lời gọi kế tiếp; mọi
+  lần chờ lock khác trong lời gọi kết thúc nó với 0 và không giữ lại gì. Một root cứ bị giữ sẽ bị
+  bỏ qua ở mỗi lời gọi, có ghi log mức `info`. Worker poll các hàng đợi ngay sau đó, nên không
+  hàng đợi nào phải chờ bên đang giữ lock. Khóa advisory không chứa tên schema: bên giữ ở một
+  schema khác của cùng database cũng được tính là bên giữ.
 
 ### Cap
 
@@ -296,7 +303,7 @@ tenant) được giữ: số lịch cho `create_schedule`, số job chưa xong c
 chạy trong transaction của lần insert sau một advisory lock phạm vi transaction trên root,
 nên các writer trên mọi server đếm các hàng của nhau; vượt quá thì `LimitReached`, hoặc với
 một lần kích hoạt thì bỏ qua. `enqueue` và `create_schedule` chờ lock bao lâu cũng được; chỉ
-lần kích hoạt của worker là bỏ cuộc (xem ở trên).
+lần kích hoạt của worker là bỏ cuộc, sau 250 ms (xem ở trên).
 
 ## Định nghĩa agent
 
